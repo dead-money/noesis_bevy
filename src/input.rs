@@ -5,7 +5,7 @@
 //! [`NoesisInputQueue`] resource. The queue is cloned into the render world
 //! via [`ExtractResource`] each frame; the render-side `apply_noesis_input`
 //! system (defined in `render.rs`) drains it onto the live
-//! [`dm_noesis_runtime::view::View`] just before the frame is driven.
+//! [`noesis_runtime::view::View`] just before the frame is driven.
 //!
 //! # Coordinate handling
 //!
@@ -56,9 +56,9 @@ use bevy::input::{
 use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow, WindowFocused, WindowResized};
 use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use dm_noesis_runtime::view::{Key, MouseButton};
+use noesis_runtime::view::{Key, MouseButton};
 
-use crate::render::NoesisScene;
+use crate::render::NoesisView;
 
 // ── key map ────────────────────────────────────────────────────────────────
 
@@ -132,7 +132,7 @@ impl NoesisInputQueue {
 
 /// Scale a logical-px point on the window into Noesis view-pixel space.
 /// Returns `None` when the window has zero size (startup race).
-fn to_view_coords(window: &Window, scene: &NoesisScene, x: f32, y: f32) -> Option<(i32, i32)> {
+fn to_view_coords(window: &Window, scene: &NoesisView, x: f32, y: f32) -> Option<(i32, i32)> {
     let ww = window.width();
     let wh = window.height();
     if ww <= 0.0 || wh <= 0.0 {
@@ -162,14 +162,16 @@ fn forward_cursor_moved(
     mut queue: ResMut<NoesisInputQueue>,
     mut last: ResMut<LastPointer>,
     window: Single<&Window, With<PrimaryWindow>>,
-    scene: Option<Res<NoesisScene>>,
+    views: Query<&NoesisView>,
 ) {
-    let Some(scene) = scene else {
+    // Migration scaffolding (Phase 1a step ii): pointer input maps through the
+    // first view's coordinate space. Per-view pointer routing is Phase 3A.
+    let Some(scene) = views.iter().next() else {
         reader.read(); // drop events so we don't replay them later
         return;
     };
     for ev in reader.read() {
-        if let Some((x, y)) = to_view_coords(&window, &scene, ev.position.x, ev.position.y) {
+        if let Some((x, y)) = to_view_coords(&window, scene, ev.position.x, ev.position.y) {
             last.x = x;
             last.y = y;
             last.valid = true;
@@ -302,14 +304,14 @@ fn forward_touch(
     mut reader: MessageReader<TouchInput>,
     mut queue: ResMut<NoesisInputQueue>,
     window: Single<&Window, With<PrimaryWindow>>,
-    scene: Option<Res<NoesisScene>>,
+    views: Query<&NoesisView>,
 ) {
-    let Some(scene) = scene else {
+    let Some(scene) = views.iter().next() else {
         reader.read();
         return;
     };
     for ev in reader.read() {
-        let Some((x, y)) = to_view_coords(&window, &scene, ev.position.x, ev.position.y) else {
+        let Some((x, y)) = to_view_coords(&window, scene, ev.position.x, ev.position.y) else {
             continue;
         };
         let id = ev.id;
@@ -330,29 +332,31 @@ fn forward_focus(mut reader: MessageReader<WindowFocused>, mut queue: ResMut<Noe
     }
 }
 
-/// Snap `NoesisScene.size` to the window's physical pixel size on resize.
-/// Makes the `NoesisNode` blit effectively 1:1 and brings the
+/// Snap each [`NoesisView`]'s size to the window's physical pixel size on
+/// resize. Makes the `NoesisNode` blit effectively 1:1 and brings the
 /// cursor-coord ratio in `to_view_coords` down to just the scale factor.
 ///
-/// Runs on the main app — the render-world clone of `NoesisScene` is
-/// overwritten each frame via [`ExtractResource`], so the source of truth
-/// has to live here. The render side picks up the new size on the next
-/// frame's `ensure_scene`, which detects the mismatch and rebuilds the
-/// intermediate texture + re-calls `View::set_size`.
+/// Runs on the main app — the render-world clone of each [`NoesisView`] is
+/// overwritten each frame via `ExtractComponent`, so the source of truth has to
+/// live here. The render side picks up the new size on the next frame's
+/// `ensure_scene`, which detects the mismatch and rebuilds the intermediate
+/// texture + re-calls `View::set_size`.
 #[allow(clippy::needless_pass_by_value)]
 fn resize_noesis_scene(
     mut reader: MessageReader<WindowResized>,
-    mut scene: Option<ResMut<NoesisScene>>,
+    mut views: Query<&mut NoesisView>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) {
-    let Some(scene) = scene.as_mut() else {
+    if views.is_empty() {
         reader.read();
         return;
-    };
+    }
     for _ev in reader.read() {
         let physical = window.physical_size();
         if physical.x > 0 && physical.y > 0 {
-            scene.size = UVec2::new(physical.x, physical.y);
+            for mut scene in &mut views {
+                scene.size = UVec2::new(physical.x, physical.y);
+            }
         }
     }
 }

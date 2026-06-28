@@ -14,7 +14,7 @@ bevy = { version = "0.18", features = ["debug"] }
 bevy_render = "0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
 dm_noesis_bevy_derive = { path = "./derive" }
-dm_noesis_runtime = { path = "../dm_noesis_runtime" }
+noesis_runtime = { path = "../noesis_runtime" }
 # Image decoding for the ImageBrush loader (Phase 4.E). PNG / JPEG cover the
 # SDK samples (BgTile.png, Aladin/aladin-atlas.png). Add more formats here as
 # scenes demand them.
@@ -32,7 +32,7 @@ pollster = "0.4"
 [lints.rust]
 unsafe_code = "forbid"
 
-# Curated lint set shared with `../dm_noesis_runtime` (originally from
+# Curated lint set shared with `../noesis_runtime` (originally from
 # magicsmoke / hommlet-rust). Prefer this to a blanket `pedantic = warn` —
 # opting into specific lints keeps the signal-to-noise ratio high and makes
 # intent obvious. Unlike the runtime, this crate keeps `unsafe_code = "forbid"`

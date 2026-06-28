@@ -33,11 +33,11 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 
 use dm_noesis_bevy::render_device::WgpuRenderDevice;
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::types::{
     Batch, BlendMode, MinMagFilter, MipFilter, RenderState, SamplerState, Shader, StencilMode,
     TextureFormat, Tile, UniformData, WrapMode,
 };
-use dm_noesis_runtime::render_device::{RenderDevice, RenderTargetDesc, TextureDesc};
+use noesis_runtime::render_device::{RenderDevice, RenderTargetDesc, TextureDesc};
 
 const RT_SIZE: u32 = 512;
 const QUAD: u32 = RT_SIZE / 2;
@@ -49,11 +49,11 @@ fn main() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
     pollster::block_on(run());
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
 
 #[allow(clippy::too_many_lines)]

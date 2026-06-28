@@ -7,7 +7,7 @@
 //! - Installs a [`BevyXamlProvider`] whose backing [`SharedXamlMap`] is
 //!   refreshed each frame from the main world's [`XamlRegistry`] via a
 //!   system running in [`ExtractSchedule`].
-//! - Lazily builds a [`dm_noesis_runtime::view::View`] + intermediate `Rgba8Unorm`
+//! - Lazily builds a [`noesis_runtime::view::View`] + intermediate `Rgba8Unorm`
 //!   texture the first frame the configured XAML URI resolves.
 //! - Drives Noesis (layout, render-tree snapshot, offscreen + onscreen
 //!   render) from a `Render` schedule system — the graph node itself only
@@ -28,7 +28,7 @@
 //! then the provider's. We enforce this by holding every Noesis handle
 //! in [`NoesisRenderState`] and implementing [`Drop`] explicitly.
 //!
-//! [`Registered`]: dm_noesis_runtime::render_device::Registered
+//! [`Registered`]: noesis_runtime::render_device::Registered
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -39,29 +39,24 @@ use bevy::prelude::*;
 use bevy_render::{
     Render, RenderApp, RenderSystems,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_graph::{
         NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
     },
     renderer::{RenderContext, RenderDevice, RenderQueue},
     view::ViewTarget,
 };
-use dm_noesis_runtime::events::{
+use noesis_runtime::events::{
     ClickSubscription, KeyDownSubscription, subscribe_click, subscribe_keydown,
 };
-use dm_noesis_runtime::view::{FrameworkElement, Key, View};
+use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
-use crate::focus::SharedFocusQueue;
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
-use crate::geometry::SharedGeometryQueue;
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
-use crate::items::{ItemsBinding, NoesisItemsSources};
+use crate::items::ItemsBinding;
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
-use crate::text::{SharedTextChangedQueue, SharedTextWriteQueue};
-use crate::viewmodel::{AttachTarget, NoesisViewModels, SharedVmChangedQueue, VmEntry};
-use crate::visibility::SharedVisibilityQueue;
+use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
 
 /// Color format of the per-view intermediate Noesis paints into. Must match
@@ -69,10 +64,10 @@ use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
 /// the coupling documented rather than sharing the const cross-module.
 const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-fn flags_from(config: &NoesisScene) -> u32 {
+fn flags_from(config: &NoesisView) -> u32 {
     let mut f = 0;
     if config.ppaa {
-        f |= dm_noesis_runtime::view::RenderFlag::Ppaa as u32;
+        f |= noesis_runtime::view::RenderFlag::Ppaa as u32;
     }
     f
 }
@@ -95,10 +90,17 @@ fn is_linear_float(format: wgpu::TextureFormat) -> bool {
     )
 }
 
-fn create_intermediate(
-    device: &wgpu::Device,
-    size: UVec2,
-) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
+/// One double-buffer slot: a Noesis-painted texture plus its two views (a raw
+/// `Rgba8Unorm` render view + an `Rgba8UnormSrgb` alias for sampling).
+struct Intermediate {
+    // Owned so the GPU allocation outlives the views; not read directly.
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sample_view: wgpu::TextureView,
+}
+
+fn create_intermediate(device: &wgpu::Device, size: UVec2) -> Intermediate {
     // Two views over the same bytes:
     //
     //   `render_view`  — `Rgba8Unorm`. Noesis writes sRGB colours straight
@@ -141,19 +143,24 @@ fn create_intermediate(
         format: Some(INTERMEDIATE_SAMPLE_FORMAT_SRGB),
         ..Default::default()
     });
-    (tex, render_view, sample_view)
+    Intermediate {
+        texture: tex,
+        view: render_view,
+        sample_view,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Scene configuration for the single active Noesis View. Insert as a
-/// [`Resource`] on the main app; the render app receives a copy via
-/// [`ExtractResource`]. Phase 7 generalises to per-entity `NoesisView`
-/// components; one-per-app is enough to bring up `hello_xaml`.
-#[derive(Resource, ExtractResource, Clone, Debug)]
-pub struct NoesisScene {
+/// Per-view scene configuration. Add as a [`Component`] to the camera entity
+/// you also tag with [`NoesisCamera`]; the render app receives a copy on that
+/// entity via [`ExtractComponent`]. One [`NoesisView`] == one live Noesis
+/// `View` + intermediate, composited onto that camera. Multiple tagged
+/// cameras drive multiple independent views.
+#[derive(Component, ExtractComponent, Clone, Debug)]
+pub struct NoesisView {
     /// Asset URI [`XamlRegistry`] keys on — typically the path passed to
     /// `AssetServer::load("foo.xaml")`.
     pub xaml_uri: String,
@@ -198,7 +205,7 @@ pub struct NoesisScene {
     /// Changing this at runtime re-calls `View::set_flags` — no scene
     /// rebuild, no View teardown.
     ///
-    /// [`RenderFlag::Ppaa`]: dm_noesis_runtime::view::RenderFlag::Ppaa
+    /// [`RenderFlag::Ppaa`]: noesis_runtime::view::RenderFlag::Ppaa
     pub ppaa: bool,
     /// `ResourceDictionary` URIs to install as the process-global
     /// application resources (styles, brushes, `ControlTemplate`s), in
@@ -207,7 +214,7 @@ pub struct NoesisScene {
     /// build; later changes are ignored.
     ///
     /// The plugin uses
-    /// [`dm_noesis_runtime::gui::install_app_resources_chain`] — an
+    /// [`noesis_runtime::gui::install_app_resources_chain`] — an
     /// empty parent `ResourceDictionary` is installed up front, then
     /// each leaf is added to `parent.MergedDictionaries` and its
     /// `Source` assigned in order. This ensures cross-sibling
@@ -241,7 +248,7 @@ pub struct NoesisScene {
     pub font_fallbacks: Vec<String>,
 }
 
-impl Default for NoesisScene {
+impl Default for NoesisView {
     fn default() -> Self {
         Self {
             xaml_uri: String::new(),
@@ -261,18 +268,27 @@ impl Default for NoesisScene {
 // Render-world resource: owns Noesis handles + the per-scene instance
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Resource)]
+/// **Non-send** render-world resource: the runtime's `View`/`Renderer`/device
+/// handles are `!Send`/`!Sync` (`NonNull`-based), so this cannot be a regular
+/// Bevy `Resource`. Inserted via `World::insert_non_send_resource` and accessed
+/// through `NonSend`/`NonSendMut`; it stays pinned to the render thread, which
+/// is where every Noesis call must happen. See the lifecycle invariants in
+/// `CLAUDE.md`.
 pub(crate) struct NoesisRenderState {
     device: wgpu::Device,
     shared_map: SharedXamlMap,
     shared_fonts: SharedFontMap,
     shared_images: SharedImageMap,
     // `Option` so `Drop` can take + drop each in the right order.
-    registered_device: Option<dm_noesis_runtime::render_device::Registered>,
-    registered_provider: Option<dm_noesis_runtime::xaml_provider::Registered>,
-    registered_fonts: Option<dm_noesis_runtime::font_provider::Registered>,
-    registered_textures: Option<dm_noesis_runtime::texture_provider::Registered>,
-    scene: Option<SceneInstance>,
+    registered_device: Option<noesis_runtime::render_device::Registered>,
+    registered_provider: Option<noesis_runtime::xaml_provider::Registered>,
+    registered_fonts: Option<noesis_runtime::font_provider::Registered>,
+    registered_textures: Option<noesis_runtime::texture_provider::Registered>,
+    /// Live scenes keyed by the render-world view entity (the camera carrying
+    /// [`NoesisView`] + [`NoesisCamera`]). Built/torn down per entity by
+    /// [`Self::ensure_scene`]; the blit node looks each one up by its view
+    /// entity. Empty until the first `NoesisView`'s XAML resolves.
+    scenes: HashMap<Entity, SceneInstance>,
     /// One-time flag for `SetFontFallbacks`/`SetFontDefaultProperties` —
     /// must fire AFTER Bevy has loaded at least one font into
     /// `SharedFontMap`, because Noesis's `SetFontFallbacks` eagerly runs
@@ -301,7 +317,7 @@ pub(crate) struct NoesisRenderState {
     /// Used by [`Self::sync_keydown_subscriptions`] to detect when a
     /// swallow list has changed and re-bind the C++-side handler with
     /// the new closure (which captures `swallow` by value).
-    last_keydown_swallow: HashMap<String, Vec<Key>>,
+    last_keydown_swallow: HashMap<(Entity, String), Vec<Key>>,
     /// Reusable offscreen view for baking label panels (lazily built). Lives
     /// here so it shares the single registered device and its renderer is torn
     /// down before the device drops — see [`Drop`].
@@ -311,40 +327,38 @@ pub(crate) struct NoesisRenderState {
     /// element's `DataContext`. Stored here (not in [`SceneInstance`]) so a VM
     /// survives scene rebuilds — the attach pass re-binds it to the new view.
     /// Released in [`Drop`] before the registered device, while Noesis is still
-    /// initialized. See [`crate::viewmodel`].
-    view_models: Vec<VmEntry>,
+    /// initialized. Keyed by view entity. See [`crate::viewmodel`].
+    view_models: HashMap<Entity, VmEntry>,
     /// Rust-owned `ItemsSource` collections keyed by `x:Name` (TODO §3). Each
     /// owns an `ObservableCollection` bound to a named `ItemsControl`. Like
     /// [`Self::view_models`] they outlive scene rebuilds (re-bound by the apply
     /// pass) and are released in [`Drop`] before the registered device. See
-    /// [`crate::items`].
-    items_sources: HashMap<String, ItemsBinding>,
-    /// Rust-owned plain-struct view models keyed by the Bevy `Resource`'s
+    /// [`crate::items`]. Keyed by `(view entity, x:Name)` so each view owns its
+    /// list collections.
+    items_sources: HashMap<(Entity, String), ItemsBinding>,
+    /// Rust-owned plain-struct view models keyed by view entity + component
     /// `TypeId` (TODO §3/§9). Each owns a reflected `PlainVmClass` + instance
-    /// bound as a scene element's `DataContext`. Same rebuild/teardown rules as
+    /// bound as that view's element `DataContext`. Same rebuild/teardown rules as
     /// [`Self::view_models`]; released in [`Drop`] before the registered device.
     /// See [`crate::plain_vm`].
-    plain_vms: HashMap<std::any::TypeId, PlainVmEntry>,
+    plain_vms: HashMap<(Entity, std::any::TypeId), PlainVmEntry>,
 }
 
 struct SceneInstance {
     view: View,
     renderer_initialized: bool,
-    // The `Texture` only needs to outlive its views; nothing else reads
-    // the field directly but we own it so the GPU allocation lives.
-    #[allow(dead_code)]
-    intermediate: wgpu::Texture,
-    /// `Rgba8Unorm` view — handed to Noesis via `set_onscreen_target` each
-    /// frame. Noesis writes sRGB-encoded byte values straight through.
-    intermediate_view: wgpu::TextureView,
-    /// `Rgba8UnormSrgb` alias — used by the blit sampler when `ViewTarget`
-    /// is sRGB, so the stored bytes go through a lossless sRGB→linear→sRGB
-    /// round-trip instead of getting double-encoded. See `create_intermediate`.
-    intermediate_sample_view: wgpu::TextureView,
+    /// Double-buffered intermediates. Each frame the main thread paints
+    /// `intermediates[write_index]`, publishes it as the view's
+    /// [`NoesisIntermediate`], then flips `write_index`. With Bevy's
+    /// 1-frame-deep pipelined rendering, the render thread blits frame N's
+    /// buffer while the main thread paints frame N+1 into the *other* buffer —
+    /// so the two never touch the same texture and the composite can't tear.
+    intermediates: [Intermediate; 2],
+    write_index: usize,
     size: UVec2,
     built_for_uri: String,
     /// Last render flags written to the view via `View::set_flags`.
-    /// Re-applied only when [`NoesisScene`] changes; avoids the FFI call
+    /// Re-applied only when [`NoesisView`] changes; avoids the FFI call
     /// on every frame.
     applied_flags: u32,
     /// Last DPI scale written via `View::set_scale`. Re-applied only on change,
@@ -393,14 +407,14 @@ impl NoesisRenderState {
         let shared_fonts = SharedFontMap::default();
         let shared_images = SharedImageMap::default();
         let wgpu_rd = WgpuRenderDevice::new(device.clone(), queue);
-        let registered_device = dm_noesis_runtime::render_device::register(wgpu_rd);
+        let registered_device = noesis_runtime::render_device::register(wgpu_rd);
         let xaml_prov = BevyXamlProvider::from_shared(shared_map.clone());
-        let registered_provider = dm_noesis_runtime::xaml_provider::set_xaml_provider(xaml_prov);
+        let registered_provider = noesis_runtime::xaml_provider::set_xaml_provider(xaml_prov);
         let font_prov = BevyFontProvider::from_shared(shared_fonts.clone());
-        let registered_fonts = dm_noesis_runtime::font_provider::set_font_provider(font_prov);
+        let registered_fonts = noesis_runtime::font_provider::set_font_provider(font_prov);
         let texture_prov = BevyTextureProvider::from_shared(shared_images.clone());
         let registered_textures =
-            dm_noesis_runtime::texture_provider::set_texture_provider(texture_prov);
+            noesis_runtime::texture_provider::set_texture_provider(texture_prov);
 
         // Font fallbacks must NOT be installed here. Noesis's
         // `SetFontFallbacks` eagerly invokes `FontProvider::ScanFolder`
@@ -419,73 +433,82 @@ impl NoesisRenderState {
             registered_provider: Some(registered_provider),
             registered_fonts: Some(registered_fonts),
             registered_textures: Some(registered_textures),
-            scene: None,
+            scenes: HashMap::new(),
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
             loaded_app_resources_chain: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
             bake_rig: None,
-            view_models: Vec::new(),
+            view_models: HashMap::new(),
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
         }
     }
 
+    // Migration scaffolding (Phase 1a step ii): the name-keyed bridges
+    // (visibility/layout/text/dp/click/keydown/focus/geometry/view-models/items)
+    // still target the first live scene via `self.scenes.values().next()`
+    // inline. They become per-view-entity components in step ii; until then a
+    // single `NoesisView` is the supported configuration for those bridges.
+
     /// Drain pending view-model registrations from [`NoesisViewModels`]: for
     /// each, register the Noesis class, instantiate it, and wire its change
     /// forwarder to `changed`. Builds happen render-side because Noesis objects
     /// are thread-affine to the `View`. Idempotent on an empty queue.
-    pub(crate) fn register_view_models(
+    /// Build view `entity`'s [`VmEntry`] on first sight (register the Noesis
+    /// class, instantiate, wire the entity-tagged change forwarder). No-op if it
+    /// already exists. Main-thread only.
+    pub(crate) fn ensure_view_model(
         &mut self,
-        vms: &NoesisViewModels,
+        entity: Entity,
+        def: &ViewModelDef,
         changed: &SharedVmChangedQueue,
     ) {
-        let pending = vms.drain_registrations();
-        for (id, def) in pending {
-            match VmEntry::build(id, &def, changed) {
-                Some(entry) => self.view_models.push(entry),
-                None => warn!(
-                    "NoesisViewModels: failed to register/instantiate class {:?} (duplicate name?)",
-                    def.class_name(),
-                ),
+        if self.view_models.contains_key(&entity) {
+            return;
+        }
+        match VmEntry::build(entity, def, changed) {
+            Some(entry) => {
+                self.view_models.insert(entity, entry);
+            }
+            None => warn!(
+                "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
+                def.class_name(),
+            ),
+        }
+    }
+
+    /// Apply queued writes to view `entity`'s view-model instance. Unknown
+    /// property names log a warning. No-op when the entry isn't built yet.
+    pub(crate) fn apply_view_model_writes_for(
+        &mut self,
+        entity: Entity,
+        writes: &[(String, VmValue)],
+    ) {
+        let Some(entry) = self.view_models.get(&entity) else {
+            return;
+        };
+        for (prop, value) in writes {
+            if !entry.write(prop, value) {
+                warn!("NoesisViewModel: view {entity:?} has no property {prop:?}");
             }
         }
     }
 
-    /// Drain pending view-model writes from [`NoesisViewModels`] and apply each
-    /// to its instance's dependency property. Unknown ids / property names log
-    /// a warning and are skipped. Idempotent on an empty queue.
-    pub(crate) fn apply_view_model_writes(&mut self, vms: &NoesisViewModels) {
-        let pending = vms.drain_writes();
-        for (id, prop, value) in pending {
-            let Some(entry) = self.view_models.iter().find(|e| e.id == id) else {
-                warn!("NoesisViewModels: write to unknown view model {id:?}");
+    /// Attach any not-yet-attached view model as its target's `DataContext` in
+    /// its own view's scene. No-op until that view (and any named target) exists;
+    /// retries each frame, and re-attaches after a scene rebuild.
+    pub(crate) fn attach_view_models(&mut self) {
+        for (&entity, entry) in &mut self.view_models {
+            let Some(scene) = self.scenes.get(&entity) else {
                 continue;
             };
-            if !entry.write(&prop, &value) {
-                warn!("NoesisViewModels: view model {id:?} has no property {prop:?}");
-            }
-        }
-    }
-
-    /// Attach any not-yet-attached view model as its target's `DataContext`.
-    /// No-op until the scene's `View` (and any named target) exists; retries
-    /// each frame until the element resolves. Re-attaches after a scene
-    /// rebuild (the URI key changes, or teardown reset the attach state).
-    pub(crate) fn attach_view_models(&mut self) {
-        if self.view_models.is_empty() {
-            return;
-        }
-        let Some(scene) = self.scene.as_ref() else {
-            return;
-        };
-        let Some(content) = scene.view.content() else {
-            return;
-        };
-        let uri = scene.built_for_uri.clone();
-        for entry in &mut self.view_models {
-            if !entry.needs_attach(&uri) {
+            let Some(content) = scene.view.content() else {
+                continue;
+            };
+            let uri = &scene.built_for_uri;
+            if !entry.needs_attach(uri) {
                 continue;
             }
             let target = match entry.target() {
@@ -494,50 +517,62 @@ impl NoesisRenderState {
             };
             let Some(mut element) = target else {
                 warn!(
-                    "NoesisViewModels: attach target for {:?} not found in scene {:?}",
-                    entry.id, scene.built_for_uri,
+                    "NoesisViewModel: attach target for view {:?} not found in scene {:?}",
+                    entity, scene.built_for_uri,
                 );
                 continue;
             };
             if element.set_data_context(entry.instance()) {
-                entry.mark_attached(&uri);
+                entry.mark_attached(uri);
             } else {
-                warn!(
-                    "NoesisViewModels: set_data_context returned false for {:?} \
-                     (target not a FrameworkElement?)",
-                    entry.id,
-                );
+                warn!("NoesisViewModel: set_data_context returned false for view {entity:?}");
             }
         }
     }
 
     /// Drain pending [`NoesisItemsSources`] edits, apply them to per-element
-    /// [`ObservableCollection`](dm_noesis_runtime::binding::ObservableCollection)s
+    /// [`ObservableCollection`](noesis_runtime::binding::ObservableCollection)s
     /// (creating one per `x:Name` on first use), then bind any unbound
     /// collection to its element's `ItemsSource`. The apply step is independent
     /// of the scene (the collection holds the data regardless); binding waits
     /// until the named element exists and re-binds after a scene rebuild.
-    pub(crate) fn apply_items_sources(&mut self, requests: &NoesisItemsSources) {
-        for (name, op) in requests.drain() {
-            crate::items::apply_op(&mut self.items_sources, name, op);
+    /// Reconcile view `entity`'s [`NoesisItems`] component. When `changed`, set
+    /// each named element's collection to the desired item list (creating a
+    /// collection per `(entity, name)` on first use, pruning names no longer
+    /// present). Every frame, bind any unbound collection to its element's
+    /// `ItemsSource` — handles first resolution and re-binding after a rebuild.
+    pub(crate) fn apply_items_for(
+        &mut self,
+        entity: Entity,
+        sources: &HashMap<String, Vec<String>>,
+        changed: bool,
+    ) {
+        if changed {
+            // Prune this view's collections whose name was removed.
+            self.items_sources
+                .retain(|(ent, name), _| *ent != entity || sources.contains_key(name));
+            for (name, items) in sources {
+                self.items_sources
+                    .entry((entity, name.clone()))
+                    .or_default()
+                    .set(items);
+            }
         }
-        if self.items_sources.is_empty() {
-            return;
-        }
-        let Some(scene) = self.scene.as_ref() else {
+
+        let Some(scene) = self.scenes.get(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
         let uri = scene.built_for_uri.clone();
-        for (name, binding) in &mut self.items_sources {
-            if !binding.needs_bind(&uri) {
+        for ((ent, name), binding) in &mut self.items_sources {
+            if *ent != entity || !binding.needs_bind(&uri) {
                 continue;
             }
             let Some(mut element) = content.find_name(name) else {
                 warn!(
-                    "NoesisItemsSources: x:Name {:?} not found in scene {:?}",
+                    "NoesisItems: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
                 );
                 continue;
@@ -545,77 +580,77 @@ impl NoesisRenderState {
             if element.set_items_source(binding.collection()) {
                 binding.mark_bound(&uri);
             } else {
-                warn!(
-                    "NoesisItemsSources: element {:?} is not an ItemsControl; \
-                     set_items_source skipped",
-                    name,
-                );
+                warn!("NoesisItems: element {name:?} is not an ItemsControl; skipped");
             }
         }
     }
 
-    /// Ensure a plain-struct view model is registered + instantiated, apply any
-    /// pending field snapshot (Rust→UI), and attach it as its target's
-    /// `DataContext` once the element exists. The metadata is passed in (not
-    /// generic) so one method serves every VM type. See [`crate::plain_vm`].
+    /// Reconcile view `entity`'s plain-struct view model of type `type_id`:
+    /// register + instantiate on first sight, apply a pending field snapshot
+    /// (Rust→UI), attach it as its target's `DataContext` once the view + element
+    /// exist (re-attaching after a rebuild), and return any queued two-way edits
+    /// (UI→Rust) for the caller to apply back into the component. The metadata is
+    /// passed in (not generic) so one method serves every VM type. See
+    /// [`crate::plain_vm`].
     pub(crate) fn sync_plain_vm(
         &mut self,
+        entity: Entity,
         type_id: std::any::TypeId,
         type_name: &str,
         props: &[(&'static str, crate::plain_vm::PlainType)],
         target: &AttachTarget,
-        set_sink: &crate::plain_vm::SetSink,
         snapshot: Option<Vec<crate::plain_vm::PlainValue>>,
-    ) {
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.plain_vms.entry(type_id) {
-            let Some(entry) = PlainVmEntry::build(
-                type_name,
-                props,
-                target.clone(),
-                std::sync::Arc::clone(set_sink),
-            ) else {
+    ) -> Vec<(u32, crate::plain_vm::PlainValue)> {
+        let key = (entity, type_id);
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.plain_vms.entry(key) {
+            let Some(entry) = PlainVmEntry::build(type_name, props, target.clone()) else {
                 warn!(
                     "NoesisViewModel: failed to register plain VM {type_name:?} (duplicate name?)",
                 );
-                return;
+                return Vec::new();
             };
             slot.insert(entry);
         }
 
-        if let (Some(entry), Some(snapshot)) = (self.plain_vms.get(&type_id), snapshot) {
+        if let (Some(entry), Some(snapshot)) = (self.plain_vms.get(&key), snapshot) {
             entry.apply_snapshot(&snapshot);
         }
 
-        let Some(scene) = self.scene.as_ref() else {
-            return;
-        };
-        let Some(content) = scene.view.content() else {
-            return;
-        };
-        let uri = scene.built_for_uri.clone();
-        let Some(entry) = self.plain_vms.get_mut(&type_id) else {
-            return;
-        };
-        if !entry.needs_attach(&uri) {
-            return;
+        // Attach as DataContext once this view's scene + target element exist;
+        // re-attach after a rebuild. Disjoint field borrows (`scenes` vs
+        // `plain_vms`) keep the borrow checker happy.
+        if let Some(scene) = self.scenes.get(&entity)
+            && let Some(content) = scene.view.content()
+        {
+            let uri = scene.built_for_uri.clone();
+            if let Some(entry) = self.plain_vms.get_mut(&key)
+                && entry.needs_attach(&uri)
+            {
+                let element = match entry.target() {
+                    AttachTarget::Root => scene.view.content(),
+                    AttachTarget::Named(name) => content.find_name(name),
+                };
+                match element {
+                    Some(mut element) => {
+                        if !entry.attach_to(&mut element, &uri) {
+                            warn!(
+                                "NoesisViewModel: set_data_context returned false for \
+                                 {type_name:?} (target not a FrameworkElement?)",
+                            );
+                        }
+                    }
+                    None => warn!(
+                        "NoesisViewModel: attach target for {type_name:?} not found in scene {:?}",
+                        scene.built_for_uri,
+                    ),
+                }
+            }
         }
-        let element = match entry.target() {
-            AttachTarget::Root => scene.view.content(),
-            AttachTarget::Named(name) => content.find_name(name),
-        };
-        let Some(mut element) = element else {
-            warn!(
-                "NoesisViewModel: attach target for {type_name:?} not found in scene {:?}",
-                scene.built_for_uri,
-            );
-            return;
-        };
-        if !entry.attach_to(&mut element, &uri) {
-            warn!(
-                "NoesisViewModel: set_data_context returned false for {type_name:?} \
-                 (target not a FrameworkElement?)",
-            );
-        }
+
+        self.plain_vms
+            .get(&key)
+            .map(PlainVmEntry::drain_writebacks)
+            .unwrap_or_default()
     }
 
     /// Eagerly register every `(folder, filename)` pair currently in
@@ -666,10 +701,10 @@ impl NoesisRenderState {
             return;
         }
         let refs: Vec<&str> = fallbacks.iter().map(String::as_str).collect();
-        dm_noesis_runtime::font_provider::set_font_fallbacks(&refs);
+        noesis_runtime::font_provider::set_font_fallbacks(&refs);
         // WPF defaults (size=12, weight=Normal=400, stretch=Normal=5,
         // style=Normal=0).
-        dm_noesis_runtime::font_provider::set_font_default_properties(12.0, 400, 5, 0);
+        noesis_runtime::font_provider::set_font_default_properties(12.0, 400, 5, 0);
         info!(
             "NoesisRenderState: font fallbacks installed: {:?}",
             fallbacks,
@@ -692,9 +727,9 @@ impl NoesisRenderState {
     /// Build (or rebuild) the scene instance if the configured URI has
     /// bytes in the shared map and the current instance (if any) is stale.
     /// No-op when the XAML hasn't arrived yet.
-    fn ensure_scene(&mut self, config: &NoesisScene) {
+    fn ensure_scene(&mut self, entity: Entity, config: &NoesisView) {
         if config.xaml_uri.is_empty() {
-            self.teardown_scene();
+            self.teardown_scene(entity);
             return;
         }
 
@@ -702,28 +737,28 @@ impl NoesisRenderState {
         // the View. Rebuild just the intermediate texture; `View::set_size`
         // informs Noesis without invalidating the renderer. Important for
         // desktop window drags, which fire `WindowResized` at every pixel.
-        if let Some(scene) = self.scene.as_mut()
+        if let Some(scene) = self.scenes.get_mut(&entity)
             && scene.built_for_uri == config.xaml_uri
             && scene.size != config.size
         {
             scene.view.set_size(config.size.x, config.size.y);
-            let (tex, render_view, sample_view) = create_intermediate(&self.device, config.size);
-            scene.intermediate = tex;
-            scene.intermediate_view = render_view;
-            scene.intermediate_sample_view = sample_view;
+            scene.intermediates = [
+                create_intermediate(&self.device, config.size),
+                create_intermediate(&self.device, config.size),
+            ];
             scene.size = config.size;
             return;
         }
 
         let up_to_date = self
-            .scene
-            .as_ref()
+            .scenes
+            .get(&entity)
             .is_some_and(|s| s.built_for_uri == config.xaml_uri && s.size == config.size);
         if up_to_date {
             return;
         }
 
-        self.teardown_scene();
+        self.teardown_scene(entity);
 
         // Confirm the XAML is currently present; skip if not.
         {
@@ -825,28 +860,32 @@ impl NoesisRenderState {
         // picked up later via the NoesisInputEvent::Focus pipeline.
         view.activate();
 
-        let (intermediate, intermediate_view, intermediate_sample_view) =
-            create_intermediate(&self.device, config.size);
+        let intermediates = [
+            create_intermediate(&self.device, config.size),
+            create_intermediate(&self.device, config.size),
+        ];
         info!(
             "NoesisRenderState: scene built — view + intermediate at {}x{} for uri {:?}",
             config.size.x, config.size.y, config.xaml_uri,
         );
 
-        self.scene = Some(SceneInstance {
-            view,
-            renderer_initialized: false,
-            intermediate,
-            intermediate_view,
-            intermediate_sample_view,
-            size: config.size,
-            built_for_uri: config.xaml_uri.clone(),
-            applied_flags: initial_flags,
-            applied_scale: config.scale,
-            click_subs: HashMap::new(),
-            keydown_subs: HashMap::new(),
-            text_snapshots: HashMap::new(),
-            dp_snapshots: HashMap::new(),
-        });
+        self.scenes.insert(
+            entity,
+            SceneInstance {
+                view,
+                renderer_initialized: false,
+                intermediates,
+                write_index: 0,
+                size: config.size,
+                built_for_uri: config.xaml_uri.clone(),
+                applied_flags: initial_flags,
+                applied_scale: config.scale,
+                click_subs: HashMap::new(),
+                keydown_subs: HashMap::new(),
+                text_snapshots: HashMap::new(),
+                dp_snapshots: HashMap::new(),
+            },
+        );
     }
 
     /// Reconcile the active `BaseButton::Click` subscription set against
@@ -858,19 +897,20 @@ impl NoesisRenderState {
     /// is `(x:Name, visible)`; missing names log a warning once per drain
     /// and are otherwise skipped. Idempotent — calling with an empty
     /// queue is a no-op.
-    pub(crate) fn apply_visibility_requests(&mut self, requests: &SharedVisibilityQueue) {
-        let pending = requests.drain();
-        if pending.is_empty() {
+    /// Apply view `entity`'s desired element visibility (`x:Name → visible`).
+    /// No-op until the scene exists; missing names warn.
+    pub(crate) fn apply_visibility_for(&mut self, entity: Entity, desired: &HashMap<String, bool>) {
+        if desired.is_empty() {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, visible) in pending {
-            let Some(mut element) = content.find_name(&name) else {
+        for (name, &visible) in desired {
+            let Some(mut element) = content.find_name(name) else {
                 warn!(
                     "NoesisVisibility: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -881,19 +921,19 @@ impl NoesisRenderState {
         }
     }
 
-    pub(crate) fn apply_layout_requests(&mut self, requests: &crate::layout::SharedLayoutQueue) {
-        let pending = requests.drain();
-        if pending.is_empty() {
+    /// Apply view `entity`'s desired element margins (`x:Name → [l, t, r, b]`).
+    pub(crate) fn apply_layout_for(&mut self, entity: Entity, desired: &HashMap<String, [f32; 4]>) {
+        if desired.is_empty() {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, [left, top, right, bottom]) in pending {
-            let Some(mut element) = content.find_name(&name) else {
+        for (name, &[left, top, right, bottom]) in desired {
+            let Some(mut element) = content.find_name(name) else {
                 warn!(
                     "NoesisLayout: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -904,8 +944,16 @@ impl NoesisRenderState {
         }
     }
 
-    pub(crate) fn sync_click_subscriptions(&mut self, watch: &[String], queue: &SharedClickQueue) {
-        let Some(scene) = self.scene.as_mut() else {
+    /// Reconcile view `entity`'s `BaseButton::Click` subscriptions against its
+    /// [`NoesisClickWatch`] component's names. Each callback pushes
+    /// `(entity, name)` so the emitted [`NoesisClicked`] carries the view.
+    pub(crate) fn sync_click_subscriptions_for(
+        &mut self,
+        entity: Entity,
+        watch: &[String],
+        queue: &SharedClickQueue,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
 
@@ -936,12 +984,9 @@ impl NoesisRenderState {
             let queue_handle = queue.clone();
             let captured_name = name.clone();
             let Some(sub) = subscribe_click(&element, move || {
-                queue_handle.push(captured_name.clone());
+                queue_handle.push(entity, captured_name.clone());
             }) else {
-                warn!(
-                    "NoesisClickWatch: element {:?} is not a BaseButton; skipping",
-                    name,
-                );
+                warn!("NoesisClickWatch: element {name:?} is not a BaseButton; skipping");
                 continue;
             };
             scene.click_subs.insert(name.clone(), sub);
@@ -954,12 +999,13 @@ impl NoesisRenderState {
     /// per-entry `swallow` set is captured by the closure so each
     /// callback can mark `out_handled = true` for keys the watcher
     /// wants to suppress propagation on.
-    pub(crate) fn sync_keydown_subscriptions(
+    pub(crate) fn sync_keydown_subscriptions_for(
         &mut self,
+        entity: Entity,
         entries: &[crate::events::KeyDownWatchEntry],
         queue: &SharedKeyDownQueue,
     ) {
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
 
@@ -979,7 +1025,7 @@ impl NoesisRenderState {
             if scene.keydown_subs.contains_key(&entry.name)
                 && self
                     .last_keydown_swallow
-                    .get(&entry.name)
+                    .get(&(entity, entry.name.clone()))
                     .is_some_and(|prev| prev == &entry.swallow)
             {
                 continue;
@@ -1000,60 +1046,58 @@ impl NoesisRenderState {
             let captured_name = entry.name.clone();
             let swallow = entry.swallow.clone();
             let Some(sub) = subscribe_keydown(&element, move |key: Key| {
-                queue_handle.push(captured_name.clone(), key);
+                queue_handle.push(entity, captured_name.clone(), key);
                 swallow.contains(&key)
             }) else {
                 warn!(
                     "NoesisKeyDownWatch: element {:?} is not a UIElement; skipping",
-                    entry.name,
+                    entry.name
                 );
                 continue;
             };
             scene.keydown_subs.insert(entry.name.clone(), sub);
             self.last_keydown_swallow
-                .insert(entry.name.clone(), entry.swallow.clone());
+                .insert((entity, entry.name.clone()), entry.swallow.clone());
         }
 
-        // Prune swallow snapshots whose name is no longer watched.
+        // Prune this view's swallow snapshots whose name is no longer watched
+        // (leave other views' entries intact).
         self.last_keydown_swallow
-            .retain(|k, _| entries.iter().any(|e| e.name == *k));
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }
 
-    /// Apply pending text writes from [`crate::text::NoesisTextRequests`].
-    /// Each entry is `(x:Name, text)`; missing names log a warning, type
-    /// mismatches (target isn't a TextBox/TextBlock) likewise. Idempotent
-    /// on an empty queue.
-    pub(crate) fn apply_text_writes(&mut self, requests: &SharedTextWriteQueue) {
-        let pending = requests.drain();
-        if pending.is_empty() {
+    /// Write each `(x:Name → text)` desired by view `entity`'s [`NoesisText`]
+    /// component onto that view's elements. Missing names / non-text targets log
+    /// a warning. No-op until the view's scene exists.
+    pub(crate) fn apply_text_writes_for(
+        &mut self,
+        entity: Entity,
+        set: &std::collections::HashMap<String, String>,
+    ) {
+        if set.is_empty() {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, text) in pending {
-            let Some(mut element) = content.find_name(&name) else {
+        for (name, text) in set {
+            let Some(mut element) = content.find_name(name) else {
                 warn!(
                     "NoesisText: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
                 );
                 continue;
             };
-            if !element.set_text(&text) {
-                warn!(
-                    "NoesisText: element {:?} is not a TextBox/TextBlock; \
-                     set_text skipped",
-                    name,
-                );
+            if !element.set_text(text) {
+                warn!("NoesisText: element {name:?} is not a TextBox/TextBlock; set_text skipped");
                 continue;
             }
-            // Update the snapshot eagerly so the next read pass doesn't
-            // emit a phantom NoesisTextChanged event for a write we just
-            // pushed ourselves.
-            scene.text_snapshots.insert(name, text);
+            // Update the snapshot eagerly so the read pass doesn't emit a phantom
+            // NoesisTextChanged for a write we just made ourselves.
+            scene.text_snapshots.insert(name.clone(), text.clone());
         }
     }
 
@@ -1061,64 +1105,56 @@ impl NoesisRenderState {
     /// [`crate::geometry::NoesisGeometryRequests`]. Mirrors
     /// [`Self::apply_text_writes`]: drains the queue, looks up each named
     /// element, and assigns its `Path` geometry. Idempotent on empty.
-    pub(crate) fn apply_geometry_writes(&mut self, requests: &SharedGeometryQueue) {
-        let pending = requests.drain();
-        if pending.is_empty() {
+    /// Apply view `entity`'s desired `Path` geometries (`x:Name → points`).
+    pub(crate) fn apply_geometry_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, Vec<[f32; 2]>>,
+    ) {
+        if desired.is_empty() {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, points) in pending {
-            let Some(mut element) = content.find_name(&name) else {
+        for (name, points) in desired {
+            let Some(mut element) = content.find_name(name) else {
                 warn!(
                     "NoesisGeometry: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
                 );
                 continue;
             };
-            if !element.set_path_points(&points) {
-                warn!(
-                    "NoesisGeometry: element {:?} is not a Path (or < 2 points); \
-                     set_path_points skipped",
-                    name,
-                );
+            if !element.set_path_points(points) {
+                warn!("NoesisGeometry: element {name:?} is not a Path (or < 2 points); skipped",);
             }
         }
     }
 
-    /// Apply pending focus requests from
-    /// [`crate::focus::NoesisFocusRequests`]. Mirrors
-    /// [`Self::apply_visibility_requests`]: drains the queue, looks up
-    /// each named element, calls `Focus()`. Idempotent on empty.
-    pub(crate) fn apply_focus_requests(&mut self, requests: &SharedFocusQueue) {
-        let pending = requests.drain();
-        if pending.is_empty() {
+    /// Move keyboard focus to `target` (an `x:Name`) in view `entity`, if set.
+    /// Called when the view's `NoesisFocus` component changes.
+    pub(crate) fn apply_focus_for(&mut self, entity: Entity, target: Option<&str>) {
+        let Some(name) = target else {
             return;
-        }
-        let Some(scene) = self.scene.as_mut() else {
+        };
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
-        for name in pending {
-            let Some(mut element) = content.find_name(&name) else {
-                warn!(
-                    "NoesisFocus: x:Name {:?} not found in scene {:?}",
-                    name, scene.built_for_uri,
-                );
-                continue;
-            };
-            if !element.focus() {
-                warn!(
-                    "NoesisFocus: element {:?} refused focus (non-focusable?)",
-                    name,
-                );
-            }
+        let Some(mut element) = content.find_name(name) else {
+            warn!(
+                "NoesisFocus: x:Name {:?} not found in scene {:?}",
+                name, scene.built_for_uri,
+            );
+            return;
+        };
+        if !element.focus() {
+            warn!("NoesisFocus: element {name:?} refused focus (non-focusable?)");
         }
     }
 
@@ -1127,92 +1163,100 @@ impl NoesisRenderState {
     /// the previous frame's snapshot. Cheap when nothing's changed —
     /// one `find_name` + one text getter per watched name per frame.
     /// Names dropped from the watch get pruned out of the snapshot map.
-    pub(crate) fn poll_text_reads(&mut self, watched: &[String], queue: &SharedTextChangedQueue) {
-        let Some(scene) = self.scene.as_mut() else {
-            return;
+    /// Poll the `Text` of each watched element in view `entity`, returning the
+    /// `(x:Name, text)` pairs that changed since last frame (deduped against the
+    /// per-scene snapshot). The first poll after a name is watched always
+    /// reports (snapshot starts empty), so callers see the current value.
+    pub(crate) fn poll_text_reads_for(
+        &mut self,
+        entity: Entity,
+        watched: &[String],
+    ) -> Vec<(String, String)> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
         };
         scene
             .text_snapshots
             .retain(|k, _| watched.iter().any(|w| w == k));
-
         if watched.is_empty() {
-            return;
+            return changed;
         }
         let Some(content) = scene.view.content() else {
-            return;
+            return changed;
         };
         for name in watched {
             let Some(element) = content.find_name(name) else {
                 continue;
             };
             let current = element.text().unwrap_or_default();
-            match scene.text_snapshots.get(name) {
-                Some(prev) if prev == &current => continue,
-                _ => {}
+            if scene.text_snapshots.get(name) == Some(&current) {
+                continue;
             }
             scene.text_snapshots.insert(name.clone(), current.clone());
-            queue.push(name.clone(), current);
+            changed.push((name.clone(), current));
         }
+        changed
     }
 
-    /// Apply pending generic DP writes from [`crate::dp::NoesisDpRequests`].
-    /// Each entry is `(x:Name, property, value)`; missing names / type
-    /// mismatches log a warning. Mirrors [`Self::apply_text_writes`].
-    pub(crate) fn apply_dp_writes(&mut self, requests: &crate::dp::NoesisDpRequests) {
-        let pending = requests.drain();
-        if pending.is_empty() {
+    /// Apply view `entity`'s desired generic-DP writes, keyed by
+    /// `(x:Name, property)`. Missing names / type mismatches warn.
+    pub(crate) fn apply_dp_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<(String, String), crate::dp::DpValue>,
+    ) {
+        if desired.is_empty() {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, property, value) in pending {
-            let Some(mut element) = content.find_name(&name) else {
+        for ((name, property), value) in desired {
+            let Some(mut element) = content.find_name(name) else {
                 warn!(
                     "NoesisDp: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
                 );
                 continue;
             };
-            if value.write_to(&mut element, &property) {
+            if value.write_to(&mut element, property) {
                 // Update the snapshot eagerly so the read pass doesn't emit a
                 // phantom change for a write we just issued ourselves.
-                scene.dp_snapshots.insert((name, property), value);
+                scene
+                    .dp_snapshots
+                    .insert((name.clone(), property.clone()), value.clone());
             } else {
-                warn!(
-                    "NoesisDp: write to {name:?}.{property:?} failed \
-                     (unknown property or type mismatch)",
-                );
+                warn!("NoesisDp: write to {name:?}.{property:?} failed (unknown property or type)");
             }
         }
     }
 
-    /// Poll watched DPs from [`crate::dp::NoesisDpReadWatch`], pushing a change
-    /// onto `queue` whenever a value differs from the previous frame's
-    /// snapshot. Mirrors [`Self::poll_text_reads`]; entries dropped from the
-    /// watch get pruned from the snapshot map.
-    pub(crate) fn poll_dp_reads(
+    /// Poll view `entity`'s watched DPs, returning `(name, property, value)`
+    /// for each that changed since last frame (deduped against the per-scene
+    /// snapshot). First poll after a watch is added always reports.
+    pub(crate) fn poll_dp_reads_for(
         &mut self,
+        entity: Entity,
         watched: &[crate::dp::DpWatch],
-        queue: &crate::dp::SharedDpChangedQueue,
-    ) {
-        let Some(scene) = self.scene.as_mut() else {
-            return;
+    ) -> Vec<(String, String, crate::dp::DpValue)> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
         };
         scene.dp_snapshots.retain(|(name, property), _| {
             watched
                 .iter()
                 .any(|w| &w.name == name && &w.property == property)
         });
-
         if watched.is_empty() {
-            return;
+            return changed;
         }
         let Some(content) = scene.view.content() else {
-            return;
+            return changed;
         };
         for watch in watched {
             let Some(element) = content.find_name(&watch.name) else {
@@ -1226,15 +1270,16 @@ impl NoesisRenderState {
                 continue;
             }
             scene.dp_snapshots.insert(key, current.clone());
-            queue.push(watch.name.clone(), watch.property.clone(), current);
+            changed.push((watch.name.clone(), watch.property.clone(), current));
         }
+        changed
     }
 
     /// Reapply per-frame tweakables that don't require a scene rebuild (the PPAA
     /// flag and the DPI scale). Called every frame before Noesis is driven.
     /// Cheap: a compare per knob; each FFI call only fires on change.
-    fn apply_live_flags(&mut self, config: &NoesisScene) {
-        let Some(scene) = self.scene.as_mut() else {
+    fn apply_live_flags(&mut self, entity: Entity, config: &NoesisView) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
         };
         let desired = flags_from(config);
@@ -1251,7 +1296,7 @@ impl NoesisRenderState {
         }
     }
 
-    fn install_application_resources_if_needed(&mut self, config: &NoesisScene) {
+    fn install_application_resources_if_needed(&mut self, config: &NoesisView) {
         if config.application_resources.is_empty() {
             return;
         }
@@ -1273,7 +1318,7 @@ impl NoesisRenderState {
                 }
             }
         }
-        if dm_noesis_runtime::gui::install_app_resources_chain(&config.application_resources) {
+        if noesis_runtime::gui::install_app_resources_chain(&config.application_resources) {
             info!(
                 "Installed Noesis application resources chain ({} entries): {:?}",
                 config.application_resources.len(),
@@ -1292,7 +1337,10 @@ impl NoesisRenderState {
     /// the scene hasn't been built yet; events are lost in that case, which
     /// is fine — pre-scene input targets nothing.
     fn apply_input(&mut self, events: &[crate::input::NoesisInputEvent]) {
-        let Some(scene) = self.scene.as_mut() else {
+        // Migration scaffolding (Phase 1a step ii): input routes to the single
+        // primary view. Multi-view input routing (which view owns the pointer)
+        // is Phase 3A interaction work.
+        let Some(scene) = self.scenes.values_mut().next() else {
             return;
         };
         use crate::input::NoesisInputEvent as E;
@@ -1365,39 +1413,63 @@ impl NoesisRenderState {
     /// is populated when the node blits.
     fn drive_frame(&mut self) {
         let time_secs = self.clock_origin.elapsed().as_secs_f64();
-        let Some(scene) = self.scene.as_mut() else {
+        // Split the borrow so each scene can use the shared registered device
+        // while we iterate the scene map mutably.
+        let Self {
+            scenes,
+            registered_device,
+            ..
+        } = self;
+        if scenes.is_empty() {
             return;
-        };
-        let registered_device = self
-            .registered_device
+        }
+        let registered_device = registered_device
             .as_mut()
             .expect("registered_device dropped mid-frame");
 
-        // Lazy renderer init — needs both the live View and the registered
-        // device, so it happens on first frame here (not at scene creation).
-        if !scene.renderer_initialized {
+        for scene in scenes.values_mut() {
+            // Lazy renderer init — needs both the live View and the registered
+            // device, so it happens on first frame here (not at scene creation).
+            if !scene.renderer_initialized {
+                let mut renderer = scene.view.renderer();
+                renderer.init(registered_device);
+                // Don't call renderer.shutdown() here — keep the init live.
+                scene.renderer_initialized = true;
+            }
+
+            // Paint into this frame's back buffer (the one the render thread is
+            // not currently blitting). `publish_intermediates` flips the index.
+            registered_device
+                .device_mut::<WgpuRenderDevice>()
+                .set_onscreen_target(scene.intermediates[scene.write_index].view.clone());
+
+            let _changed = scene.view.update(time_secs);
             let mut renderer = scene.view.renderer();
-            renderer.init(registered_device);
-            // Don't call renderer.shutdown() here — keep the init live.
-            scene.renderer_initialized = true;
+            let _ = renderer.update_render_tree();
+            let _ = renderer.render_offscreen();
+            renderer.render(false, true);
+            // WgpuRenderDevice auto-submits at end_onscreen_render, so the
+            // intermediate is ready to sample by the time the graph runs.
         }
+    }
 
-        // Point the device at the intermediate for this frame's onscreen phase.
-        registered_device
-            .device_mut::<WgpuRenderDevice>()
-            .set_onscreen_target(scene.intermediate_view.clone());
-
-        let _changed = scene.view.update(time_secs);
-        let mut renderer = scene.view.renderer();
-        // UpdateRenderTree latches the latest view snapshot into the
-        // renderer. `render_offscreen` populates any render-target ramps
-        // /glyphs / shadows first; then `render` paints the onscreen
-        // (intermediate) target. `clear=true` — we own the intermediate.
-        let _ = renderer.update_render_tree();
-        let _ = renderer.render_offscreen();
-        renderer.render(false, true);
-        // WgpuRenderDevice auto-submits at end_onscreen_render, so the
-        // intermediate is ready to sample by the time the graph runs.
+    /// Publish each rendered scene's just-painted buffer onto its camera entity
+    /// as a [`NoesisIntermediate`] component (the main→render handoff — only
+    /// `Send + Sync` `TextureView`s cross the boundary), then flip `write_index`
+    /// so the next frame paints the *other* buffer while the render thread blits
+    /// this one.
+    fn publish_intermediates(&mut self, commands: &mut Commands) {
+        for (&entity, scene) in &mut self.scenes {
+            if !scene.renderer_initialized {
+                continue;
+            }
+            let published = &scene.intermediates[scene.write_index];
+            commands.entity(entity).insert(NoesisIntermediate {
+                view: published.view.clone(),
+                sample_view: published.sample_view.clone(),
+            });
+            scene.write_index ^= 1;
+        }
     }
 
     /// Render label template `xaml_uri` — with `fields` applied to named
@@ -1461,7 +1533,7 @@ impl NoesisRenderState {
         if let Some(content) = rig.view.content() {
             for (name, text) in fields {
                 if let Some(mut element) = content.find_name(name) {
-                    element.set_text(text);
+                    let _ = element.set_text(text);
                 } else {
                     warn!("bake_into: x:Name {name:?} not found in {xaml_uri:?}");
                 }
@@ -1501,19 +1573,27 @@ impl NoesisRenderState {
         drop(rig);
     }
 
-    fn teardown_scene(&mut self) {
-        // View models + items sources outlive the scene; mark them detached so
-        // the next apply/attach pass re-binds them against the rebuilt view.
-        for entry in &mut self.view_models {
+    /// Tear down the scene for `entity` (if any), in Noesis's required order:
+    /// `Renderer::shutdown` while the registered device is still alive, then the
+    /// `View` drops. No-op when that entity has no live scene.
+    fn teardown_scene(&mut self, entity: Entity) {
+        // This view's view models / items collections / plain VMs outlive the
+        // scene rebuild; mark them unbound so the next apply pass re-binds
+        // against the new tree. All are keyed by (or filtered to) this entity.
+        if let Some(entry) = self.view_models.get_mut(&entity) {
             entry.reset_attach();
         }
-        for binding in self.items_sources.values_mut() {
-            binding.reset_bind();
+        for ((ent, _), binding) in &mut self.items_sources {
+            if *ent == entity {
+                binding.reset_bind();
+            }
         }
-        for entry in self.plain_vms.values_mut() {
-            entry.reset_attach();
+        for ((ent, _), entry) in &mut self.plain_vms {
+            if *ent == entity {
+                entry.reset_attach();
+            }
         }
-        let Some(mut scene) = self.scene.take() else {
+        let Some(mut scene) = self.scenes.remove(&entity) else {
             return;
         };
         if scene.renderer_initialized {
@@ -1522,23 +1602,41 @@ impl NoesisRenderState {
         }
         drop(scene);
     }
+
+    /// Tear down every live scene (for app/render-state teardown). Same ordered
+    /// shutdown as [`Self::teardown_scene`], applied to all entities.
+    fn teardown_all_scenes(&mut self) {
+        let entities: Vec<Entity> = self.scenes.keys().copied().collect();
+        for entity in entities {
+            self.teardown_scene(entity);
+        }
+    }
 }
 
 impl Drop for NoesisRenderState {
     fn drop(&mut self) {
-        // Release view-model instances + registrations first, while Noesis is
-        // still initialized and the registered device/providers are alive.
-        // (They don't need the device, but releasing them deterministically
-        // here keeps teardown ordering obvious.)
+        // Strict teardown order (Noesis demands it):
+        //   1. scenes (Renderer::shutdown + View drop) FIRST — a `View` holds
+        //      refs to the VM `ClassInstance`s / plain-VM instances it was given
+        //      as `DataContext` and to the `ObservableCollection`s set as
+        //      `ItemsSource`. Those refs must release before we drop the owners,
+        //      or the owner's `ClassRegistration` unregisters the class while a
+        //      live (View-held) instance still references it → use-after-free.
+        //   2. view-models / items / plain-vms — now the last refs; safe to drop.
+        //   3. bake rig, registered device + providers, then global `shutdown()`.
+        // This `Drop` owns `shutdown()` (rather than a separate guard) so the
+        // ordering is guaranteed: Bevy gives no drop order between two main-world
+        // resources, and calling `shutdown()` early deadlocks/crashes.
+        self.teardown_all_scenes();
         self.view_models.clear();
         self.items_sources.clear();
         self.plain_vms.clear();
-        self.teardown_scene();
         self.teardown_bake_rig();
         drop(self.registered_device.take());
         drop(self.registered_provider.take());
         drop(self.registered_fonts.take());
         drop(self.registered_textures.take());
+        noesis_runtime::shutdown();
     }
 }
 
@@ -1732,32 +1830,16 @@ impl BlitPipelineCache {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build [`NoesisRenderState`] the first frame. Now that `NoesisRenderState`
-/// is `Send + Sync` (via unsafe-impls in `dm_noesis_runtime` for the View/Renderer/
+/// is `Send + Sync` (via unsafe-impls in `noesis_runtime` for the View/Renderer/
 /// Registered wrappers), it can live as a regular `Resource` and systems
 /// here use idiomatic `Res`/`ResMut` params.
-#[allow(clippy::needless_pass_by_value)]
-fn init_noesis_render_state(
-    mut commands: Commands,
-    existing: Option<Res<NoesisRenderState>>,
-    render_device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-) {
-    if existing.is_some() {
-        return;
-    }
-    let device = render_device.wgpu_device().clone();
-    let queue = (**queue.0).clone();
-    commands.insert_resource(NoesisRenderState::new(device, queue));
-}
-
-/// Copy the extracted [`XamlRegistry`] into the [`SharedXamlMap`] backing
-/// [`BevyXamlProvider`]. Runs on the render thread after the built-in
-/// extract system has already populated the render-world copy of
-/// [`XamlRegistry`].
+/// Copy the [`XamlRegistry`] into the [`SharedXamlMap`] backing
+/// [`BevyXamlProvider`]. Runs on the main thread (alongside the rest of the
+/// Noesis driving pipeline) directly against the main-world registry.
 #[allow(clippy::needless_pass_by_value)]
 fn sync_xaml_provider_map(
     registry: Option<Res<XamlRegistry>>,
-    state: Option<Res<NoesisRenderState>>,
+    state: Option<NonSend<NoesisRenderState>>,
 ) {
     let (Some(registry), Some(state)) = (registry, state) else {
         return;
@@ -1775,7 +1857,7 @@ fn sync_xaml_provider_map(
 #[allow(clippy::needless_pass_by_value)]
 fn sync_font_provider_map(
     registry: Option<Res<FontRegistry>>,
-    state: Option<ResMut<NoesisRenderState>>,
+    state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let (Some(registry), Some(mut state)) = (registry, state) else {
         return;
@@ -1790,7 +1872,7 @@ fn sync_font_provider_map(
 #[allow(clippy::needless_pass_by_value)]
 fn sync_texture_provider_map(
     registry: Option<Res<ImageRegistry>>,
-    state: Option<Res<NoesisRenderState>>,
+    state: Option<NonSend<NoesisRenderState>>,
 ) {
     let (Some(registry), Some(state)) = (registry, state) else {
         return;
@@ -1798,28 +1880,35 @@ fn sync_texture_provider_map(
     state.shared_images().sync_from(&registry);
 }
 
-/// Ensure a live [`SceneInstance`] exists for the configured URI once its
-/// bytes land in the shared map.
+/// Ensure a live [`SceneInstance`] exists for each [`NoesisView`] entity once
+/// its XAML bytes land in the shared map. Iterates the extracted view entities;
+/// each drives its own scene keyed by entity.
 #[allow(clippy::needless_pass_by_value)]
-fn ensure_noesis_scene(config: Option<Res<NoesisScene>>, state: Option<ResMut<NoesisRenderState>>) {
-    let (Some(config), Some(mut state)) = (config, state) else {
+fn ensure_noesis_scene(
+    views: Query<(Entity, &NoesisView)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
         return;
     };
-    state.ensure_scene(&config);
+    for (entity, config) in &views {
+        state.ensure_scene(entity, config);
+    }
 }
 
-/// Re-apply the per-frame live settings on [`NoesisScene`] (currently
-/// just PPAA). Cheap — compares one `u32` and only fires an FFI call on
-/// change.
+/// Re-apply each view's per-frame live settings (PPAA + DPI scale). Cheap —
+/// compares against the last-applied value and only fires an FFI call on change.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_live_scene_flags(
-    config: Option<Res<NoesisScene>>,
-    state: Option<ResMut<NoesisRenderState>>,
+    views: Query<(Entity, &NoesisView)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
 ) {
-    let (Some(config), Some(mut state)) = (config, state) else {
+    let Some(mut state) = state else {
         return;
     };
-    state.apply_live_flags(&config);
+    for (entity, config) in &views {
+        state.apply_live_flags(entity, config);
+    }
 }
 
 /// Drain [`NoesisInputQueue`] onto the live View. Runs after
@@ -1829,7 +1918,7 @@ fn apply_live_scene_flags(
 #[allow(clippy::needless_pass_by_value)]
 fn apply_noesis_input(
     queue: Option<Res<crate::input::NoesisInputQueue>>,
-    state: Option<ResMut<NoesisRenderState>>,
+    state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let (Some(queue), Some(mut state)) = (queue, state) else {
         return;
@@ -1840,15 +1929,16 @@ fn apply_noesis_input(
     state.apply_input(&queue.events);
 }
 
-/// Drive Noesis for the frame — layout, update render tree, render into
-/// the intermediate. Runs after [`ensure_noesis_scene`] and before the
-/// graph executes.
+/// Drive Noesis for the frame — layout, update render tree, render into each
+/// view's intermediate — then publish each intermediate onto its camera entity
+/// for the render world to blit. Runs last in the main-world driving chain.
 #[allow(clippy::needless_pass_by_value)]
-fn drive_noesis_frame(state: Option<ResMut<NoesisRenderState>>) {
+fn drive_noesis_frame(mut commands: Commands, state: Option<NonSendMut<NoesisRenderState>>) {
     let Some(mut state) = state else {
         return;
     };
     state.drive_frame();
+    state.publish_intermediates(&mut commands);
 }
 
 /// Build a blit pipeline per-ViewTarget-format encountered. Cheap miss +
@@ -1884,26 +1974,47 @@ pub struct NoesisNodeLabel;
 #[derive(Component, ExtractComponent, Clone, Copy, Default, Debug)]
 pub struct NoesisCamera;
 
+/// The painted intermediate for a view, published onto the camera entity by the
+/// main-world driving systems and `ExtractComponent`'d to the render world for
+/// the blit. This is the **only** Noesis data that crosses to the render world —
+/// `View`/`Renderer` stay pinned to the main thread (see [`NoesisRenderState`]).
+/// Both fields are `wgpu::TextureView` (Arc-backed, `Send + Sync`), so the
+/// cross-world hand-off is a cheap clone.
+#[derive(Component, ExtractComponent, Clone)]
+pub struct NoesisIntermediate {
+    /// `Rgba8Unorm` raw view — sampled when the target is plain `Rgba8Unorm`.
+    view: wgpu::TextureView,
+    /// `Rgba8UnormSrgb` alias — sampled when the target is sRGB/HDR so the
+    /// stored bytes round-trip through an sRGB→linear→sRGB decode/encode.
+    sample_view: wgpu::TextureView,
+}
+
+/// Ordering for the main-world Noesis driving pipeline (all on the main thread).
+/// Bridge plugins add their per-view apply systems to [`NoesisSet::Apply`] so
+/// element writes land before the frame is driven. Phases run in listed order.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NoesisSet {
+    /// Copy asset registries into the provider-backing shared maps.
+    Sync,
+    /// Build / resize each [`NoesisView`]'s live scene.
+    Ensure,
+    /// Apply queued element writes + input onto the live views (bridges here).
+    Apply,
+    /// `View::Update` + `Renderer::Render` into each intermediate, then publish.
+    Drive,
+}
+
 /// Shared blit body for both nodes. `overlay = false` overwrites the target 1:1
 /// (Core2d, separate UI camera — Bevy composites it afterwards); `overlay = true`
 /// premultiplied-alpha composites the UI straight onto the camera's finished
 /// scene (Core3d, single-camera).
 fn blit_noesis_ui(
     render_context: &mut RenderContext<'_>,
+    intermediate: &NoesisIntermediate,
     view_target: &ViewTarget,
     world: &World,
     overlay: bool,
 ) -> Result<(), NodeRunError> {
-    let Some(state) = world.get_resource::<NoesisRenderState>() else {
-        return Ok(());
-    };
-    let Some(scene) = state.scene.as_ref() else {
-        return Ok(());
-    };
-    if !scene.renderer_initialized {
-        return Ok(());
-    }
-
     let Some(cache) = world.get_resource::<BlitPipelineCache>() else {
         return Ok(());
     };
@@ -1934,9 +2045,9 @@ fn blit_noesis_ui(
     //   view and skip the gamma decode.
     let decode_srgb = target_format.is_srgb() || is_linear_float(target_format);
     let sample_view = if decode_srgb {
-        &scene.intermediate_sample_view
+        &intermediate.sample_view
     } else {
-        &scene.intermediate_view
+        &intermediate.view
     };
     let bg = blit.bind_group(render_context.render_device().wgpu_device(), sample_view);
 
@@ -1971,16 +2082,16 @@ fn blit_noesis_ui(
 pub struct NoesisNode;
 
 impl ViewNode for NoesisNode {
-    type ViewQuery = &'static ViewTarget;
+    type ViewQuery = (&'static ViewTarget, &'static NoesisIntermediate);
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        view_target: &'w ViewTarget,
+        (view_target, intermediate): (&'w ViewTarget, &'w NoesisIntermediate),
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, view_target, world, false)
+        blit_noesis_ui(render_context, intermediate, view_target, world, false)
     }
 }
 
@@ -1994,16 +2105,24 @@ pub struct NoesisOverlayNodeLabel;
 pub struct NoesisOverlayNode;
 
 impl ViewNode for NoesisOverlayNode {
-    type ViewQuery = (&'static ViewTarget, &'static NoesisCamera);
+    type ViewQuery = (
+        &'static ViewTarget,
+        &'static NoesisCamera,
+        &'static NoesisIntermediate,
+    );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, _marker): (&'w ViewTarget, &'w NoesisCamera),
+        (view_target, _marker, intermediate): (
+            &'w ViewTarget,
+            &'w NoesisCamera,
+            &'w NoesisIntermediate,
+        ),
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, view_target, world, true)
+        blit_noesis_ui(render_context, intermediate, view_target, world, true)
     }
 }
 
@@ -2015,37 +2134,52 @@ pub struct NoesisRenderPlugin;
 
 impl Plugin for NoesisRenderPlugin {
     fn build(&self, app: &mut App) {
+        // The painted intermediate is the only Noesis data the render world sees;
+        // it rides each camera entity. (`NoesisView` + the bridges stay
+        // main-world — Noesis is thread-affine and lives on the main thread.)
         app.add_plugins((
-            ExtractResourcePlugin::<NoesisScene>::default(),
-            // The blit node reads `NoesisCamera` on the render-world view entity.
+            ExtractComponentPlugin::<NoesisIntermediate>::default(),
             ExtractComponentPlugin::<NoesisCamera>::default(),
         ));
 
+        // Main-world driving pipeline — all on the main thread (the one thread
+        // Bevy pins reliably), satisfying Noesis's thread-affinity contract.
+        // Bridge plugins slot their per-view apply systems into `NoesisSet::Apply`.
+        app.configure_sets(
+            PostUpdate,
+            (
+                NoesisSet::Sync,
+                NoesisSet::Ensure,
+                NoesisSet::Apply,
+                NoesisSet::Drive,
+            )
+                .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            (
+                (
+                    sync_xaml_provider_map,
+                    sync_font_provider_map,
+                    sync_texture_provider_map,
+                )
+                    .in_set(NoesisSet::Sync),
+                ensure_noesis_scene.in_set(NoesisSet::Ensure),
+                (apply_live_scene_flags, apply_noesis_input).in_set(NoesisSet::Apply),
+                drive_noesis_frame.in_set(NoesisSet::Drive),
+            ),
+        );
+
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            warn!("RenderApp not present; NoesisRenderPlugin is a no-op");
+            warn!("RenderApp not present; NoesisRenderPlugin compositing is a no-op");
             return;
         };
 
         render_app
             .init_resource::<BlitPipelineCache>()
-            .add_systems(
-                Render,
-                (
-                    init_noesis_render_state,
-                    sync_xaml_provider_map,
-                    sync_font_provider_map,
-                    sync_texture_provider_map,
-                    ensure_noesis_scene,
-                    apply_live_scene_flags,
-                    apply_noesis_input,
-                    drive_noesis_frame,
-                    prepare_noesis_blit,
-                )
-                    .chain()
-                    .in_set(RenderSystems::Prepare),
-            )
-            // Core2d: classic overwrite blit on every 2D view (unchanged). A
-            // host that overlays UI with a `Camera2d` keeps working as before.
+            .add_systems(Render, prepare_noesis_blit.in_set(RenderSystems::Prepare))
+            // Core2d: overwrite blit on any 2D view that has published an
+            // intermediate (the `ViewQuery` gates on `NoesisIntermediate`).
             .add_render_graph_node::<ViewNodeRunner<NoesisNode>>(Core2d, NoesisNodeLabel)
             .add_render_graph_edges(
                 Core2d,
@@ -2071,6 +2205,24 @@ impl Plugin for NoesisRenderPlugin {
                     Node3d::Upscaling,
                 ),
             );
+    }
+
+    /// Create [`NoesisRenderState`] as a **main-world non-send resource**. Runs
+    /// on the main thread (so the resource — and every Noesis handle it owns —
+    /// is pinned there, satisfying thread-affinity) and after `RenderPlugin::finish`
+    /// has populated the render sub-app's `RenderDevice`/`RenderQueue`, which we
+    /// clone out (both are `Arc`-backed, `Send + Sync`).
+    fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app(RenderApp) else {
+            return;
+        };
+        let device = render_app
+            .world()
+            .resource::<RenderDevice>()
+            .wgpu_device()
+            .clone();
+        let queue = (**render_app.world().resource::<RenderQueue>().0).clone();
+        app.insert_non_send_resource(NoesisRenderState::new(device, queue));
     }
 }
 

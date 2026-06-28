@@ -23,13 +23,13 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use dm_noesis_runtime::render_device::types::{Batch, DeviceCaps, Tile};
-use dm_noesis_runtime::render_device::{
+use noesis_runtime::render_device::types::{Batch, DeviceCaps, Tile};
+use noesis_runtime::render_device::{
     RenderDevice, RenderTargetBinding, RenderTargetDesc, RenderTargetHandle, TextureBinding,
     TextureDesc, TextureHandle, TextureRect,
 };
-use dm_noesis_runtime::view::{FrameworkElement, RenderFlag, View};
-use dm_noesis_runtime::xaml_provider::XamlProvider;
+use noesis_runtime::view::{FrameworkElement, RenderFlag, View};
+use noesis_runtime::xaml_provider::XamlProvider;
 
 const RT_SIZE: u32 = 128;
 const BYTES_PER_ROW: u32 = 512;
@@ -329,9 +329,9 @@ fn drawingbrush_tile_offscreen_trace() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
 
     // (scenario_name, xaml, ticks). Baselines first, then zoom in on
     // ScrollViewer — the only real offscreen case we still need to
@@ -441,7 +441,7 @@ fn drawingbrush_tile_offscreen_trace() {
         }
     });
 
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
 
 async fn run_scenario(xaml: &[u8], ticks: u32) -> (Vec<Op>, [u8; 4], [u8; 4]) {
@@ -487,10 +487,10 @@ async fn run_scenario(xaml: &[u8], ticks: u32) -> (Vec<Op>, [u8; 4], [u8; 4]) {
     wgpu_device.set_onscreen_target(target_view);
 
     let (recording, ops) = RecordingDevice::new(wgpu_device);
-    let registered_device = dm_noesis_runtime::render_device::register(recording);
+    let registered_device = noesis_runtime::render_device::register(recording);
 
     let provider = InMemoryXamlProvider(HashMap::from([("test.xaml".to_string(), xaml.to_vec())]));
-    let _registered_provider = dm_noesis_runtime::xaml_provider::set_xaml_provider(provider);
+    let _registered_provider = noesis_runtime::xaml_provider::set_xaml_provider(provider);
 
     let element = FrameworkElement::load("test.xaml").expect("XAML load failed");
     let mut view = View::create(element);

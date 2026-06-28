@@ -1,137 +1,97 @@
-//! Imperative `Visibility` writes against named XAML elements.
+//! Per-view `Visibility` bridge — show / hide named XAML elements on a single
+//! [`NoesisView`](crate::NoesisView).
 //!
 //! The class-FFI custom-control path covers a lot of ground, but the
-//! "show / hide a panel that already exists in the scene" case doesn't
-//! benefit from it: the panel is just a plain `<Border>` /
-//! `<UserControl>` / `<aor:GamePanel>` whose visibility we want to flip
-//! from gameplay code. Registering a Rust class purely to drive an
-//! `IsOpen` bool DP and a Style trigger would be heavier than the
-//! primitive itself.
+//! "show / hide a panel that already exists in the scene" case doesn't benefit
+//! from it: the panel is just a plain `<Border>` / `<UserControl>` /
+//! `<aor:GamePanel>` whose visibility we want to flip from gameplay code.
+//! Registering a Rust class purely to drive an `IsOpen` bool DP and a Style
+//! trigger would be heavier than the primitive itself.
 //!
-//! [`NoesisVisibilityRequests`] takes a list of `(x:Name, visible)`
-//! pairs from the main world, applies them to the live View on the
-//! render side, then clears the queue. The pattern mirrors
-//! [`crate::events`]: a main-world resource is `Arc`-shared with the
-//! render world; the render-world system drains and writes; the
-//! resource is single-app-shared via [`ExtractResource`] so the queue
-//! the main app pushes into is the same one the render app drains.
+//! Add a [`NoesisVisibility`] component to the view's camera entity. Its `set`
+//! map is the desired visibility per `x:Name` (`true` = `Visible`,
+//! `false` = `Collapsed`) — applied to the view's elements whenever the
+//! component changes (Bevy change detection).
 //!
 //! ```ignore
-//! commands.insert_resource(NoesisVisibilityRequests::default());
-//! // ... later, in a Bevy system:
-//! visibility.show("QuitConfirmOverlay");
-//! visibility.hide("QuitConfirmOverlay");
+//! commands.entity(view).insert(
+//!     NoesisVisibility::new()
+//!         .show("QuitConfirmOverlay")
+//!         .hide("LoadingSpinner"),
+//! );
 //! ```
+//!
+//! Everything runs on the main thread (Noesis is thread-affine and lives
+//! there): the reconcile system reads each view's component and applies the
+//! writes against that view's live scene — no cross-world queues.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Main-app-side queue of pending visibility writes. Push via [`Self::show`]
-/// / [`Self::hide`] / [`Self::set`]; the render world drains and applies
-/// during `RenderSystems::Prepare`.
-///
-/// Cheap to keep around even when no writes are pending — the underlying
-/// `Vec` only allocates on first push.
-#[derive(Resource, Clone, Default)]
-pub struct NoesisVisibilityRequests(SharedVisibilityQueue);
+/// Per-view visibility bridge. Attach to a [`NoesisView`](crate::NoesisView)
+/// entity.
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisVisibility {
+    /// Desired visibility per element `x:Name` (`true` = `Visible`,
+    /// `false` = `Collapsed`). Written to the view's elements whenever this
+    /// component changes.
+    pub set: HashMap<String, bool>,
+}
 
-impl NoesisVisibilityRequests {
-    /// Queue a write setting `name`'s `Visibility` to `Visible`.
-    pub fn show(&self, name: impl Into<String>) {
-        self.set(name, true);
+impl NoesisVisibility {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Queue a write setting `name`'s `Visibility` to `Collapsed`.
-    pub fn hide(&self, name: impl Into<String>) {
-        self.set(name, false);
+    /// Builder: set element `name` to `Visible`.
+    #[must_use]
+    pub fn show(self, name: impl Into<String>) -> Self {
+        self.set(name, true)
     }
 
-    /// Queue a write. `visible = true` → `Visible`; `false` → `Collapsed`.
-    /// Multiple writes for the same name within a single frame are
-    /// applied in order; the last one wins.
-    pub fn set(&self, name: impl Into<String>, visible: bool) {
-        self.0.push(name.into(), visible);
+    /// Builder: set element `name` to `Collapsed`.
+    #[must_use]
+    pub fn hide(self, name: impl Into<String>) -> Self {
+        self.set(name, false)
+    }
+
+    /// Builder: set element `name`'s visibility. `visible = true` → `Visible`;
+    /// `false` → `Collapsed`.
+    #[must_use]
+    pub fn set(mut self, name: impl Into<String>, visible: bool) -> Self {
+        self.set.insert(name.into(), visible);
+        self
     }
 }
 
-impl ExtractResource for NoesisVisibilityRequests {
-    type Source = NoesisVisibilityRequests;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-/// Internal Arc-backed queue. Both apps share the same `Vec` via a clone
-/// of this `Arc`; the render-side drain mutates the original storage,
-/// not a per-frame copy.
-#[derive(Clone, Default)]
-pub(crate) struct SharedVisibilityQueue(Arc<Mutex<Vec<(String, bool)>>>);
-
-impl SharedVisibilityQueue {
-    fn push(&self, name: String, visible: bool) {
-        self.0
-            .lock()
-            .expect("SharedVisibilityQueue poisoned")
-            .push((name, visible));
-    }
-
-    /// Take the pending writes out of the queue. Cheap when empty.
-    pub(crate) fn drain(&self) -> Vec<(String, bool)> {
-        let mut guard = self.0.lock().expect("SharedVisibilityQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
+/// Reconcile every view's [`NoesisVisibility`]: apply desired visibility writes
+/// when the component changed.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sync_visibility_bridge(
+    views: Query<(Entity, Ref<NoesisVisibility>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for (entity, vis) in &views {
+        if vis.is_changed() {
+            state.apply_visibility_for(entity, &vis.set);
         }
     }
 }
 
-/// Render-app system: drain the visibility queue and apply each entry to
-/// the live View. Runs in `RenderSystems::Prepare` so writes from this
-/// frame's main-world systems land before Noesis's `update_render_tree`.
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn apply_visibility_requests(
-    requests: Option<Res<NoesisVisibilityRequests>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
-        return;
-    };
-    state.apply_visibility_requests(&requests.0);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Wires the visibility-request bridge: extracts
-/// [`NoesisVisibilityRequests`] to the render world and runs the
-/// render-side drain after `ensure_noesis_scene`.
+/// Wires the per-view visibility bridge. Added transitively by
+/// [`crate::NoesisPlugin`].
 pub struct NoesisVisibilityPlugin;
 
 impl Plugin for NoesisVisibilityPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisVisibilityRequests>()
-            .add_plugins(ExtractResourcePlugin::<NoesisVisibilityRequests>::default());
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        // `Prepare` runs after `ensure_noesis_scene`; on frames where the
-        // scene isn't built yet, `apply_visibility_requests` is a no-op
-        // and the queue stays full for next frame.
-        render_app.add_systems(
-            Render,
-            apply_visibility_requests.in_set(RenderSystems::Prepare),
-        );
+        app.add_systems(PostUpdate, sync_visibility_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -140,49 +100,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drain_takes_all_and_resets() {
-        let q = SharedVisibilityQueue::default();
-        q.push("Alpha".into(), true);
-        q.push("Beta".into(), false);
-        let drained = q.drain();
-        assert_eq!(
-            drained,
-            vec![("Alpha".to_string(), true), ("Beta".to_string(), false)]
-        );
-        // Second drain returns empty without allocating.
-        assert!(q.drain().is_empty());
-    }
-
-    #[test]
-    fn show_hide_helpers_match_explicit_set() {
-        let r = NoesisVisibilityRequests::default();
-        r.show("X");
-        r.hide("Y");
-        r.set("Z", true);
-        let drained = r.0.drain();
-        assert_eq!(
-            drained,
-            vec![
-                ("X".to_string(), true),
-                ("Y".to_string(), false),
-                ("Z".to_string(), true),
-            ]
-        );
-    }
-
-    #[test]
-    fn last_write_wins_within_a_frame() {
-        // The contract: multiple writes for the same name in one frame
-        // are applied in order, last wins. We don't dedupe — the render
-        // side just processes the queue front-to-back, so the final
-        // state is whatever the last entry asked for.
-        let r = NoesisVisibilityRequests::default();
-        r.show("Panel");
-        r.hide("Panel");
-        let drained = r.0.drain();
-        assert_eq!(
-            drained,
-            vec![("Panel".to_string(), true), ("Panel".to_string(), false)]
-        );
+    fn builder_collects_set() {
+        let v = NoesisVisibility::new()
+            .show("QuitConfirmOverlay")
+            .hide("LoadingSpinner")
+            .set("Hud", true);
+        assert_eq!(v.set.get("QuitConfirmOverlay"), Some(&true));
+        assert_eq!(v.set.get("LoadingSpinner"), Some(&false));
+        assert_eq!(v.set.get("Hud"), Some(&true));
     }
 }

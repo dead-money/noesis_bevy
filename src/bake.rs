@@ -32,13 +32,12 @@ use bevy::image::{Image, ImageSampler};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy_render::{
-    Render, RenderApp, RenderSystems,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
     texture::GpuImage,
 };
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
 /// Sampling format of a baked label. `StandardMaterial` color maps want sRGB;
 /// Noesis renders through the [`RENDER_FORMAT`] alias below.
@@ -145,7 +144,7 @@ fn bake_pending_labels(
     baker: Option<Res<NoesisLabelBaker>>,
     mut retry: ResMut<PendingBakes>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    state: Option<ResMut<NoesisRenderState>>,
+    state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
         return;
@@ -186,15 +185,10 @@ impl Plugin for NoesisLabelBakerPlugin {
         app.init_resource::<NoesisLabelBaker>()
             .add_plugins(ExtractResourcePlugin::<NoesisLabelBaker>::default());
 
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-        // Runs in `Prepare`, which is ordered after `PrepareAssets` (where
-        // `GpuImage`s are created) — so a freshly-allocated target's texture is
-        // available the same frame it's requested. Tolerant of running before
-        // `NoesisRenderState` exists or fonts load: such requests just retry.
-        render_app
-            .init_resource::<PendingBakes>()
-            .add_systems(Render, bake_pending_labels.in_set(RenderSystems::Prepare));
+        // Runs in `NoesisSet::Apply`, after the scene is ensured and before the
+        // frame is driven. Tolerant of running before `NoesisRenderState` exists
+        // or fonts load: such requests just retry.
+        app.init_resource::<PendingBakes>()
+            .add_systems(PostUpdate, bake_pending_labels.in_set(NoesisSet::Apply));
     }
 }

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 
 use crate::font::FontRegistry;
-use crate::render::NoesisScene;
+use crate::render::NoesisView;
 use crate::xaml::XamlRegistry;
 
 /// The theme's default font family. Every Noesis color variant shares it
@@ -168,13 +168,13 @@ fn inject_theme_registries(
     }
 }
 
-/// Patch the consumer's [`NoesisScene`] to load the theme: install it as an
+/// Patch every consumer [`NoesisView`] to load the theme: install it as an
 /// application resource and gate view creation on the theme fonts. Runs each
-/// frame until the scene exists and is patched once.
+/// frame until at least one view exists, then patches all of them once.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_theme_to_scene(
     staged: Res<StagedTheme>,
-    scene: Option<ResMut<NoesisScene>>,
+    mut views: Query<&mut NoesisView>,
     mut applied: Local<bool>,
 ) {
     if *applied {
@@ -185,28 +185,30 @@ fn apply_theme_to_scene(
         *applied = true;
         return;
     }
-    // Wait for the consumer to insert their scene.
-    let Some(mut scene) = scene else {
+    // Wait for the consumer to spawn at least one view.
+    if views.is_empty() {
         return;
-    };
+    }
 
     let theme_uri = format!("NoesisTheme.{}.xaml", staged.name);
-    if !scene.application_resources.contains(&theme_uri) {
-        // Theme first, so any app-level resources can build on its styles.
-        scene.application_resources.insert(0, theme_uri);
-    }
-    if !scene.wait_for_fonts.iter().any(|f| f == "Fonts") {
-        scene.wait_for_fonts.push("Fonts".to_string());
-    }
-    for (folder, filename, _) in &staged.fonts {
-        let pair = (folder.clone(), filename.clone());
-        if !scene.wait_for_font_files.contains(&pair) {
-            scene.wait_for_font_files.push(pair);
+    for mut scene in &mut views {
+        if !scene.application_resources.contains(&theme_uri) {
+            // Theme first, so any app-level resources can build on its styles.
+            scene.application_resources.insert(0, theme_uri.clone());
         }
-    }
-    let fallback = THEME_FONT_FALLBACK.to_string();
-    if !scene.font_fallbacks.contains(&fallback) {
-        scene.font_fallbacks.push(fallback);
+        if !scene.wait_for_fonts.iter().any(|f| f == "Fonts") {
+            scene.wait_for_fonts.push("Fonts".to_string());
+        }
+        for (folder, filename, _) in &staged.fonts {
+            let pair = (folder.clone(), filename.clone());
+            if !scene.wait_for_font_files.contains(&pair) {
+                scene.wait_for_font_files.push(pair);
+            }
+        }
+        let fallback = THEME_FONT_FALLBACK.to_string();
+        if !scene.font_fallbacks.contains(&fallback) {
+            scene.font_fallbacks.push(fallback);
+        }
     }
 
     *applied = true;

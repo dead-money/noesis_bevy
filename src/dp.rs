@@ -1,4 +1,4 @@
-//! Generic dependency-property get/set bridge (TODO §3), keyed by
+//! Per-view generic dependency-property get/set bridge, keyed by
 //! `(x:Name, property)`.
 //!
 //! A near-mechanical generalization of [`crate::text`]: where the text bridge
@@ -7,35 +7,27 @@
 //! poke `Slider.Value`, read `CheckBox.IsChecked`, flip `Button.IsEnabled` —
 //! when wiring a full [`ViewModel`](crate::viewmodel) would be overkill.
 //!
-//! Two halves, exactly like [`crate::text`]:
-//!
-//! 1. **Write** — [`NoesisDpRequests`] queues `(x:Name, property, value)` writes
-//!    (`set_f32` / `set_f64` / `set_i32` / `set_bool` / `set_string`), drained
-//!    render-side and applied via `FrameworkElement::set_*`.
-//! 2. **Read** — push a [`DpWatch`] onto [`NoesisDpReadWatch`] to subscribe; the
-//!    render world polls the property each frame, dedupes against the previous
-//!    snapshot, and emits a [`NoesisDpChanged`] message when it differs. The
-//!    first frame after subscription always emits (the snapshot starts empty),
-//!    so callers see the current value without issuing a probe.
+//! Add a [`NoesisDp`] component to the view's camera entity. Its `set` map is the
+//! desired value per `(x:Name, property)` — applied to the view's elements
+//! whenever the component changes (Bevy change detection). Its `watch` list names
+//! `(x:Name, property)` pairs to observe; changes surface as a
+//! [`NoesisDpChanged`] message carrying the originating `view` entity.
 //!
 //! # Value types
 //!
 //! Noesis is a float engine — many "numeric" properties (`Slider.Value`,
 //! `Width`, `Opacity`) are **`f32`**, not `f64`, so reach for [`DpKind::F32`] /
-//! [`NoesisDpRequests::set_f32`] there; a `get_f64` against an `f32` property
+//! [`NoesisDp::set_f32`] there; a `get_f64` against an `f32` property
 //! type-mismatches and reads nothing. `CheckBox.IsChecked` is `Nullable<bool>`
 //! and is *not* reachable through [`DpKind::Bool`] — bind it through a
 //! [`ViewModel`](crate::viewmodel) instead.
 //!
 //! ```ignore
-//! use dm_noesis_bevy::dp::{NoesisDpRequests, NoesisDpReadWatch, NoesisDpChanged, DpWatch, DpKind, DpValue};
-//!
-//! fn setup(mut commands: Commands, dp: Res<NoesisDpRequests>) {
-//!     dp.set_f32("VolumeSlider", "Value", 0.8);                 // Rust -> UI
-//!     commands.insert_resource(NoesisDpReadWatch::new([          // subscribe to reads
-//!         DpWatch::new("VolumeSlider", "Value", DpKind::F32),
-//!     ]));
-//! }
+//! commands.entity(view).insert(
+//!     NoesisDp::new()
+//!         .set_f32("VolumeSlider", "Value", 0.8)              // Rust -> UI
+//!         .watch("VolumeSlider", "Value", DpKind::F32),       // subscribe to reads
+//! );
 //!
 //! fn on_change(mut changed: MessageReader<NoesisDpChanged>) {
 //!     for ev in changed.read() {
@@ -43,17 +35,18 @@
 //!     }
 //! }
 //! ```
+//!
+//! Everything runs on the main thread (Noesis is thread-affine and lives there):
+//! the reconcile system reads each view's component, applies writes + polls the
+//! watch list against that view's live scene, and emits messages directly — no
+//! cross-world queues.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
-use dm_noesis_runtime::view::FrameworkElement;
+use noesis_runtime::view::FrameworkElement;
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value + kind
@@ -112,81 +105,7 @@ impl DpKind {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Write side — NoesisDpRequests
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Main-app queue of pending property writes. Push via `set_*`; the render
-/// world drains and applies during `RenderSystems::Prepare`. The render world
-/// receives an `Arc`-aliased copy via [`ExtractResource`], so writes pushed
-/// here are drained render-side without copying.
-///
-/// All methods take `&self`, so they're callable from a plain
-/// `Res<NoesisDpRequests>`. Writes to the same `(name, property)` within a frame
-/// apply in order (last wins).
-#[derive(Resource, Clone, Default)]
-pub struct NoesisDpRequests {
-    queue: Arc<Mutex<Vec<(String, String, DpValue)>>>,
-}
-
-impl NoesisDpRequests {
-    /// Queue an `f32` write — the right choice for Noesis's float-typed
-    /// properties (`Slider.Value`, `Width`, `Opacity`, …).
-    pub fn set_f32(&self, name: impl Into<String>, property: impl Into<String>, value: f32) {
-        self.push(name, property, DpValue::F32(value));
-    }
-
-    /// Queue an `f64` (`Double`) write.
-    pub fn set_f64(&self, name: impl Into<String>, property: impl Into<String>, value: f64) {
-        self.push(name, property, DpValue::F64(value));
-    }
-
-    /// Queue an `i32` write.
-    pub fn set_i32(&self, name: impl Into<String>, property: impl Into<String>, value: i32) {
-        self.push(name, property, DpValue::I32(value));
-    }
-
-    /// Queue a `bool` write (plain `Boolean` DPs; not `CheckBox.IsChecked`).
-    pub fn set_bool(&self, name: impl Into<String>, property: impl Into<String>, value: bool) {
-        self.push(name, property, DpValue::Bool(value));
-    }
-
-    /// Queue a `String` write.
-    pub fn set_string(
-        &self,
-        name: impl Into<String>,
-        property: impl Into<String>,
-        value: impl Into<String>,
-    ) {
-        self.push(name, property, DpValue::Str(value.into()));
-    }
-
-    fn push(&self, name: impl Into<String>, property: impl Into<String>, value: DpValue) {
-        self.queue
-            .lock()
-            .expect("NoesisDpRequests queue poisoned")
-            .push((name.into(), property.into(), value));
-    }
-
-    /// Drain pending writes. Render-world only; cheap when empty.
-    pub(crate) fn drain(&self) -> Vec<(String, String, DpValue)> {
-        let mut guard = self.queue.lock().expect("NoesisDpRequests queue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
-        }
-    }
-}
-
-impl ExtractResource for NoesisDpRequests {
-    type Source = NoesisDpRequests;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Read side — NoesisDpReadWatch + NoesisDpChanged
+// Watch subscription
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One subscription: an element's `x:Name`, the `property` to read, and the
@@ -208,28 +127,104 @@ impl DpWatch {
     }
 }
 
-/// Properties the render world should poll each frame, emitting a
-/// [`NoesisDpChanged`] whenever a value differs from the previous frame.
-/// Mirrors [`crate::text::NoesisTextReadWatch`] — add entries to subscribe,
-/// remove them to unsubscribe. A newly-added entry emits on its first resolved
-/// frame (the snapshot starts empty).
-#[derive(Resource, ExtractResource, Clone, Default, Debug)]
-pub struct NoesisDpReadWatch {
-    pub entries: Vec<DpWatch>,
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-view generic DP bridge. Attach to a [`NoesisView`](crate::NoesisView)
+/// entity.
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisDp {
+    /// Desired value per `(x:Name, property)`. Written to the view's elements
+    /// whenever this component changes. Writes to the same key apply last-wins.
+    pub set: HashMap<(String, String), DpValue>,
+    /// `(x:Name, property)` pairs (with read kind) to observe. A change (vs. the
+    /// previous frame) emits a [`NoesisDpChanged`]; the first poll after a watch
+    /// is added always reports, so callers see the current value.
+    pub watch: Vec<DpWatch>,
 }
 
-impl NoesisDpReadWatch {
-    pub fn new(entries: impl IntoIterator<Item = DpWatch>) -> Self {
-        Self {
-            entries: entries.into_iter().collect(),
-        }
+impl NoesisDp {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder: queue an `f32` write — the right choice for Noesis's float-typed
+    /// properties (`Slider.Value`, `Width`, `Opacity`, …).
+    #[must_use]
+    pub fn set_f32(self, name: impl Into<String>, property: impl Into<String>, value: f32) -> Self {
+        self.insert(name, property, DpValue::F32(value))
+    }
+
+    /// Builder: queue an `f64` (`Double`) write.
+    #[must_use]
+    pub fn set_f64(self, name: impl Into<String>, property: impl Into<String>, value: f64) -> Self {
+        self.insert(name, property, DpValue::F64(value))
+    }
+
+    /// Builder: queue an `i32` write.
+    #[must_use]
+    pub fn set_i32(self, name: impl Into<String>, property: impl Into<String>, value: i32) -> Self {
+        self.insert(name, property, DpValue::I32(value))
+    }
+
+    /// Builder: queue a `bool` write (plain `Boolean` DPs; not
+    /// `CheckBox.IsChecked`).
+    #[must_use]
+    pub fn set_bool(
+        self,
+        name: impl Into<String>,
+        property: impl Into<String>,
+        value: bool,
+    ) -> Self {
+        self.insert(name, property, DpValue::Bool(value))
+    }
+
+    /// Builder: queue a `String` write.
+    #[must_use]
+    pub fn set_string(
+        self,
+        name: impl Into<String>,
+        property: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.insert(name, property, DpValue::Str(value.into()))
+    }
+
+    /// Builder: observe `name`'s `property`, read as `kind`.
+    #[must_use]
+    pub fn watch(
+        mut self,
+        name: impl Into<String>,
+        property: impl Into<String>,
+        kind: DpKind,
+    ) -> Self {
+        self.watch.push(DpWatch::new(name, property, kind));
+        self
+    }
+
+    fn insert(
+        mut self,
+        name: impl Into<String>,
+        property: impl Into<String>,
+        value: DpValue,
+    ) -> Self {
+        self.set.insert((name.into(), property.into()), value);
+        self
     }
 }
 
-/// Bevy message written in `PreUpdate` when a watched property differs from the
-/// previous frame's snapshot. Read with `MessageReader<NoesisDpChanged>`.
+// ─────────────────────────────────────────────────────────────────────────────
+// Read-back message
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a watched property differs from the previous frame's snapshot.
+/// Read with `MessageReader<NoesisDpChanged>`.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisDpChanged {
+    /// The [`NoesisView`](crate::NoesisView) entity whose property changed.
+    pub view: Entity,
     /// `x:Name` of the element whose property changed.
     pub name: String,
     /// The property that changed.
@@ -238,76 +233,33 @@ pub struct NoesisDpChanged {
     pub value: DpValue,
 }
 
-/// Shared queue between the render-world poll and the main-world drain. `Clone`
-/// is an `Arc` clone; both apps see the same `Vec`. Mirrors
-/// [`crate::text::SharedTextChangedQueue`].
-#[derive(Resource, Clone, Default)]
-pub struct SharedDpChangedQueue(Arc<Mutex<Vec<(String, String, DpValue)>>>);
-
-impl ExtractResource for SharedDpChangedQueue {
-    type Source = SharedDpChangedQueue;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-impl SharedDpChangedQueue {
-    pub(crate) fn push(&self, name: String, property: String, value: DpValue) {
-        self.0
-            .lock()
-            .expect("SharedDpChangedQueue poisoned")
-            .push((name, property, value));
-    }
-
-    fn drain(&self) -> Vec<(String, String, DpValue)> {
-        let mut guard = self.0.lock().expect("SharedDpChangedQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Systems
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Render-app system: drain the write queue onto the live view.
-pub(crate) fn apply_dp_writes(
-    requests: Option<Res<NoesisDpRequests>>,
-    state: Option<ResMut<NoesisRenderState>>,
+/// Reconcile every view's [`NoesisDp`]: apply desired writes when the component
+/// changed, then poll its watch list and emit [`NoesisDpChanged`].
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sync_dp_bridge(
+    views: Query<(Entity, Ref<NoesisDp>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+    mut changed: MessageWriter<NoesisDpChanged>,
 ) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
+    let Some(mut state) = state else {
         return;
     };
-    state.apply_dp_writes(&requests);
-}
-
-/// Render-app system: poll watched properties and push changes onto the queue.
-pub(crate) fn poll_dp_reads(
-    watch: Option<Res<NoesisDpReadWatch>>,
-    queue: Option<Res<SharedDpChangedQueue>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(watch), Some(queue), Some(mut state)) = (watch, queue, state) else {
-        return;
-    };
-    state.poll_dp_reads(&watch.entries, &queue);
-}
-
-/// Main-app system: drain the shared queue into [`NoesisDpChanged`] messages.
-/// Runs in `PreUpdate` so Update-stage systems see them the same frame.
-pub fn drain_dp_changed_queue(
-    queue: Res<SharedDpChangedQueue>,
-    mut messages: MessageWriter<NoesisDpChanged>,
-) {
-    for (name, property, value) in queue.drain() {
-        messages.write(NoesisDpChanged {
-            name,
-            property,
-            value,
-        });
+    for (entity, dp) in &views {
+        if dp.is_changed() {
+            state.apply_dp_for(entity, &dp.set);
+        }
+        for (name, property, value) in state.poll_dp_reads_for(entity, &dp.watch) {
+            changed.write(NoesisDpChanged {
+                view: entity,
+                name,
+                property,
+                value,
+            });
+        }
     }
 }
 
@@ -315,31 +267,14 @@ pub fn drain_dp_changed_queue(
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Wires the generic DP write + read bridges. Added transitively by
+/// Wires the per-view generic DP bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisDpPlugin;
 
 impl Plugin for NoesisDpPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisDpRequests>()
-            .init_resource::<NoesisDpReadWatch>()
-            .insert_resource(SharedDpChangedQueue::default())
-            .add_message::<NoesisDpChanged>()
-            .add_plugins((
-                ExtractResourcePlugin::<NoesisDpRequests>::default(),
-                ExtractResourcePlugin::<NoesisDpReadWatch>::default(),
-                ExtractResourcePlugin::<SharedDpChangedQueue>::default(),
-            ))
-            .add_systems(PreUpdate, drain_dp_changed_queue);
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        render_app.add_systems(
-            Render,
-            (apply_dp_writes, poll_dp_reads).in_set(RenderSystems::Prepare),
-        );
+        app.add_message::<NoesisDpChanged>()
+            .add_systems(PostUpdate, sync_dp_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -348,52 +283,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_queue_round_trips_each_setter() {
-        let dp = NoesisDpRequests::default();
-        dp.set_f32("S", "Value", 0.5);
-        dp.set_f64("S", "Double", 1.5);
-        dp.set_i32("C", "SelectedIndex", 2);
-        dp.set_bool("B", "IsEnabled", false);
-        dp.set_string("T", "Text", "hi");
+    fn builder_collects_set_and_watch() {
+        let dp = NoesisDp::new()
+            .set_f32("S", "Value", 0.5)
+            .set_f64("S", "Double", 1.5)
+            .set_i32("C", "SelectedIndex", 2)
+            .set_bool("B", "IsEnabled", false)
+            .set_string("T", "Text", "hi")
+            .watch("S", "Value", DpKind::F32)
+            .watch("C", "SelectedIndex", DpKind::I32);
 
-        let drained = dp.drain();
         assert_eq!(
-            drained,
-            vec![
-                ("S".into(), "Value".into(), DpValue::F32(0.5)),
-                ("S".into(), "Double".into(), DpValue::F64(1.5)),
-                ("C".into(), "SelectedIndex".into(), DpValue::I32(2)),
-                ("B".into(), "IsEnabled".into(), DpValue::Bool(false)),
-                ("T".into(), "Text".into(), DpValue::Str("hi".into())),
-            ],
+            dp.set.get(&("S".into(), "Value".into())),
+            Some(&DpValue::F32(0.5)),
         );
-        assert!(dp.drain().is_empty());
-    }
-
-    #[test]
-    fn changed_queue_drains_in_push_order() {
-        let q = SharedDpChangedQueue::default();
-        q.push("S".into(), "Value".into(), DpValue::F32(0.25));
-        q.push("B".into(), "IsEnabled".into(), DpValue::Bool(true));
-        let drained = q.drain();
         assert_eq!(
-            drained,
-            vec![
-                ("S".into(), "Value".into(), DpValue::F32(0.25)),
-                ("B".into(), "IsEnabled".into(), DpValue::Bool(true)),
-            ],
+            dp.set.get(&("S".into(), "Double".into())),
+            Some(&DpValue::F64(1.5)),
         );
-        assert!(q.drain().is_empty());
-    }
-
-    #[test]
-    fn watch_constructor_collects_entries() {
-        let w = NoesisDpReadWatch::new([
-            DpWatch::new("S", "Value", DpKind::F32),
-            DpWatch::new("C", "SelectedIndex", DpKind::I32),
-        ]);
-        assert_eq!(w.entries.len(), 2);
-        assert_eq!(w.entries[0], DpWatch::new("S", "Value", DpKind::F32));
-        assert_eq!(w.entries[1].kind, DpKind::I32);
+        assert_eq!(
+            dp.set.get(&("C".into(), "SelectedIndex".into())),
+            Some(&DpValue::I32(2)),
+        );
+        assert_eq!(
+            dp.set.get(&("B".into(), "IsEnabled".into())),
+            Some(&DpValue::Bool(false)),
+        );
+        assert_eq!(
+            dp.set.get(&("T".into(), "Text".into())),
+            Some(&DpValue::Str("hi".into())),
+        );
+        assert_eq!(dp.watch.len(), 2);
+        assert_eq!(dp.watch[0], DpWatch::new("S", "Value", DpKind::F32));
+        assert_eq!(dp.watch[1].kind, DpKind::I32);
     }
 }

@@ -1,7 +1,7 @@
 //! wgpu-backed render device for Noesis. Standalone module — does not pull
 //! in Bevy types so it can be tested with a hand-built wgpu instance.
 //!
-//! See `../../../dm_noesis_runtime/docs/PHASE_1_PLAN.md` for the FFI design and the
+//! See `../../../noesis_runtime/docs/PHASE_1_PLAN.md` for the FFI design and the
 //! parent `CLAUDE.md` for the per-phase milestones.
 //!
 //! Submodules:

@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use dm_noesis_runtime::render_device::types::Shader;
+use noesis_runtime::render_device::types::Shader;
 
 /// Returns the define set for `shader`.
 ///

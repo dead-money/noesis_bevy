@@ -1,214 +1,114 @@
-//! Imperative `Text` writes + reactive `Text` reads against named XAML
-//! elements (`TextBox` / `TextBlock`).
+//! Per-view `Text` bridge — write and observe the `Text` of named XAML
+//! elements (`TextBox` / `TextBlock`) on a single [`NoesisView`].
 //!
-//! Two halves:
+//! Add a [`NoesisText`] component to the view's camera entity. Its `set` map is
+//! the desired text per `x:Name` — applied to the view's elements whenever the
+//! component changes (Bevy change detection). Its `watch` list names elements
+//! whose `Text` to observe; changes surface as a [`NoesisTextChanged`] message
+//! carrying the originating `view` entity.
 //!
-//! 1. [`NoesisTextRequests`] — main-app push queue for `(x:Name, text)`
-//!    writes. Drained on the render side each frame and applied via
-//!    `dm_noesis_runtime::view::FrameworkElement::set_text`. Mirrors
-//!    [`crate::visibility::NoesisVisibilityRequests`] in shape.
+//! ```ignore
+//! commands.entity(view).insert(
+//!     NoesisText::new()
+//!         .with("Title", "Hello, Noesis!")
+//!         .watching(["CommandInput"]),
+//! );
 //!
-//! 2. [`NoesisTextReadWatch`] + [`NoesisTextChanged`] — reactive read
-//!    side. Push an `x:Name` onto the watch list to subscribe to
-//!    text-property changes; the render world polls `text()` each
-//!    frame, dedupes against the previous snapshot, and emits a
-//!    [`NoesisTextChanged`] message when the value differs. The first
-//!    frame after subscription always emits (the snapshot starts
-//!    empty), so callers reliably see the current text without having
-//!    to issue a probe.
+//! fn on_text(mut changed: MessageReader<NoesisTextChanged>) {
+//!     for ev in changed.read() {
+//!         info!("view {:?} element {:?} -> {:?}", ev.view, ev.name, ev.text);
+//!     }
+//! }
+//! ```
 //!
-//! The split (writes go through one queue, reads through another)
-//! mirrors the click / visibility pattern: writes are infrequent and
-//! main-driven, reads are render-driven and continuous. Combining them
-//! into a single resource would mean a single Mutex for both, which is
-//! the wrong shape on the read path (the lock would be held while the
-//! main world drains the change list).
+//! Everything runs on the main thread (Noesis is thread-affine and lives there):
+//! the reconcile system reads each view's component, applies writes + polls the
+//! watch list against that view's live scene, and emits messages directly — no
+//! cross-world queues.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Write side — NoesisTextRequests
-// ─────────────────────────────────────────────────────────────────────────────
+/// Per-view text bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisText {
+    /// Desired `Text` per element `x:Name`. Written to the view's elements
+    /// whenever this component changes. Each target must be a `TextBox` /
+    /// `TextBlock` (or another element exposing the `Text` DP).
+    pub set: HashMap<String, String>,
+    /// Element `x:Name`s whose `Text` to observe. A change (vs. the previous
+    /// frame) emits a [`NoesisTextChanged`]; the first poll after a name is
+    /// added always reports, so callers see the current value.
+    pub watch: Vec<String>,
+}
 
-/// Main-app-side queue of pending text writes. Push via [`Self::set`];
-/// the render world drains and applies during `RenderSystems::Prepare`.
-///
-/// Cheap to keep around even when no writes are pending — the underlying
-/// `Vec` only allocates on first push.
-#[derive(Resource, Clone, Default)]
-pub struct NoesisTextRequests(SharedTextWriteQueue);
+impl NoesisText {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-impl NoesisTextRequests {
-    /// Queue a write setting `name`'s `Text` to `text`. The element must
-    /// be a `TextBox` or `TextBlock` (or another type that implements
-    /// the same `Text` DP — see the runtime FFI for which casts are
-    /// supported); type mismatches log a warning on apply.
-    pub fn set(&self, name: impl Into<String>, text: impl Into<String>) {
-        self.0.push(name.into(), text.into());
+    /// Builder: set element `name`'s `Text` to `text`.
+    #[must_use]
+    pub fn with(mut self, name: impl Into<String>, text: impl Into<String>) -> Self {
+        self.set.insert(name.into(), text.into());
+        self
+    }
+
+    /// Builder: observe these elements' `Text`.
+    #[must_use]
+    pub fn watching(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.watch.extend(names.into_iter().map(Into::into));
+        self
     }
 }
 
-impl ExtractResource for NoesisTextRequests {
-    type Source = NoesisTextRequests;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct SharedTextWriteQueue(Arc<Mutex<Vec<(String, String)>>>);
-
-impl SharedTextWriteQueue {
-    fn push(&self, name: String, text: String) {
-        self.0
-            .lock()
-            .expect("SharedTextWriteQueue poisoned")
-            .push((name, text));
-    }
-
-    pub(crate) fn drain(&self) -> Vec<(String, String)> {
-        let mut guard = self.0.lock().expect("SharedTextWriteQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn apply_text_writes(
-    requests: Option<Res<NoesisTextRequests>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
-        return;
-    };
-    state.apply_text_writes(&requests.0);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Read side — NoesisTextReadWatch + NoesisTextChanged
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `x:Name`s whose `Text` property the render world should poll each
-/// frame. Mirrors [`crate::events::NoesisClickWatch`] in shape — push
-/// names onto `names` to subscribe, remove them to unsubscribe.
-///
-/// Subscribed-then-resolved emits a [`NoesisTextChanged`] message even
-/// when the text hasn't changed since the last frame, because the
-/// render-side snapshot starts empty. After that initial event, only
-/// genuine changes drive the message.
-#[derive(Resource, ExtractResource, Clone, Default, Debug)]
-pub struct NoesisTextReadWatch {
-    pub names: Vec<String>,
-}
-
-impl NoesisTextReadWatch {
-    pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self {
-            names: names.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-/// Bevy message written in `PreUpdate` when a watched element's `Text`
-/// differs from the previous frame's snapshot.
+/// Emitted when a watched element's `Text` differs from the previous frame.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisTextChanged {
-    /// `x:Name` of the element whose Text changed.
+    /// The [`NoesisView`](crate::NoesisView) entity whose element changed.
+    pub view: Entity,
+    /// `x:Name` of the element.
     pub name: String,
-    /// Current `Text` value. Empty string for an unset / cleared DP.
+    /// Current `Text`. Empty string for an unset / cleared DP.
     pub text: String,
 }
 
-#[derive(Resource, Clone, Default)]
-pub struct SharedTextChangedQueue(pub(crate) Arc<Mutex<Vec<(String, String)>>>);
-
-impl ExtractResource for SharedTextChangedQueue {
-    type Source = SharedTextChangedQueue;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-impl SharedTextChangedQueue {
-    pub(crate) fn push(&self, name: String, text: String) {
-        self.0
-            .lock()
-            .expect("SharedTextChangedQueue poisoned")
-            .push((name, text));
-    }
-
-    fn drain(&self) -> Vec<(String, String)> {
-        let mut guard = self.0.lock().expect("SharedTextChangedQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
+/// Reconcile every view's [`NoesisText`]: apply desired writes when the
+/// component changed, then poll its watch list and emit [`NoesisTextChanged`].
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sync_text_bridge(
+    views: Query<(Entity, Ref<NoesisText>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+    mut changed: MessageWriter<NoesisTextChanged>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for (entity, text) in &views {
+        if text.is_changed() {
+            state.apply_text_writes_for(entity, &text.set);
+        }
+        for (name, value) in state.poll_text_reads_for(entity, &text.watch) {
+            changed.write(NoesisTextChanged {
+                view: entity,
+                name,
+                text: value,
+            });
         }
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-pub fn drain_text_changed_queue(
-    queue: Res<SharedTextChangedQueue>,
-    mut messages: MessageWriter<NoesisTextChanged>,
-) {
-    for (name, text) in queue.drain() {
-        messages.write(NoesisTextChanged { name, text });
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn poll_text_reads(
-    watch: Option<Res<NoesisTextReadWatch>>,
-    queue: Option<Res<SharedTextChangedQueue>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(watch), Some(queue), Some(mut state)) = (watch, queue, state) else {
-        return;
-    };
-    state.poll_text_reads(&watch.names, &queue);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Wires the text-write + text-read bridges. Insert via
-/// [`crate::NoesisPlugin`] (which adds it transitively).
+/// Wires the per-view text bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisTextPlugin;
 
 impl Plugin for NoesisTextPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisTextRequests>()
-            .init_resource::<NoesisTextReadWatch>()
-            .insert_resource(SharedTextChangedQueue::default())
-            .add_message::<NoesisTextChanged>()
-            .add_plugins((
-                ExtractResourcePlugin::<NoesisTextRequests>::default(),
-                ExtractResourcePlugin::<NoesisTextReadWatch>::default(),
-                ExtractResourcePlugin::<SharedTextChangedQueue>::default(),
-            ))
-            .add_systems(PreUpdate, drain_text_changed_queue);
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        render_app.add_systems(
-            Render,
-            (apply_text_writes, poll_text_reads).in_set(RenderSystems::Prepare),
-        );
+        app.add_message::<NoesisTextChanged>()
+            .add_systems(PostUpdate, sync_text_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -217,27 +117,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_write_queue_drain_round_trip() {
-        let q = SharedTextWriteQueue::default();
-        q.push("LogText".into(), "hello".into());
-        q.push("CommandInput".into(), "world".into());
-        let drained = q.drain();
-        assert_eq!(
-            drained,
-            vec![
-                ("LogText".to_string(), "hello".to_string()),
-                ("CommandInput".to_string(), "world".to_string()),
-            ],
-        );
-        assert!(q.drain().is_empty(), "second drain should be empty");
-    }
-
-    #[test]
-    fn text_read_watch_constructor_normalizes() {
-        let w = NoesisTextReadWatch::new(["a", "b", "c"]);
-        assert_eq!(
-            w.names,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()],
-        );
+    fn builder_collects_set_and_watch() {
+        let t = NoesisText::new()
+            .with("Title", "Hello")
+            .with("Sub", "World")
+            .watching(["Status", "Clock"]);
+        assert_eq!(t.set.get("Title").map(String::as_str), Some("Hello"));
+        assert_eq!(t.set.get("Sub").map(String::as_str), Some("World"));
+        assert_eq!(t.watch, vec!["Status".to_string(), "Clock".to_string()]);
     }
 }

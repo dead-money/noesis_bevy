@@ -1,85 +1,70 @@
-//! Imperative `Focus()` requests against named XAML elements.
+//! Per-view keyboard-focus bridge — give a named XAML element keyboard
+//! focus on a single [`NoesisView`].
 //!
-//! Mirrors [`crate::visibility::NoesisVisibilityRequests`] in shape: a
-//! main-app push queue, drained on the render side each frame. Drives
-//! the "open the console, give the input box keyboard focus" flow
-//! without needing a class registration or custom DP — just a name and
-//! one FFI call.
-
-use std::sync::{Arc, Mutex};
+//! Add a [`NoesisFocus`] component to the view's camera entity. Its
+//! `target` is the `x:Name` to focus — applied to the view's element
+//! whenever the component changes (Bevy change detection). Focus is an
+//! action: it fires once per change, not continuously. Drives the
+//! "open the console, give the input box keyboard focus" flow without a
+//! class registration or custom DP — just a name and one FFI call.
+//!
+//! ```ignore
+//! commands.entity(view).insert(NoesisFocus::new().focus("CommandInput"));
+//! ```
+//!
+//! Everything runs on the main thread (Noesis is thread-affine and lives
+//! there): the reconcile system reads each view's component and, when it
+//! changed, applies the focus against that view's live scene.
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Main-app-side queue of pending focus requests. Push via
-/// [`Self::request`]; the render world drains and applies during
-/// `RenderSystems::Prepare`.
-#[derive(Resource, Clone, Default)]
-pub struct NoesisFocusRequests(SharedFocusQueue);
+/// Per-view focus bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisFocus {
+    /// `x:Name` of the element to focus. Applied once whenever this
+    /// component changes; `None` is a no-op.
+    pub target: Option<String>,
+}
 
-impl NoesisFocusRequests {
-    /// Queue a focus request for the element identified by `x:Name`.
-    /// Multiple requests within a single frame are applied in order;
-    /// the last one wins (whichever element accepted focus last is the
-    /// one keyboard input goes to).
-    pub fn request(&self, name: impl Into<String>) {
-        self.0.push(name.into());
+impl NoesisFocus {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder: focus the element identified by `x:Name`.
+    #[must_use]
+    pub fn focus(mut self, name: impl Into<String>) -> Self {
+        self.target = Some(name.into());
+        self
     }
 }
 
-impl ExtractResource for NoesisFocusRequests {
-    type Source = NoesisFocusRequests;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct SharedFocusQueue(Arc<Mutex<Vec<String>>>);
-
-impl SharedFocusQueue {
-    fn push(&self, name: String) {
-        self.0.lock().expect("SharedFocusQueue poisoned").push(name);
-    }
-
-    pub(crate) fn drain(&self) -> Vec<String> {
-        let mut guard = self.0.lock().expect("SharedFocusQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
+/// Reconcile every view's [`NoesisFocus`]: apply the focus action when the
+/// component changed. Write-only — focus is applied once per change.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sync_focus_bridge(
+    views: Query<(Entity, Ref<NoesisFocus>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for (entity, focus) in &views {
+        if focus.is_changed() {
+            state.apply_focus_for(entity, focus.target.as_deref());
         }
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn apply_focus_requests(
-    requests: Option<Res<NoesisFocusRequests>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
-        return;
-    };
-    state.apply_focus_requests(&requests.0);
-}
-
-/// Wires the focus-request bridge.
+/// Wires the per-view focus bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisFocusPlugin;
 
 impl Plugin for NoesisFocusPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisFocusRequests>()
-            .add_plugins(ExtractResourcePlugin::<NoesisFocusRequests>::default());
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-        render_app.add_systems(Render, apply_focus_requests.in_set(RenderSystems::Prepare));
+        app.add_systems(PostUpdate, sync_focus_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -88,15 +73,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn focus_queue_drain_round_trip() {
-        let q = SharedFocusQueue::default();
-        q.push("CommandInput".into());
-        q.push("LogText".into());
-        let drained = q.drain();
-        assert_eq!(
-            drained,
-            vec!["CommandInput".to_string(), "LogText".to_string()],
-        );
-        assert!(q.drain().is_empty(), "second drain should be empty");
+    fn builder_sets_target() {
+        let f = NoesisFocus::new().focus("CommandInput");
+        assert_eq!(f.target.as_deref(), Some("CommandInput"));
+        assert!(NoesisFocus::new().target.is_none());
     }
 }

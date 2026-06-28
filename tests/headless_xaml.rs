@@ -12,8 +12,8 @@
 
 use std::collections::HashMap;
 
-use dm_noesis_runtime::view::{FrameworkElement, RenderFlag, View};
-use dm_noesis_runtime::xaml_provider::XamlProvider;
+use noesis_runtime::view::{FrameworkElement, RenderFlag, View};
+use noesis_runtime::xaml_provider::XamlProvider;
 
 const RT_SIZE: u32 = 128;
 const BYTES_PER_ROW: u32 = 512; // 128 * 4 = 512, already COPY_BYTES_PER_ROW_ALIGNMENT-aligned
@@ -43,14 +43,14 @@ fn noesis_drives_wgpu_render_device_to_solid_red() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
 
     // Scope so every Noesis-owned object drops before shutdown().
     pollster::block_on(run_test());
 
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
 
 #[allow(clippy::too_many_lines)]
@@ -98,7 +98,7 @@ async fn run_test() {
     render_device.set_onscreen_target(target_view);
 
     // ── Register render device + XAML provider with Noesis ────────────────
-    let registered_device = dm_noesis_runtime::render_device::register(render_device);
+    let registered_device = noesis_runtime::render_device::register(render_device);
 
     let provider = InMemoryXamlProvider {
         bytes: HashMap::from([(
@@ -107,7 +107,7 @@ async fn run_test() {
                 .to_vec(),
         )]),
     };
-    let _registered_provider = dm_noesis_runtime::xaml_provider::set_xaml_provider(provider);
+    let _registered_provider = noesis_runtime::xaml_provider::set_xaml_provider(provider);
 
     // ── Load XAML + build View ────────────────────────────────────────────
     let element = FrameworkElement::load("test.xaml").expect("XAML load failed");

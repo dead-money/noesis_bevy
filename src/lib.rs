@@ -1,6 +1,6 @@
 //! Bevy plugin for Noesis GUI.
 //!
-//! Drives `libNoesis.so` (via the [`dm_noesis_runtime`] FFI crate) and — in later
+//! Drives `libNoesis.so` (via the [`noesis_runtime`] FFI crate) and — in later
 //! phases — implements `Noesis::RenderDevice` on top of Bevy's wgpu device.
 //! UIs render into an offscreen wgpu texture and composite into the Bevy frame.
 //!
@@ -35,36 +35,30 @@ pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
 /// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
 pub use dm_noesis_bevy_derive::NoesisViewModel;
-pub use dp::{
-    DpKind, DpValue, DpWatch, NoesisDpChanged, NoesisDpPlugin, NoesisDpReadWatch, NoesisDpRequests,
-    SharedDpChangedQueue,
-};
+pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
 pub use events::{
     Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin, NoesisKeyDown,
     NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue,
 };
-pub use focus::{NoesisFocusPlugin, NoesisFocusRequests};
+pub use focus::{NoesisFocus, NoesisFocusPlugin};
 pub use font::{BevyFontProvider, FontAsset, FontAssetLoader, FontAssetPlugin, FontRegistry};
-pub use geometry::{NoesisGeometryPlugin, NoesisGeometryRequests};
+pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
 pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
-pub use items::{ItemsBinding, NoesisItemsPlugin, NoesisItemsSources};
-pub use layout::{NoesisLayoutPlugin, NoesisLayoutRequests};
+pub use items::{ItemsBinding, NoesisItems, NoesisItemsPlugin};
+pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
-pub use render::{NoesisCamera, NoesisRenderPlugin, NoesisScene};
-pub use text::{
-    NoesisTextChanged, NoesisTextPlugin, NoesisTextReadWatch, NoesisTextRequests,
-    SharedTextChangedQueue,
-};
+pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
+pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use viewmodel::{
-    NoesisViewModelChanged, NoesisViewModelPlugin, NoesisViewModels, SharedVmChangedQueue,
-    ViewModelChangeForwarder, ViewModelDef, ViewModelId, VmValue,
+    NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,
+    ViewModelChangeForwarder, ViewModelDef, VmValue,
 };
-pub use visibility::{NoesisVisibilityPlugin, NoesisVisibilityRequests};
+pub use visibility::{NoesisVisibility, NoesisVisibilityPlugin};
 pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, XamlRegistry};
 
 /// Per-developer Indie license credentials.
@@ -98,18 +92,17 @@ pub struct NoesisPlugin {
 impl Plugin for NoesisPlugin {
     fn build(&self, app: &mut App) {
         if let Some(lic) = self.license.clone().or_else(NoesisLicense::from_env) {
-            dm_noesis_runtime::set_license(&lic.name, &lic.key);
+            noesis_runtime::set_license(&lic.name, &lic.key);
         }
-        dm_noesis_runtime::init();
+        noesis_runtime::init();
 
-        info!("Noesis runtime version {}", dm_noesis_runtime::version());
+        info!("Noesis runtime version {}", noesis_runtime::version());
 
-        // Hold a !Send guard on the main app so Shutdown runs at App teardown
-        // on the main thread. The render app's non-send resources (including
-        // NoesisRenderState) drop before this guard thanks to Bevy 0.18's
-        // App drop order, so the global shutdown() sees no live Noesis
-        // objects.
-        app.insert_non_send_resource(NoesisShutdownGuard);
+        // Global `shutdown()` is owned by `NoesisRenderState::drop` — it releases
+        // every live Noesis handle and then shuts the engine down, as its final
+        // step, on the main thread. A separate guard can't guarantee it runs
+        // *after* the state (Bevy gives no drop order between two main-world
+        // resources), which is why the old `NoesisShutdownGuard` was removed.
 
         // Sub-plugins: XAML + font assets + the render-graph integration
         // + input forwarder. Safe to add unconditionally —
@@ -140,13 +133,5 @@ impl Plugin for NoesisPlugin {
                 dp::NoesisDpPlugin,
             ),
         ));
-    }
-}
-
-struct NoesisShutdownGuard;
-
-impl Drop for NoesisShutdownGuard {
-    fn drop(&mut self) {
-        dm_noesis_runtime::shutdown();
     }
 }

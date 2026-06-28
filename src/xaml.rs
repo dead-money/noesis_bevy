@@ -1,7 +1,7 @@
 //! XAML asset plumbing for the Bevy plugin (Phase 4.D.2).
 //!
 //! Noesis expects to fetch XAML bytes by URI via a
-//! [`dm_noesis_runtime::xaml_provider::XamlProvider`]. Bevy's asset system is the
+//! [`noesis_runtime::xaml_provider::XamlProvider`]. Bevy's asset system is the
 //! natural source for those bytes, but the lookup happens on the render-app
 //! thread during `FrameworkElement::load`, while assets live on the main app.
 //! We bridge the two sides through the canonical Bevy main↔render sync
@@ -34,7 +34,7 @@ use bevy::asset::{AssetApp, AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
 use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
-use dm_noesis_runtime::xaml_provider::XamlProvider;
+use noesis_runtime::xaml_provider::XamlProvider;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // XamlAsset + loader
@@ -175,7 +175,7 @@ pub fn update_xaml_registry(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Shared URI → bytes map. Once a provider is handed to Noesis via
-/// [`dm_noesis_runtime::xaml_provider::set_xaml_provider`], the [`Registered`] guard
+/// [`noesis_runtime::xaml_provider::set_xaml_provider`], the [`Registered`] guard
 /// owns the boxed provider opaquely — we can't mutate its state through the
 /// guard. The provider holds a clone of this `Arc`; a separate clone lives
 /// as a render-world resource so a sync system can update the map each
@@ -187,7 +187,7 @@ pub fn update_xaml_registry(
 /// is always zero. No lock ever crosses the main↔render boundary —
 /// [`Rc`](std::rc::Rc) this is not.
 ///
-/// [`Registered`]: dm_noesis_runtime::xaml_provider::Registered
+/// [`Registered`]: noesis_runtime::xaml_provider::Registered
 #[derive(Clone, Default)]
 pub struct SharedXamlMap(pub(crate) Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>);
 
@@ -206,7 +206,7 @@ impl SharedXamlMap {
     }
 }
 
-/// Implements [`dm_noesis_runtime::xaml_provider::XamlProvider`] against a
+/// Implements [`noesis_runtime::xaml_provider::XamlProvider`] against a
 /// [`SharedXamlMap`] that the plugin updates each frame from the extracted
 /// [`XamlRegistry`].
 ///
@@ -222,7 +222,7 @@ pub struct BevyXamlProvider {
 
 impl BevyXamlProvider {
     /// Build a provider + a cloneable handle to its shared map. Give the
-    /// provider to [`dm_noesis_runtime::xaml_provider::set_xaml_provider`]; keep
+    /// provider to [`noesis_runtime::xaml_provider::set_xaml_provider`]; keep
     /// the `SharedXamlMap` as a render-world resource so the plugin can
     /// sync it from [`XamlRegistry`].
     #[must_use]

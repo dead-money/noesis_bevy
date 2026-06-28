@@ -14,11 +14,11 @@
 use std::ffi::c_void;
 
 use dm_noesis_bevy::render_device::WgpuRenderDevice;
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::types::{
     Batch, BlendMode, MinMagFilter, MipFilter, RenderState, SamplerState, Shader, StencilMode,
     TextureFormat, UniformData, WrapMode,
 };
-use dm_noesis_runtime::render_device::{RenderDevice, TextureDesc};
+use noesis_runtime::render_device::{RenderDevice, TextureDesc};
 
 const TARGET_W: u32 = 128;
 const TARGET_H: u32 = 128;
@@ -34,11 +34,11 @@ fn radial_variants_sample_ramp_at_computed_radius() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
     pollster::block_on(run_test());
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
 
 #[allow(clippy::too_many_lines)]
@@ -55,7 +55,7 @@ async fn run_test() {
         .expect("no wgpu adapter available");
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("dm_noesis_runtime radial test device"),
+            label: Some("noesis_runtime radial test device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::default(),

@@ -12,7 +12,7 @@
 //! - `ExtractResource` mirrors the registry into the render world each
 //!   frame.
 //! - [`BevyFontProvider`] implements
-//!   [`dm_noesis_runtime::font_provider::FontProvider`] against a
+//!   [`noesis_runtime::font_provider::FontProvider`] against a
 //!   [`SharedFontMap`] that the plugin syncs from the registry.
 //!
 //! # How Noesis resolves `FontFamily="Fonts/#Bitter"`
@@ -37,7 +37,7 @@ use bevy::asset::{AssetApp, AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
 use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
-use dm_noesis_runtime::font_provider::FontProvider;
+use noesis_runtime::font_provider::FontProvider;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FontAsset + loader

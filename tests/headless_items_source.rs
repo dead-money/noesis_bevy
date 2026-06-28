@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 
 use dm_noesis_bevy::items::ItemsBinding;
-use dm_noesis_runtime::view::{FrameworkElement, View};
-use dm_noesis_runtime::xaml_provider::XamlProvider;
+use noesis_runtime::view::{FrameworkElement, View};
+use noesis_runtime::xaml_provider::XamlProvider;
 
 const COMBO_XAML: &str = r##"<?xml version="1.0" encoding="utf-8"?>
 <ComboBox xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -40,9 +40,9 @@ fn items_source_populates_and_mutates_combobox() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
 
     {
         // The bridge's per-element items list, exactly as the render systems own
@@ -53,7 +53,7 @@ fn items_source_populates_and_mutates_combobox() {
 
         let mut bytes = HashMap::new();
         bytes.insert("combo.xaml".to_string(), COMBO_XAML.as_bytes().to_vec());
-        let _guard = dm_noesis_runtime::xaml_provider::set_xaml_provider(InMem(bytes));
+        let _guard = noesis_runtime::xaml_provider::set_xaml_provider(InMem(bytes));
 
         let element = FrameworkElement::load("combo.xaml").expect("load_xaml returned None");
         let mut view = View::create(element);
@@ -115,5 +115,5 @@ fn items_source_populates_and_mutates_combobox() {
         drop(binding);
     }
 
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }

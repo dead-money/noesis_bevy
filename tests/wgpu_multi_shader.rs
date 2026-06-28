@@ -14,9 +14,9 @@
 use std::ffi::c_void;
 
 use dm_noesis_bevy::render_device::WgpuRenderDevice;
-use dm_noesis_runtime::render_device::RenderDevice;
-use dm_noesis_runtime::render_device::types::Batch;
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::RenderDevice;
+use noesis_runtime::render_device::types::Batch;
+use noesis_runtime::render_device::types::{
     BlendMode, RenderState, SamplerState, Shader, StencilMode, UniformData,
 };
 
@@ -33,11 +33,11 @@ fn three_shader_variants_render_into_distinct_quadrants() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
     pollster::block_on(run_test());
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
 
 #[allow(clippy::too_many_lines)]
@@ -54,7 +54,7 @@ async fn run_test() {
         .expect("no wgpu adapter available");
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("dm_noesis_runtime multi-shader test device"),
+            label: Some("noesis_runtime multi-shader test device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::default(),

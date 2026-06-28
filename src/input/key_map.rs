@@ -6,11 +6,11 @@
 //! still get the matching `Char` event from [`KeyboardInput::text`].
 //!
 //! If you find yourself wanting a key that's missing, add it both here
-//! AND to the explicit-discriminant enum in `dm_noesis_runtime::view::Key` (and
+//! AND to the explicit-discriminant enum in `noesis_runtime::view::Key` (and
 //! its matching `static_assert` in `cpp/noesis_view.cpp`).
 
 use bevy::input::keyboard::KeyCode;
-use dm_noesis_runtime::view::Key;
+use noesis_runtime::view::Key;
 
 #[must_use]
 #[allow(clippy::too_many_lines)]

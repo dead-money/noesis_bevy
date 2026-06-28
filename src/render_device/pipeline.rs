@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::types::{
     Batch, FORMAT_FOR_VERTEX, RenderState, VERTEX_FOR_SHADER,
 };
 
@@ -156,11 +156,11 @@ fn build_pipeline(
     target_format: wgpu::TextureFormat,
     key: PipelineKey,
 ) -> wgpu::RenderPipeline {
-    let defines = defines_for_shader(dm_noesis_runtime::render_device::types::Shader(key.shader));
+    let defines = defines_for_shader(noesis_runtime::render_device::types::Shader(key.shader));
     let source = preprocess(NOESIS_WGSL, &defines);
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(&format!("dm_noesis_runtime Shader({})", key.shader)),
+        label: Some(&format!("noesis_runtime Shader({})", key.shader)),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
 
@@ -189,7 +189,7 @@ fn build_pipeline(
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(&format!(
-            "dm_noesis_runtime pipeline shader={} state=0x{:02x} fmt={}",
+            "noesis_runtime pipeline shader={} state=0x{:02x} fmt={}",
             key.shader, key.render_state, key.vertex_format
         )),
         layout: Some(layout),
