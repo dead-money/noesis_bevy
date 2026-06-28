@@ -12,9 +12,7 @@ use std::ffi::c_void;
 
 use dm_noesis_bevy::render_device::WgpuRenderDevice;
 use noesis_runtime::render_device::RenderDevice;
-use noesis_runtime::render_device::types::{
-    Batch, RenderState, SamplerState, Shader, UniformData,
-};
+use noesis_runtime::render_device::types::{Batch, RenderState, SamplerState, Shader, UniformData};
 
 const TARGET_W: u32 = 256;
 const TARGET_H: u32 = 256;

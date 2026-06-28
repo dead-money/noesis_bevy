@@ -869,20 +869,23 @@ impl NoesisRenderState {
             config.size.x, config.size.y, config.xaml_uri,
         );
 
-        self.scenes.insert(entity, SceneInstance {
-            view,
-            renderer_initialized: false,
-            intermediates,
-            write_index: 0,
-            size: config.size,
-            built_for_uri: config.xaml_uri.clone(),
-            applied_flags: initial_flags,
-            applied_scale: config.scale,
-            click_subs: HashMap::new(),
-            keydown_subs: HashMap::new(),
-            text_snapshots: HashMap::new(),
-            dp_snapshots: HashMap::new(),
-        });
+        self.scenes.insert(
+            entity,
+            SceneInstance {
+                view,
+                renderer_initialized: false,
+                intermediates,
+                write_index: 0,
+                size: config.size,
+                built_for_uri: config.xaml_uri.clone(),
+                applied_flags: initial_flags,
+                applied_scale: config.scale,
+                click_subs: HashMap::new(),
+                keydown_subs: HashMap::new(),
+                text_snapshots: HashMap::new(),
+                dp_snapshots: HashMap::new(),
+            },
+        );
     }
 
     /// Reconcile the active `BaseButton::Click` subscription set against
@@ -896,11 +899,7 @@ impl NoesisRenderState {
     /// queue is a no-op.
     /// Apply view `entity`'s desired element visibility (`x:Name → visible`).
     /// No-op until the scene exists; missing names warn.
-    pub(crate) fn apply_visibility_for(
-        &mut self,
-        entity: Entity,
-        desired: &HashMap<String, bool>,
-    ) {
+    pub(crate) fn apply_visibility_for(&mut self, entity: Entity, desired: &HashMap<String, bool>) {
         if desired.is_empty() {
             return;
         }
@@ -923,11 +922,7 @@ impl NoesisRenderState {
     }
 
     /// Apply view `entity`'s desired element margins (`x:Name → [l, t, r, b]`).
-    pub(crate) fn apply_layout_for(
-        &mut self,
-        entity: Entity,
-        desired: &HashMap<String, [f32; 4]>,
-    ) {
+    pub(crate) fn apply_layout_for(&mut self, entity: Entity, desired: &HashMap<String, [f32; 4]>) {
         if desired.is_empty() {
             return;
         }
@@ -1054,7 +1049,10 @@ impl NoesisRenderState {
                 queue_handle.push(entity, captured_name.clone(), key);
                 swallow.contains(&key)
             }) else {
-                warn!("NoesisKeyDownWatch: element {:?} is not a UIElement; skipping", entry.name);
+                warn!(
+                    "NoesisKeyDownWatch: element {:?} is not a UIElement; skipping",
+                    entry.name
+                );
                 continue;
             };
             scene.keydown_subs.insert(entry.name.clone(), sub);
@@ -1131,9 +1129,7 @@ impl NoesisRenderState {
                 continue;
             };
             if !element.set_path_points(points) {
-                warn!(
-                    "NoesisGeometry: element {name:?} is not a Path (or < 2 points); skipped",
-                );
+                warn!("NoesisGeometry: element {name:?} is not a Path (or < 2 points); skipped",);
             }
         }
     }

@@ -131,10 +131,7 @@ fn plain_vm_component_round_trips_two_way() {
             }
             // Record Box text changes (Rust→UI readback through the watch).
             for ev in changes.read() {
-                text_sys
-                    .lock()
-                    .unwrap()
-                    .push((ev.view, ev.text.clone()));
+                text_sys.lock().unwrap().push((ev.view, ev.text.clone()));
             }
 
             // Simulate a user edit: drive the bound TextBox's Text via the DP

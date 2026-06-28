@@ -153,34 +153,19 @@ impl NoesisDp {
     /// Builder: queue an `f32` write — the right choice for Noesis's float-typed
     /// properties (`Slider.Value`, `Width`, `Opacity`, …).
     #[must_use]
-    pub fn set_f32(
-        self,
-        name: impl Into<String>,
-        property: impl Into<String>,
-        value: f32,
-    ) -> Self {
+    pub fn set_f32(self, name: impl Into<String>, property: impl Into<String>, value: f32) -> Self {
         self.insert(name, property, DpValue::F32(value))
     }
 
     /// Builder: queue an `f64` (`Double`) write.
     #[must_use]
-    pub fn set_f64(
-        self,
-        name: impl Into<String>,
-        property: impl Into<String>,
-        value: f64,
-    ) -> Self {
+    pub fn set_f64(self, name: impl Into<String>, property: impl Into<String>, value: f64) -> Self {
         self.insert(name, property, DpValue::F64(value))
     }
 
     /// Builder: queue an `i32` write.
     #[must_use]
-    pub fn set_i32(
-        self,
-        name: impl Into<String>,
-        property: impl Into<String>,
-        value: i32,
-    ) -> Self {
+    pub fn set_i32(self, name: impl Into<String>, property: impl Into<String>, value: i32) -> Self {
         self.insert(name, property, DpValue::I32(value))
     }
 

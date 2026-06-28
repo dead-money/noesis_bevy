@@ -140,8 +140,7 @@ fn write_only_bridges_apply_their_effect() {
                     *vis = NoesisVisibility::new().hide("Panel");
                     *focus = NoesisFocus::new().focus("Input");
                     *layout = NoesisLayout::new().margin("Float", [8.0, 0.0, 16.0, 0.0]);
-                    *geom =
-                        NoesisGeometry::new().path("Trace", vec![[0.0, 0.0], [40.0, 20.0]]);
+                    *geom = NoesisGeometry::new().path("Trace", vec![[0.0, 0.0], [40.0, 20.0]]);
                     // Keep the watches; add a DP write whose layout side-effect
                     // (Input.ActualWidth: 20 -> 40) is observable.
                     *dp = watcher().set_f32("Input", "Width", 40.0);

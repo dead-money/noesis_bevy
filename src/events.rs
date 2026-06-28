@@ -254,14 +254,20 @@ mod tests {
         q.push(v, "Alpha".into());
         q.push(v, "Beta".into());
         let drained = q.drain();
-        assert_eq!(drained, vec![(v, "Alpha".to_string()), (v, "Beta".to_string())]);
+        assert_eq!(
+            drained,
+            vec![(v, "Alpha".to_string()), (v, "Beta".to_string())]
+        );
         assert!(q.drain().is_empty());
     }
 
     #[test]
     fn click_watch_constructor_normalizes_into_strings() {
         let w = NoesisClickWatch::new(["a", "b", "c"]);
-        assert_eq!(w.names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            w.names,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]

@@ -291,7 +291,9 @@ fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
 /// component to a [`NoesisView`](crate::NoesisView) entity to bind it.
 pub trait NoesisViewModelAppExt {
     /// Bind `T` as each carrying view's **root** `DataContext`.
-    fn add_noesis_view_model<T: NoesisViewModel + Component<Mutability = Mutable>>(&mut self) -> &mut Self;
+    fn add_noesis_view_model<T: NoesisViewModel + Component<Mutability = Mutable>>(
+        &mut self,
+    ) -> &mut Self;
 
     /// Bind `T` as the `DataContext` of the element named `x_name` within each
     /// carrying view.
@@ -302,7 +304,9 @@ pub trait NoesisViewModelAppExt {
 }
 
 impl NoesisViewModelAppExt for App {
-    fn add_noesis_view_model<T: NoesisViewModel + Component<Mutability = Mutable>>(&mut self) -> &mut Self {
+    fn add_noesis_view_model<T: NoesisViewModel + Component<Mutability = Mutable>>(
+        &mut self,
+    ) -> &mut Self {
         register_plain_vm::<T>(self, AttachTarget::Root)
     }
 
@@ -322,6 +326,9 @@ fn register_plain_vm<T: NoesisViewModel + Component<Mutability = Mutable>>(
         target,
         _marker: std::marker::PhantomData,
     })
-    .add_systems(PostUpdate, sync_plain_vm_system::<T>.in_set(NoesisSet::Apply));
+    .add_systems(
+        PostUpdate,
+        sync_plain_vm_system::<T>.in_set(NoesisSet::Apply),
+    );
     app
 }

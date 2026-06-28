@@ -334,11 +334,7 @@ fn scene_from_file(abs: &Path) -> Option<ScenePath> {
     })
 }
 
-fn setup_camera(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    initial: Res<InitialView>,
-) {
+fn setup_camera(mut commands: Commands, asset_server: Res<AssetServer>, initial: Res<InitialView>) {
     // One view: the scene config + Noesis marker live on the camera entity.
     commands.spawn((
         Camera2d,
@@ -453,7 +449,10 @@ fn viewer_controls(
             KeyCode::KeyP => {
                 if let Some(mut scene) = views.iter_mut().next() {
                     scene.ppaa = !scene.ppaa;
-                    info!("xaml_viewer: PPAA {}", if scene.ppaa { "on" } else { "off" });
+                    info!(
+                        "xaml_viewer: PPAA {}",
+                        if scene.ppaa { "on" } else { "off" }
+                    );
                 }
             }
             KeyCode::KeyS => {

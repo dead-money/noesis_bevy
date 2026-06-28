@@ -194,8 +194,7 @@ impl NoesisVm {
 
     /// Queue a `String` write.
     pub fn set_string(&mut self, prop: impl Into<String>, value: impl Into<String>) {
-        self.pending
-            .push((prop.into(), VmValue::Str(value.into())));
+        self.pending.push((prop.into(), VmValue::Str(value.into())));
     }
 
     pub(crate) fn def(&self) -> &ViewModelDef {

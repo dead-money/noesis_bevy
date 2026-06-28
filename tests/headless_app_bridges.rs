@@ -26,7 +26,9 @@ use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
 use dm_noesis_bevy::classes::PropType;
 use dm_noesis_bevy::viewmodel::{NoesisVm, ViewModelDef};
-use dm_noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisText, NoesisTextChanged, NoesisView, XamlRegistry};
+use dm_noesis_bevy::{
+    NoesisCamera, NoesisPlugin, NoesisText, NoesisTextChanged, NoesisView, XamlRegistry,
+};
 
 const SET_AT_FRAME: usize = 6;
 const EXIT_AT_FRAME: usize = 40;
@@ -36,7 +38,6 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
       Width="64" Height="32">
   <TextBlock x:Name="Echo" Text="{Binding Foo}"/>
 </Grid>"##;
-
 
 /// Bluff-catch follow-up: **two** views, each with its own `NoesisVm` bound to
 /// its own `Echo` `TextBlock` and its own `NoesisText` watch. Writing a distinct
