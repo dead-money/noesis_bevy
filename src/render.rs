@@ -57,6 +57,7 @@ use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::geometry::SharedGeometryQueue;
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::{ItemsBinding, NoesisItemsSources};
+use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
 use crate::text::{SharedTextChangedQueue, SharedTextWriteQueue};
 use crate::viewmodel::{AttachTarget, NoesisViewModels, SharedVmChangedQueue, VmEntry};
@@ -318,6 +319,12 @@ pub(crate) struct NoesisRenderState {
     /// pass) and are released in [`Drop`] before the registered device. See
     /// [`crate::items`].
     items_sources: HashMap<String, ItemsBinding>,
+    /// Rust-owned plain-struct view models keyed by the Bevy `Resource`'s
+    /// `TypeId` (TODO §3/§9). Each owns a reflected `PlainVmClass` + instance
+    /// bound as a scene element's `DataContext`. Same rebuild/teardown rules as
+    /// [`Self::view_models`]; released in [`Drop`] before the registered device.
+    /// See [`crate::plain_vm`].
+    plain_vms: HashMap<std::any::TypeId, PlainVmEntry>,
 }
 
 struct SceneInstance {
@@ -421,6 +428,7 @@ impl NoesisRenderState {
             bake_rig: None,
             view_models: Vec::new(),
             items_sources: HashMap::new(),
+            plain_vms: HashMap::new(),
         }
     }
 
@@ -543,6 +551,70 @@ impl NoesisRenderState {
                     name,
                 );
             }
+        }
+    }
+
+    /// Ensure a plain-struct view model is registered + instantiated, apply any
+    /// pending field snapshot (Rust→UI), and attach it as its target's
+    /// `DataContext` once the element exists. The metadata is passed in (not
+    /// generic) so one method serves every VM type. See [`crate::plain_vm`].
+    pub(crate) fn sync_plain_vm(
+        &mut self,
+        type_id: std::any::TypeId,
+        type_name: &str,
+        props: &[(&'static str, crate::plain_vm::PlainType)],
+        target: &AttachTarget,
+        set_sink: &crate::plain_vm::SetSink,
+        snapshot: Option<Vec<crate::plain_vm::PlainValue>>,
+    ) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.plain_vms.entry(type_id) {
+            let Some(entry) = PlainVmEntry::build(
+                type_name,
+                props,
+                target.clone(),
+                std::sync::Arc::clone(set_sink),
+            ) else {
+                warn!(
+                    "NoesisViewModel: failed to register plain VM {type_name:?} (duplicate name?)",
+                );
+                return;
+            };
+            slot.insert(entry);
+        }
+
+        if let (Some(entry), Some(snapshot)) = (self.plain_vms.get(&type_id), snapshot) {
+            entry.apply_snapshot(&snapshot);
+        }
+
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let uri = scene.built_for_uri.clone();
+        let Some(entry) = self.plain_vms.get_mut(&type_id) else {
+            return;
+        };
+        if !entry.needs_attach(&uri) {
+            return;
+        }
+        let element = match entry.target() {
+            AttachTarget::Root => scene.view.content(),
+            AttachTarget::Named(name) => content.find_name(name),
+        };
+        let Some(mut element) = element else {
+            warn!(
+                "NoesisViewModel: attach target for {type_name:?} not found in scene {:?}",
+                scene.built_for_uri,
+            );
+            return;
+        };
+        if !entry.attach_to(&mut element, &uri) {
+            warn!(
+                "NoesisViewModel: set_data_context returned false for {type_name:?} \
+                 (target not a FrameworkElement?)",
+            );
         }
     }
 
@@ -1438,6 +1510,9 @@ impl NoesisRenderState {
         for binding in self.items_sources.values_mut() {
             binding.reset_bind();
         }
+        for entry in self.plain_vms.values_mut() {
+            entry.reset_attach();
+        }
         let Some(mut scene) = self.scene.take() else {
             return;
         };
@@ -1457,6 +1532,7 @@ impl Drop for NoesisRenderState {
         // here keeps teardown ordering obvious.)
         self.view_models.clear();
         self.items_sources.clear();
+        self.plain_vms.clear();
         self.teardown_scene();
         self.teardown_bake_rig();
         drop(self.registered_device.take());

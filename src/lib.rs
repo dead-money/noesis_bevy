@@ -22,6 +22,7 @@ pub mod input;
 pub mod items;
 pub mod layout;
 pub mod markup;
+pub mod plain_vm;
 pub mod render;
 pub mod render_device;
 pub mod text;
@@ -32,6 +33,8 @@ pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
+/// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
+pub use dm_noesis_bevy_derive::NoesisViewModel;
 pub use dp::{
     DpKind, DpValue, DpWatch, NoesisDpChanged, NoesisDpPlugin, NoesisDpReadWatch, NoesisDpRequests,
     SharedDpChangedQueue,
@@ -50,6 +53,7 @@ pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use items::{ItemsBinding, NoesisItemsPlugin, NoesisItemsSources};
 pub use layout::{NoesisLayoutPlugin, NoesisLayoutRequests};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
+pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisRenderPlugin, NoesisScene};
 pub use text::{
     NoesisTextChanged, NoesisTextPlugin, NoesisTextReadWatch, NoesisTextRequests,
