@@ -358,6 +358,11 @@ struct SceneInstance {
     /// text actually differs from the previous frame's snapshot. Names
     /// removed from the watch get pruned out of this map at sync time.
     text_snapshots: HashMap<String, String>,
+    /// Last value snapshot per `(x:Name, property)` in
+    /// [`crate::dp::NoesisDpReadWatch`]. Same dedupe role as
+    /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
+    /// scene so it resets on rebuild.
+    dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
 }
 
 /// A persistent, camera-less Noesis view reused to bake label panels to
@@ -768,6 +773,7 @@ impl NoesisRenderState {
             click_subs: HashMap::new(),
             keydown_subs: HashMap::new(),
             text_snapshots: HashMap::new(),
+            dp_snapshots: HashMap::new(),
         });
     }
 
@@ -1074,6 +1080,81 @@ impl NoesisRenderState {
             }
             scene.text_snapshots.insert(name.clone(), current.clone());
             queue.push(name.clone(), current);
+        }
+    }
+
+    /// Apply pending generic DP writes from [`crate::dp::NoesisDpRequests`].
+    /// Each entry is `(x:Name, property, value)`; missing names / type
+    /// mismatches log a warning. Mirrors [`Self::apply_text_writes`].
+    pub(crate) fn apply_dp_writes(&mut self, requests: &crate::dp::NoesisDpRequests) {
+        let pending = requests.drain();
+        if pending.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, property, value) in pending {
+            let Some(mut element) = content.find_name(&name) else {
+                warn!(
+                    "NoesisDp: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if value.write_to(&mut element, &property) {
+                // Update the snapshot eagerly so the read pass doesn't emit a
+                // phantom change for a write we just issued ourselves.
+                scene.dp_snapshots.insert((name, property), value);
+            } else {
+                warn!(
+                    "NoesisDp: write to {name:?}.{property:?} failed \
+                     (unknown property or type mismatch)",
+                );
+            }
+        }
+    }
+
+    /// Poll watched DPs from [`crate::dp::NoesisDpReadWatch`], pushing a change
+    /// onto `queue` whenever a value differs from the previous frame's
+    /// snapshot. Mirrors [`Self::poll_text_reads`]; entries dropped from the
+    /// watch get pruned from the snapshot map.
+    pub(crate) fn poll_dp_reads(
+        &mut self,
+        watched: &[crate::dp::DpWatch],
+        queue: &crate::dp::SharedDpChangedQueue,
+    ) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        scene.dp_snapshots.retain(|(name, property), _| {
+            watched
+                .iter()
+                .any(|w| &w.name == name && &w.property == property)
+        });
+
+        if watched.is_empty() {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for watch in watched {
+            let Some(element) = content.find_name(&watch.name) else {
+                continue;
+            };
+            let Some(current) = watch.kind.read_from(&element, &watch.property) else {
+                continue;
+            };
+            let key = (watch.name.clone(), watch.property.clone());
+            if scene.dp_snapshots.get(&key) == Some(&current) {
+                continue;
+            }
+            scene.dp_snapshots.insert(key, current.clone());
+            queue.push(watch.name.clone(), watch.property.clone(), current);
         }
     }
 

@@ -12,6 +12,7 @@ use bevy::prelude::*;
 
 pub mod bake;
 pub mod classes;
+pub mod dp;
 pub mod events;
 pub mod focus;
 pub mod font;
@@ -31,6 +32,10 @@ pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
+pub use dp::{
+    DpKind, DpValue, DpWatch, NoesisDpChanged, NoesisDpPlugin, NoesisDpReadWatch, NoesisDpRequests,
+    SharedDpChangedQueue,
+};
 pub use events::{
     Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin, NoesisKeyDown,
     NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue,
@@ -106,22 +111,30 @@ impl Plugin for NoesisPlugin {
         // + input forwarder. Safe to add unconditionally —
         // NoesisRenderPlugin no-ops if RenderApp isn't present (e.g. a
         // headless-test setup without a display).
+        // Grouped into two nested tuples: asset/render/input infrastructure, and
+        // the per-feature Bevy bridges. The nesting also keeps each tuple under
+        // Bevy's 15-element `Plugins` impl limit.
         app.add_plugins((
-            xaml::XamlAssetPlugin,
-            font::FontAssetPlugin,
-            image::ImageAssetPlugin,
-            render::NoesisRenderPlugin,
-            input::NoesisInputPlugin,
-            events::NoesisEventsPlugin,
-            classes::NoesisClassPlugin,
-            markup::NoesisMarkupExtensionPlugin,
-            visibility::NoesisVisibilityPlugin,
-            layout::NoesisLayoutPlugin,
-            text::NoesisTextPlugin,
-            geometry::NoesisGeometryPlugin,
-            focus::NoesisFocusPlugin,
-            viewmodel::NoesisViewModelPlugin,
-            items::NoesisItemsPlugin,
+            (
+                xaml::XamlAssetPlugin,
+                font::FontAssetPlugin,
+                image::ImageAssetPlugin,
+                render::NoesisRenderPlugin,
+                input::NoesisInputPlugin,
+            ),
+            (
+                events::NoesisEventsPlugin,
+                classes::NoesisClassPlugin,
+                markup::NoesisMarkupExtensionPlugin,
+                visibility::NoesisVisibilityPlugin,
+                layout::NoesisLayoutPlugin,
+                text::NoesisTextPlugin,
+                geometry::NoesisGeometryPlugin,
+                focus::NoesisFocusPlugin,
+                viewmodel::NoesisViewModelPlugin,
+                items::NoesisItemsPlugin,
+                dp::NoesisDpPlugin,
+            ),
         ));
     }
 }

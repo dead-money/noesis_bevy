@@ -135,24 +135,6 @@ cargo test
 cargo run --example xaml_viewer
 ```
 
-## Project layout
-
-For maintainers, what lives where:
-
-- `src/lib.rs` — `NoesisPlugin`, `NoesisLicense`, public re-exports.
-- `src/render.rs` — `NoesisScene`, the render-app plugin, `NoesisRenderState`, the `NoesisNode` graph node, extraction systems, blit pipeline cache.
-- `src/render_device/` — `WgpuRenderDevice`, pipeline cache, WGSL preprocessor, and the unified `shaders/noesis.wgsl`.
-- `src/xaml.rs`, `src/font.rs`, `src/image.rs` — the asset types, loaders, registries, and Noesis providers for XAML, fonts, and images.
-- `src/input.rs` — Bevy input forwarders and render-world ingestion.
-- `src/events.rs` — `NoesisClickWatch` / `NoesisClicked` and the click subscription bridge.
-- `src/viewmodel.rs` — `NoesisViewModels` / `NoesisViewModelChanged`: the data-binding bridge that attaches a Rust-owned ViewModel as a `DataContext` and round-trips two-way `{Binding}` edits.
-- `src/items.rs` — `NoesisItemsSources`: drives a named list control's `ItemsSource` from a Rust-owned `ObservableCollection` (populate a `ComboBox` from code, mutate it live).
-- `src/classes.rs`, `src/markup.rs` — custom XAML class and markup-extension lifecycles.
-- `assets/phase5/*.xaml` — the input and animation test corpus.
-- `examples/xaml_viewer.rs` — the main example. `examples/phase4_visual.rs` and `examples/bevy_wgpu_bridge.rs` are lower-level smoke tests.
-- `tests/` — wgpu device tests and headless XAML rendering tests.
-- `CLAUDE.md` — architectural invariants and open work. Read first when contributing.
-
 ## Licensing
 
 Source in this repository is © 2026 Dead Money under the [MIT License](./LICENSE). Everything under `src/`, `tests/`, `examples/`, and `assets/` is original work; no Noesis SDK code is vendored.
