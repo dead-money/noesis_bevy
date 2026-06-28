@@ -108,7 +108,7 @@ impl<D: RenderDevice> RecordingDevice<D> {
         (
             Self {
                 inner,
-                ops: ops.clone(),
+                ops: Arc::clone(&ops),
                 scratch_vertices: Vec::new(),
                 scratch_indices: Vec::new(),
                 pending_vertex_bytes: None,

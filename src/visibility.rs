@@ -95,7 +95,7 @@ impl SharedVisibilityQueue {
 
 /// Render-app system: drain the visibility queue and apply each entry to
 /// the live View. Runs in `RenderSystems::Prepare` so writes from this
-/// frame's main-world systems land before Noesis's update_render_tree.
+/// frame's main-world systems land before Noesis's `update_render_tree`.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn apply_visibility_requests(
     requests: Option<Res<NoesisVisibilityRequests>>,

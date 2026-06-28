@@ -24,6 +24,7 @@ pub mod render;
 pub mod render_device;
 pub mod text;
 pub mod theme;
+pub mod viewmodel;
 pub mod visibility;
 pub mod xaml;
 
@@ -48,6 +49,10 @@ pub use text::{
     SharedTextChangedQueue,
 };
 pub use theme::NoesisDefaultThemePlugin;
+pub use viewmodel::{
+    NoesisViewModelChanged, NoesisViewModelPlugin, NoesisViewModels, SharedVmChangedQueue,
+    ViewModelChangeForwarder, ViewModelDef, ViewModelId, VmValue,
+};
 pub use visibility::{NoesisVisibilityPlugin, NoesisVisibilityRequests};
 pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, XamlRegistry};
 
@@ -113,6 +118,7 @@ impl Plugin for NoesisPlugin {
             text::NoesisTextPlugin,
             geometry::NoesisGeometryPlugin,
             focus::NoesisFocusPlugin,
+            viewmodel::NoesisViewModelPlugin,
         ));
     }
 }

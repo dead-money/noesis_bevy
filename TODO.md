@@ -67,10 +67,19 @@ largest open area.
   (one entity per view, scene config as a component) is the idiomatic Bevy shape and a
   prerequisite for multi-view.
 - **Bevy surface for newly-wrapped runtime features.** As the runtime exposes primitives
-  (generic property get/set, binding bridge, `VisualStateManager::GoToState`, more routed
-  events), add the matching Bevy ergonomics: typed components, `Reflect` integration where
-  it fits, and event bridges in the style of the existing `NoesisClicked`. Driven by
-  `../dm_noesis_runtime/TODO.md`; no separate enumeration here.
+  (`VisualStateManager::GoToState`, more routed events, …), add the matching Bevy ergonomics:
+  typed components, `Reflect` integration where it fits, and event bridges in the style of the
+  existing `NoesisClicked`. Driven by `../dm_noesis_runtime/TODO.md`; no separate enumeration
+  here. Landed so far:
+  - **Data binding / ViewModel bridge** (`src/viewmodel.rs`, `NoesisViewModelPlugin`) — declare
+    a Rust-owned view model (`ViewModelDef`), attach it as a `DataContext` render-side, write its
+    DPs from app code, and receive two-way control edits as `NoesisViewModelChanged` messages.
+    Needed the safe `FrameworkElement::set_data_context(&ClassInstance)` accessor added to the
+    runtime (`unsafe_code = forbid` here can't call the raw pointer variant).
+  - *Remaining:* a generic DP get/set bridge keyed by `(x:Name, property)` (a near-mechanical
+    mirror of `text.rs`, independently useful for binding-free control access) and an
+    `ObservableCollection` → `ItemsSource` bridge for populating list controls from Rust (the
+    safe `set_items_source(&ObservableCollection)` runtime accessor is already in place).
 - **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without
   a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
   `BasedOn` a theme Style or dropping the custom Style.

@@ -114,7 +114,7 @@ impl<D: RenderDevice> RecordingDevice<D> {
         (
             Self {
                 inner,
-                ops: ops.clone(),
+                ops: Arc::clone(&ops),
             },
             ops,
         )

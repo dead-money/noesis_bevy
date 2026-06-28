@@ -1,4 +1,4 @@
-//! Custom MarkupExtension registration (Phase 5.D) — Bevy wrapper.
+//! Custom `MarkupExtension` registration (Phase 5.D) — Bevy wrapper.
 //!
 //! Lets you register Rust-backed `{myns:Foo positional_arg}` markup
 //! extensions from Bevy systems, with the resulting
