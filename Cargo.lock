@@ -2229,11 +2229,21 @@ dependencies = [
  "bevy",
  "bevy_render",
  "bytemuck",
+ "dm_noesis_bevy_derive",
  "dm_noesis_runtime",
  "image",
  "pollster",
  "thiserror 2.0.18",
  "wgpu",
+]
+
+[[package]]
+name = "dm_noesis_bevy_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

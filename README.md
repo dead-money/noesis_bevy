@@ -98,6 +98,31 @@ fn register(mut registry: ResMut<NoesisClassRegistry>) {
 
 `MarkupExtensionRegistration` works the same way via `NoesisMarkupExtensionRegistry`. See the `dm_noesis_runtime` README for the FFI-level details.
 
+## Data binding
+
+Bind a plain Bevy `Resource` to XAML `{Binding field_name}` — derive `NoesisViewModel`, register it, and each field is reflected to the binding engine by name, two-way:
+
+```rust
+use bevy::prelude::*;
+use dm_noesis_bevy::{NoesisPlugin, NoesisViewModel, NoesisViewModelAppExt};
+
+#[derive(Resource, NoesisViewModel)]
+struct SettingsVm {
+    volume: f32,   // <Slider Value="{Binding volume, Mode=TwoWay}"/>
+    muted: bool,   // <CheckBox IsChecked="{Binding muted}"/>
+    quality: i32,  // <ComboBox SelectedIndex="{Binding quality, Mode=TwoWay}"/>
+}
+
+App::new()
+    .add_plugins((DefaultPlugins, NoesisPlugin::default()))
+    .insert_resource(SettingsVm { volume: 0.8, muted: false, quality: 2 })
+    .add_noesis_view_model::<SettingsVm>(); // attach as the view-root DataContext
+```
+
+Mutating the resource updates the bound controls (Bevy change detection → `INotifyPropertyChanged`); a control edit writes back into the resource. Supported field types are `f32`/`f64`, `i32`/`u32`, `bool`, and `String`; mark other fields `#[noesis(skip)]`.
+
+For lower-level access there are also `NoesisViewModels` (a `DependencyObject`-backed view model with explicit properties), `NoesisItemsSources` (drive a `ComboBox`/`ListBox`'s items from a Rust `ObservableCollection`), and `NoesisDpRequests` / `NoesisDpReadWatch` (binding-free get/set of any dependency property by `(x:Name, property)`).
+
 ## How it works
 
 - **Noesis lives in the render world.** The main world owns the `NoesisScene` config, the asset registries, and the input event source. Everything Noesis touches (View, Renderer, RenderDevice, providers) sits on the render side behind `!Send` resources. Bevy's `ExtractResourcePlugin` mirrors the asset registries each frame.

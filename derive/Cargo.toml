@@ -1,0 +1,18 @@
+[package]
+name = "dm_noesis_bevy_derive"
+version = "0.1.0"
+edition = "2024"
+description = "#[derive(NoesisViewModel)] for dm_noesis_bevy — bind a plain Rust struct to XAML by field name."
+license = "MIT"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

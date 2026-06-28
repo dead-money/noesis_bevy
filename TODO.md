@@ -74,6 +74,9 @@ largest open area.
 - **Typed `ItemsSource` / collection items.** The `ItemsSource` bridge handles string items only
   (the safe `ObservableCollection` surface is `push_string`). Non-string items (numbers, nested
   view models) need a safe `push_*` added to the runtime first.
+- **Per-entity plain view models.** `#[derive(NoesisViewModel)]` binds a Bevy `Resource` today
+  (`add_noesis_view_model::<T>()`). Extend to per-entity `Component` view models (one instance per
+  entity, routed to elements) once the component-based scene API lands.
 - **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without
   a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
   `BasedOn` a theme Style or dropping the custom Style.
