@@ -146,7 +146,7 @@ fn to_view_coords(window: &Window, scene: &NoesisScene, x: f32, y: f32) -> Optio
 // ── Systems ────────────────────────────────────────────────────────────────
 
 /// Track the cursor position separately from `CursorMoved` so we can attach
-/// a move-at-press-coord to every MouseButton / Touch event. Noesis
+/// a move-at-press-coord to every `MouseButton` / Touch event. Noesis
 /// hit-tests on the last known pointer position; without this, a button
 /// pressed before the cursor has entered the window hits (0,0).
 #[derive(Resource, Default, Clone, Copy, Debug)]
@@ -267,11 +267,11 @@ fn forward_keyboard(mut reader: MessageReader<KeyboardInput>, mut queue: ResMut<
         if ev.repeat {
             // But we DO still want the Char(s) on repeat so TextBox
             // auto-repeat works.
-            if matches!(ev.state, ButtonState::Pressed) {
-                if let Some(text) = ev.text.as_deref() {
-                    for ch in text.chars() {
-                        queue.push(NoesisInputEvent::Char(ch as u32));
-                    }
+            if matches!(ev.state, ButtonState::Pressed)
+                && let Some(text) = ev.text.as_deref()
+            {
+                for ch in text.chars() {
+                    queue.push(NoesisInputEvent::Char(ch as u32));
                 }
             }
             continue;

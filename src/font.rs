@@ -143,11 +143,8 @@ impl FontRegistry {
 /// `FontFamily="Fonts/#Bitter"`). Paths with no folder return
 /// `("", filename)`.
 fn split_folder_filename(asset_path: &str) -> (String, String) {
-    match asset_path.rfind('/') {
-        Some(slash) => (
-            asset_path[..slash].to_string(),
-            asset_path[slash + 1..].to_string(),
-        ),
+    match asset_path.rsplit_once('/') {
+        Some((folder, filename)) => (folder.to_string(), filename.to_string()),
         None => (String::new(), asset_path.to_string()),
     }
 }

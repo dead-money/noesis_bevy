@@ -58,6 +58,7 @@ use crate::geometry::SharedGeometryQueue;
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::render_device::WgpuRenderDevice;
 use crate::text::{SharedTextChangedQueue, SharedTextWriteQueue};
+use crate::viewmodel::{AttachTarget, NoesisViewModels, SharedVmChangedQueue, VmEntry};
 use crate::visibility::SharedVisibilityQueue;
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
 
@@ -303,6 +304,13 @@ pub(crate) struct NoesisRenderState {
     /// here so it shares the single registered device and its renderer is torn
     /// down before the device drops — see [`Drop`].
     bake_rig: Option<BakeRig>,
+    /// Live Rust-owned view models (TODO §3 binding bridge). Each owns a
+    /// `ClassInstance` + `ClassRegistration` and is attached as a scene
+    /// element's `DataContext`. Stored here (not in [`SceneInstance`]) so a VM
+    /// survives scene rebuilds — the attach pass re-binds it to the new view.
+    /// Released in [`Drop`] before the registered device, while Noesis is still
+    /// initialized. See [`crate::viewmodel`].
+    view_models: Vec<VmEntry>,
 }
 
 struct SceneInstance {
@@ -399,6 +407,86 @@ impl NoesisRenderState {
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
             bake_rig: None,
+            view_models: Vec::new(),
+        }
+    }
+
+    /// Drain pending view-model registrations from [`NoesisViewModels`]: for
+    /// each, register the Noesis class, instantiate it, and wire its change
+    /// forwarder to `changed`. Builds happen render-side because Noesis objects
+    /// are thread-affine to the `View`. Idempotent on an empty queue.
+    pub(crate) fn register_view_models(
+        &mut self,
+        vms: &NoesisViewModels,
+        changed: &SharedVmChangedQueue,
+    ) {
+        let pending = vms.drain_registrations();
+        for (id, def) in pending {
+            match VmEntry::build(id, &def, changed) {
+                Some(entry) => self.view_models.push(entry),
+                None => warn!(
+                    "NoesisViewModels: failed to register/instantiate class {:?} (duplicate name?)",
+                    def.class_name(),
+                ),
+            }
+        }
+    }
+
+    /// Drain pending view-model writes from [`NoesisViewModels`] and apply each
+    /// to its instance's dependency property. Unknown ids / property names log
+    /// a warning and are skipped. Idempotent on an empty queue.
+    pub(crate) fn apply_view_model_writes(&mut self, vms: &NoesisViewModels) {
+        let pending = vms.drain_writes();
+        for (id, prop, value) in pending {
+            let Some(entry) = self.view_models.iter().find(|e| e.id == id) else {
+                warn!("NoesisViewModels: write to unknown view model {id:?}");
+                continue;
+            };
+            if !entry.write(&prop, &value) {
+                warn!("NoesisViewModels: view model {id:?} has no property {prop:?}");
+            }
+        }
+    }
+
+    /// Attach any not-yet-attached view model as its target's `DataContext`.
+    /// No-op until the scene's `View` (and any named target) exists; retries
+    /// each frame until the element resolves. Re-attaches after a scene
+    /// rebuild (the URI key changes, or teardown reset the attach state).
+    pub(crate) fn attach_view_models(&mut self) {
+        if self.view_models.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let uri = scene.built_for_uri.clone();
+        for entry in &mut self.view_models {
+            if !entry.needs_attach(&uri) {
+                continue;
+            }
+            let target = match entry.target() {
+                AttachTarget::Root => scene.view.content(),
+                AttachTarget::Named(name) => content.find_name(name),
+            };
+            let Some(mut element) = target else {
+                warn!(
+                    "NoesisViewModels: attach target for {:?} not found in scene {:?}",
+                    entry.id, scene.built_for_uri,
+                );
+                continue;
+            };
+            if element.set_data_context(entry.instance()) {
+                entry.mark_attached(&uri);
+            } else {
+                warn!(
+                    "NoesisViewModels: set_data_context returned false for {:?} \
+                     (target not a FrameworkElement?)",
+                    entry.id,
+                );
+            }
         }
     }
 
@@ -486,17 +574,17 @@ impl NoesisRenderState {
         // the View. Rebuild just the intermediate texture; `View::set_size`
         // informs Noesis without invalidating the renderer. Important for
         // desktop window drags, which fire `WindowResized` at every pixel.
-        if let Some(scene) = self.scene.as_mut() {
-            if scene.built_for_uri == config.xaml_uri && scene.size != config.size {
-                scene.view.set_size(config.size.x, config.size.y);
-                let (tex, render_view, sample_view) =
-                    create_intermediate(&self.device, config.size);
-                scene.intermediate = tex;
-                scene.intermediate_view = render_view;
-                scene.intermediate_sample_view = sample_view;
-                scene.size = config.size;
-                return;
-            }
+        if let Some(scene) = self.scene.as_mut()
+            && scene.built_for_uri == config.xaml_uri
+            && scene.size != config.size
+        {
+            scene.view.set_size(config.size.x, config.size.y);
+            let (tex, render_view, sample_view) = create_intermediate(&self.device, config.size);
+            scene.intermediate = tex;
+            scene.intermediate_view = render_view;
+            scene.intermediate_sample_view = sample_view;
+            scene.size = config.size;
+            return;
         }
 
         let up_to_date = self
@@ -1210,6 +1298,11 @@ impl NoesisRenderState {
     }
 
     fn teardown_scene(&mut self) {
+        // View models outlive the scene; mark them detached so the next attach
+        // pass re-binds them against the rebuilt view.
+        for entry in &mut self.view_models {
+            entry.reset_attach();
+        }
         let Some(mut scene) = self.scene.take() else {
             return;
         };
@@ -1223,6 +1316,11 @@ impl NoesisRenderState {
 
 impl Drop for NoesisRenderState {
     fn drop(&mut self) {
+        // Release view-model instances + registrations first, while Noesis is
+        // still initialized and the registered device/providers are alive.
+        // (They don't need the device, but releasing them deterministically
+        // here keeps teardown ordering obvious.)
+        self.view_models.clear();
         self.teardown_scene();
         self.teardown_bake_rig();
         drop(self.registered_device.take());

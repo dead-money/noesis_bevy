@@ -295,8 +295,12 @@ mod tests {
         let bytes_a = Arc::new(b"<Grid Background=\"Red\"/>".to_vec());
         let bytes_b = Arc::new(b"<Grid Background=\"Blue\"/>".to_vec());
         let mut registry = XamlRegistry::default();
-        registry.entries.insert("a.xaml".into(), bytes_a.clone());
-        registry.entries.insert("b.xaml".into(), bytes_b.clone());
+        registry
+            .entries
+            .insert("a.xaml".into(), Arc::clone(&bytes_a));
+        registry
+            .entries
+            .insert("b.xaml".into(), Arc::clone(&bytes_b));
         shared.sync_from(&registry);
 
         let slice_a = provider.load_xaml("a.xaml").expect("a.xaml missing");

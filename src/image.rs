@@ -1,4 +1,4 @@
-//! Image-asset plumbing for the ImageBrush / Image loader (Phase 4.E).
+//! Image-asset plumbing for the `ImageBrush` / Image loader (Phase 4.E).
 //!
 //! Parallels [`crate::font`]:
 //!
@@ -117,10 +117,10 @@ impl AssetLoader for ImageAssetLoader {
 /// (see module docs). `bytes.len()` must be a multiple of 4.
 ///
 /// Uses 8-bit rounding (`+ 127) / 255`) — matches what Photoshop / GIMP /
-/// Unity's NoesisGUIPackage importer write for cooked sprites. Pure-zero
+/// Unity's `NoesisGUIPackage` importer write for cooked sprites. Pure-zero
 /// alpha pixels collapse to fully-transparent black, which is the
 /// conventional PMA representation (avoids stale colour bleeding through
-/// SrcOver edges).
+/// `SrcOver` edges).
 #[inline]
 fn premultiply_alpha(bytes: &mut [u8]) {
     debug_assert_eq!(

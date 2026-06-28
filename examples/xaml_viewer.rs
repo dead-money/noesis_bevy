@@ -17,7 +17,7 @@
 //! from `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/` into the
 //! XAML + font registries, and points `NoesisScene.application_resources`
 //! at `NoesisTheme.<name>.xaml` so unstyled controls pick up real
-//! ControlTemplates instead of Noesis's magenta placeholders.
+//! `ControlTemplates` instead of Noesis's magenta placeholders.
 //!
 //! ```bash
 //! # Single file
@@ -40,7 +40,7 @@
 //! - `NOESIS_SCREENSHOT_FRAMES`   — frame to shoot on in headless mode (default 120).
 //! - `NOESIS_VIEWER_EXIT_AFTER`   — any value → take one screenshot and exit.
 //! - `NOESIS_VIEWER_SIZE`         — `WxH` override for the Noesis view size
-//!                                   (default: match the window's initial physical size).
+//!   (default: match the window's initial physical size).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ struct Viewer {
 
 #[derive(Clone, Debug)]
 struct ScenePath {
-    /// URI Noesis asks for — matches the XamlRegistry key.
+    /// URI Noesis asks for — matches the `XamlRegistry` key.
     uri: String,
     /// On-disk absolute path. Kept for reload + default screenshot naming.
     fs_path: PathBuf,
@@ -198,10 +198,10 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
     // uses the same bare-name form.
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "xaml") {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                files.xamls.push((name.to_string(), path.clone()));
-            }
+        if path.extension().is_some_and(|e| e == "xaml")
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            files.xamls.push((name.to_string(), path.clone()));
         }
     }
 
@@ -216,12 +216,12 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
         .flatten()
     {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "otf" || e == "ttf") {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                files
-                    .fonts
-                    .push(("Fonts".to_string(), name.to_string(), path.clone()));
-            }
+        if path.extension().is_some_and(|e| e == "otf" || e == "ttf")
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            files
+                .fonts
+                .push(("Fonts".to_string(), name.to_string(), path.clone()));
         }
     }
 

@@ -31,11 +31,68 @@ pollster = "0.4"
 [lints.rust]
 unsafe_code = "forbid"
 
+# Curated lint set shared with `../dm_noesis_runtime` (originally from
+# magicsmoke / hommlet-rust). Prefer this to a blanket `pedantic = warn` —
+# opting into specific lints keeps the signal-to-noise ratio high and makes
+# intent obvious. Unlike the runtime, this crate keeps `unsafe_code = "forbid"`
+# (above): it's the integration layer, not the FFI quarantine — so the runtime's
+# FFI-only `mem_forget` allowance is dropped here.
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
-module_name_repetitions = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+indexing_slicing = "allow"
+many_single_char_names = "allow"
+
+# `panic` covers the build script's config-error exits and unreachable enum
+# guards; `float_cmp` is exact dedup of already-quantized scale/flag values
+# before re-issuing an FFI call (see `render::NoesisRenderState::apply_live_flags`).
+panic = "allow"
+float_cmp = "allow"
+
+# Correctness
+unnecessary_cast = "warn"
+as_underscore = "warn"
+ptr_as_ptr = "warn"
+clone_on_ref_ptr = "warn"
+cloned_instead_of_copied = "warn"
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+invalid_upcast_comparisons = "warn"
+mixed_read_write_in_expression = "warn"
+index_refutable_slice = "warn"
+string_slice = "warn"
+
+# Style
+doc_markdown = "warn"
+equatable_if_let = "warn"
+if_not_else = "warn"
+implicit_saturating_sub = "warn"
+inconsistent_struct_constructor = "warn"
+mismatching_type_param_order = "warn"
+branches_sharing_code = "warn"
+manual_assert = "warn"
+mut_mut = "warn"
+needless_continue = "warn"
+option_option = "warn"
+range_minus_one = "warn"
+range_plus_one = "warn"
+redundant_else = "warn"
+ref_option_ref = "warn"
+unnested_or_patterns = "warn"
+unneeded_field_pattern = "warn"
+zero_sized_map_values = "warn"
+
+# Perf
+inefficient_to_string = "warn"
+large_types_passed_by_value = "warn"
+
+# Reminders
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# Cargo
+wildcard_dependencies = "warn"
 
 [[example]]
 name = "phase4_visual"

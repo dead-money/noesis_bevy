@@ -145,6 +145,7 @@ For maintainers, what lives where:
 - `src/xaml.rs`, `src/font.rs`, `src/image.rs` — the asset types, loaders, registries, and Noesis providers for XAML, fonts, and images.
 - `src/input.rs` — Bevy input forwarders and render-world ingestion.
 - `src/events.rs` — `NoesisClickWatch` / `NoesisClicked` and the click subscription bridge.
+- `src/viewmodel.rs` — `NoesisViewModels` / `NoesisViewModelChanged`: the data-binding bridge that attaches a Rust-owned ViewModel as a `DataContext` and round-trips two-way `{Binding}` edits.
 - `src/classes.rs`, `src/markup.rs` — custom XAML class and markup-extension lifecycles.
 - `assets/phase5/*.xaml` — the input and animation test corpus.
 - `examples/xaml_viewer.rs` — the main example. `examples/phase4_visual.rs` and `examples/bevy_wgpu_bridge.rs` are lower-level smoke tests.

@@ -54,7 +54,7 @@ const DYNAMIC_IB_SIZE: u64 = 128 * 1024;
 // other shader ignores the trailing 16 bytes. Layout matches `VsUniforms`
 // in `shaders/noesis.wgsl` (mat4x4 + vec4).
 const VS_UNIFORM_SIZE: u64 = 80;
-/// Byte offset of cbuffer1_vs within the VS uniform slot.
+/// Byte offset of `cbuffer1_vs` within the VS uniform slot.
 const VS_GLYPH_SIZE_OFFSET: usize = 64;
 
 // Pixel-shader uniform buffer 0: matches Noesis cbuffer0_ps (8 floats = 32
@@ -593,8 +593,8 @@ impl WgpuRenderDevice {
     }
 
     /// Allocate ring-buffer slots for this batch's uniforms and return the
-    /// dynamic offsets to bind. The VS slot packs cbuffer0_vs (mat4) into
-    /// bytes 0..64 and cbuffer1_vs (glyph-atlas size) into bytes 64..72;
+    /// dynamic offsets to bind. The VS slot packs `cbuffer0_vs` (mat4) into
+    /// bytes 0..64 and `cbuffer1_vs` (glyph-atlas size) into bytes 64..72;
     /// the trailing 8 bytes are zeroed so non-SDF shaders see vec4(0).
     fn upload_uniforms(&mut self, batch: &Batch) -> (u32, u32) {
         let cbuf0 = batch.vertex_uniforms[0].as_bytes();
