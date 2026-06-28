@@ -19,13 +19,13 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use dm_noesis_runtime::render_device::types::{Batch, DeviceCaps, Tile};
-use dm_noesis_runtime::render_device::{
+use noesis_runtime::render_device::types::{Batch, DeviceCaps, Tile};
+use noesis_runtime::render_device::{
     RenderDevice, RenderTargetBinding, RenderTargetDesc, RenderTargetHandle, TextureBinding,
     TextureDesc, TextureHandle, TextureRect,
 };
-use dm_noesis_runtime::view::{FrameworkElement, RenderFlag, View};
-use dm_noesis_runtime::xaml_provider::XamlProvider;
+use noesis_runtime::view::{FrameworkElement, RenderFlag, View};
+use noesis_runtime::xaml_provider::XamlProvider;
 
 const RT_SIZE: u32 = 128;
 const BYTES_PER_ROW: u32 = 512;
@@ -432,9 +432,9 @@ fn nested_child_grid_diagnostic() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
 
     let scenarios: &[(&str, &[u8], ScenarioOptions)] = &[
         // Baseline: leaf Grid. Should give 1 PATH_AA_SOLID painting the whole
@@ -617,7 +617,7 @@ fn nested_child_grid_diagnostic() {
         }
     });
 
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 
     eprintln!("══ Summary ═══════════════════════════════════════════");
     for (name, draws, center, corner) in &summary {
@@ -713,12 +713,12 @@ async fn run_scenario(xaml: &[u8], opts: ScenarioOptions) -> (Vec<Op>, [u8; 4], 
     wgpu_device.set_onscreen_target(target_view);
 
     let (recording, ops) = RecordingDevice::new(wgpu_device);
-    let registered_device = dm_noesis_runtime::render_device::register(recording);
+    let registered_device = noesis_runtime::render_device::register(recording);
 
     let provider = InMemoryXamlProvider {
         bytes: HashMap::from([("test.xaml".to_string(), xaml.to_vec())]),
     };
-    let _registered_provider = dm_noesis_runtime::xaml_provider::set_xaml_provider(provider);
+    let _registered_provider = noesis_runtime::xaml_provider::set_xaml_provider(provider);
 
     let element = FrameworkElement::load("test.xaml").expect("XAML load failed");
     let mut view = View::create(element);

@@ -1,4 +1,4 @@
-//! wgpu-backed [`dm_noesis_runtime::render_device::RenderDevice`] implementation.
+//! wgpu-backed [`noesis_runtime::render_device::RenderDevice`] implementation.
 //!
 //! Phase 2 brought up the first triangle on a single hard-coded `Path_Solid`
 //! pipeline. Phase 3.A reorganises the pipeline path:
@@ -35,10 +35,10 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::types::{
     Batch, DeviceCaps, SIZE_FOR_FORMAT, SamplerState, Shader, TextureFormat, Tile,
 };
-use dm_noesis_runtime::render_device::{
+use noesis_runtime::render_device::{
     RenderDevice, RenderTargetBinding, RenderTargetDesc, RenderTargetHandle, TextureBinding,
     TextureDesc, TextureHandle, TextureRect,
 };
@@ -203,13 +203,13 @@ impl WgpuRenderDevice {
     #[allow(clippy::too_many_lines)] // wgpu setup is linear and hard to split usefully
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("dm_noesis_runtime vertex stream"),
+            label: Some("noesis_runtime vertex stream"),
             size: DYNAMIC_VB_SIZE,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("dm_noesis_runtime index stream"),
+            label: Some("noesis_runtime index stream"),
             size: DYNAMIC_IB_SIZE,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -218,14 +218,14 @@ impl WgpuRenderDevice {
         let uniform_alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment);
         let vs_ring = UniformRing::new(
             &device,
-            "dm_noesis_runtime vs_uniforms ring (mat4 projection)",
+            "noesis_runtime vs_uniforms ring (mat4 projection)",
             VS_UNIFORM_SIZE,
             UNIFORM_RING_SLOTS,
             uniform_alignment,
         );
         let ps_ring = UniformRing::new(
             &device,
-            "dm_noesis_runtime ps_uniforms0 ring (cbuffer0_ps[8])",
+            "noesis_runtime ps_uniforms0 ring (cbuffer0_ps[8])",
             PS_UNIFORM0_SIZE,
             UNIFORM_RING_SLOTS,
             uniform_alignment,
@@ -233,7 +233,7 @@ impl WgpuRenderDevice {
 
         let vs_uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("dm_noesis_runtime vs_uniforms layout"),
+                label: Some("noesis_runtime vs_uniforms layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
@@ -247,7 +247,7 @@ impl WgpuRenderDevice {
             });
         let ps_uniform0_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("dm_noesis_runtime ps_uniforms0 layout"),
+                label: Some("noesis_runtime ps_uniforms0 layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -264,7 +264,7 @@ impl WgpuRenderDevice {
         // buffer. The dynamic offset passed to set_bind_group slides that
         // window to the per-batch slot.
         let vs_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dm_noesis_runtime vs_uniforms"),
+            label: Some("noesis_runtime vs_uniforms"),
             layout: &vs_uniform_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -276,7 +276,7 @@ impl WgpuRenderDevice {
             }],
         });
         let ps_uniform0_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dm_noesis_runtime ps_uniforms0"),
+            label: Some("noesis_runtime ps_uniforms0"),
             layout: &ps_uniform0_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -292,7 +292,7 @@ impl WgpuRenderDevice {
         // both PAINT_PATTERN draws and the dummy used by non-pattern draws.
         let pattern_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("dm_noesis_runtime pattern layout"),
+                label: Some("noesis_runtime pattern layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -319,7 +319,7 @@ impl WgpuRenderDevice {
         // offscreen image on top.
         let image_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("dm_noesis_runtime image layout"),
+                label: Some("noesis_runtime image layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -344,7 +344,7 @@ impl WgpuRenderDevice {
         // The pipeline layout always has group(2) so every draw must bind
         // something — the shader just doesn't sample it.
         let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("dm_noesis_runtime dummy pattern"),
+            label: Some("noesis_runtime dummy pattern"),
             size: wgpu::Extent3d {
                 width: 1,
                 height: 1,
@@ -378,11 +378,11 @@ impl WgpuRenderDevice {
         );
         let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let dummy_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("dm_noesis_runtime dummy sampler"),
+            label: Some("noesis_runtime dummy sampler"),
             ..Default::default()
         });
         let dummy_pattern_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dm_noesis_runtime dummy pattern bg"),
+            label: Some("noesis_runtime dummy pattern bg"),
             layout: &pattern_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -396,7 +396,7 @@ impl WgpuRenderDevice {
             ],
         });
         let dummy_image_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dm_noesis_runtime dummy image bg"),
+            label: Some("noesis_runtime dummy image bg"),
             layout: &image_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -411,7 +411,7 @@ impl WgpuRenderDevice {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("dm_noesis_runtime pipeline layout"),
+            label: Some("noesis_runtime pipeline layout"),
             bind_group_layouts: &[
                 &vs_uniform_bind_group_layout,
                 &ps_uniform0_bind_group_layout,
@@ -488,7 +488,7 @@ impl WgpuRenderDevice {
             .entry(state)
             .or_insert_with(|| build_sampler(&self.device, state));
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dm_noesis_runtime pattern bg"),
+            label: Some("noesis_runtime pattern bg"),
             layout: &self.pattern_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -531,7 +531,7 @@ impl WgpuRenderDevice {
             .entry(state)
             .or_insert_with(|| build_sampler(&self.device, state));
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dm_noesis_runtime image bg"),
+            label: Some("noesis_runtime image bg"),
             layout: &self.image_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -725,6 +725,10 @@ const fn wgpu_format_for(format: TextureFormat) -> wgpu::TextureFormat {
         // hint in the binding already advertises this.
         TextureFormat::Rgba8 | TextureFormat::Rgbx8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
+        // `TextureFormat` is `#[non_exhaustive]`; a format the SDK adds later
+        // defaults to RGBA8. Never panic here — this runs inside a Noesis FFI
+        // trampoline, where unwinding into C++ is UB.
+        _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
 
@@ -732,6 +736,8 @@ const fn bytes_per_pixel(format: TextureFormat) -> u32 {
     match format {
         TextureFormat::Rgba8 | TextureFormat::Rgbx8 => 4,
         TextureFormat::R8 => 1,
+        // See `wgpu_format_for`: non-exhaustive, FFI-safe default (4 = RGBA8).
+        _ => 4,
     }
 }
 
@@ -861,7 +867,7 @@ fn build_sampler(device: &wgpu::Device, state: SamplerState) -> wgpu::Sampler {
     };
 
     device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("dm_noesis_runtime sampler"),
+        label: Some("noesis_runtime sampler"),
         address_mode_u: wrap,
         address_mode_v: wrap,
         address_mode_w: wrap,
@@ -1150,7 +1156,7 @@ impl RenderDevice for WgpuRenderDevice {
         self.encoder = Some(
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dm_noesis_runtime offscreen frame"),
+                    label: Some("noesis_runtime offscreen frame"),
                 }),
         );
         self.phase = FramePhase::Offscreen;
@@ -1182,7 +1188,7 @@ impl RenderDevice for WgpuRenderDevice {
         self.encoder = Some(
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dm_noesis_runtime onscreen frame"),
+                    label: Some("noesis_runtime onscreen frame"),
                 }),
         );
         self.phase = FramePhase::Onscreen;
@@ -1366,7 +1372,7 @@ impl RenderDevice for WgpuRenderDevice {
             .expect("draw_batch outside begin/end_*_render");
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("dm_noesis_runtime draw_batch"),
+            label: Some("noesis_runtime draw_batch"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 depth_slice: None,

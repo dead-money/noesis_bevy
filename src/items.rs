@@ -1,148 +1,64 @@
-//! Rust-owned `ItemsSource` bridge (TODO §3): populate XAML list controls
+//! Per-view `ItemsSource` bridge — populate XAML list controls
 //! (`ComboBox` / `ListBox` / `ItemsControl`) from a Bevy app.
 //!
-//! Where the [`viewmodel`](crate::viewmodel) bridge drives a control's scalar
-//! dependency properties, this drives its *items*: an
-//! [`ObservableCollection`](dm_noesis_runtime::binding::ObservableCollection)
-//! is attached as a named element's `ItemsSource`, and the app mutates it from
-//! gameplay code. Because the collection is observable, incremental edits
-//! (`push` / `remove` / `clear`) flow to the live control without rebuilding
-//! the view.
+//! Add a [`NoesisItems`] component to the view's camera entity mapping each list
+//! control's `x:Name` to its desired items. The reconcile system keeps a
+//! Rust-owned [`ObservableCollection`](noesis_runtime::binding::ObservableCollection)
+//! per `(view, x:Name)`, sets it to the desired list whenever the component
+//! changes, and binds it to the element's `ItemsSource` once the element exists
+//! (re-binding after a scene rebuild).
 //!
 //! # String items only
 //!
-//! The safe `ObservableCollection` surface this crate can reach
-//! (`unsafe_code = forbid`) is `push_string` / `remove_at` / `clear`, so the
-//! bridge handles **string** items — exactly what a `ComboBox` of text options
-//! needs (`"Low"` / `"Medium"` / `"High"`). The control displays each string
-//! and `SelectedIndex` is typically two-way bound through a view model (see
-//! [`crate::viewmodel`]). Typed items (numbers, view models) would need a safe
-//! `push_*` added to the runtime, mirroring how the binding bridge needed a
-//! safe `set_data_context`.
+//! The safe `ObservableCollection` surface (`unsafe_code = forbid`) is
+//! `push_string` / `remove_at` / `clear`, so items are **strings** — exactly
+//! what a `ComboBox` of text options needs. `SelectedIndex` is typically two-way
+//! bound through a view model (see [`crate::viewmodel`]).
+//!
+//! ```ignore
+//! commands.entity(view).insert(
+//!     NoesisItems::new().with("QualityCombo", ["Low", "Medium", "High"]),
+//! );
+//! ```
 //!
 //! # Lifetime & threading
 //!
-//! Each named element gets one render-world [`ObservableCollection`], owned in
-//! [`NoesisRenderState`](crate::render) (Noesis objects are thread-affine to
-//! the `View`) and released before `dm_noesis_runtime::shutdown`. The
-//! collection is bound to the element via the safe
-//! [`FrameworkElement::set_items_source`](dm_noesis_runtime::view::FrameworkElement::set_items_source)
-//! once the element exists, and re-bound after a scene rebuild. Edits flow
-//! main → render through the usual queue → [`ExtractResource`] → drain in
-//! `RenderSystems::Prepare`, retained until the element resolves.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use bevy::prelude::*;
-//! use dm_noesis_bevy::items::NoesisItemsSources;
-//!
-//! fn setup(items: Res<NoesisItemsSources>) {
-//!     // Populate a <ComboBox x:Name="QualityCombo"/> from Rust.
-//!     items.set("QualityCombo", ["Low", "Medium", "High"]);
-//! }
-//!
-//! fn add_option(items: Res<NoesisItemsSources>) {
-//!     items.push("QualityCombo", "Ultra"); // appears live in the open ComboBox
-//! }
-//! ```
+//! Collections are owned in [`NoesisRenderState`](crate::render) (Noesis objects
+//! are thread-affine to the `View`) and released before
+//! `noesis_runtime::shutdown`.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
-use dm_noesis_runtime::binding::ObservableCollection;
+use noesis_runtime::binding::ObservableCollection;
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Op queue
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A pending edit to a named element's items list. Drained render-side and
-/// applied to the element's [`ObservableCollection`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ItemsOp {
-    /// Replace the whole list (clear, then append each).
-    Set(Vec<String>),
-    /// Append one item.
-    Push(String),
-    /// Remove the item at `index` (no-op if out of range).
-    RemoveAt(usize),
-    /// Empty the list.
-    Clear,
+/// Per-view component: desired item list per list-control `x:Name`. Attach to a
+/// [`NoesisView`](crate::NoesisView) entity. Setting a list replaces the
+/// control's items (the collection is observable, so the live control updates
+/// without a view rebuild).
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisItems {
+    pub sources: HashMap<String, Vec<String>>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main-world resource — NoesisItemsSources
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Main-app handle for driving named list controls' items. Insert via
-/// [`NoesisItemsPlugin`]; the render world receives an `Arc`-aliased copy each
-/// frame via [`ExtractResource`], so edits pushed here are drained render-side
-/// without copying.
-///
-/// All methods take `&self` (interior-mutable queue), so they're callable from
-/// a plain `Res<NoesisItemsSources>`. Edits to the same `x:Name` within a frame
-/// apply in order.
-#[derive(Resource, Clone, Default)]
-pub struct NoesisItemsSources {
-    queue: Arc<Mutex<Vec<(String, ItemsOp)>>>,
-}
-
-impl NoesisItemsSources {
-    /// Replace the entire items list of the element named `name` with `items`.
-    /// The element must be an `ItemsControl` (`ComboBox` / `ListBox` / …); a
-    /// type mismatch logs a warning on apply.
-    pub fn set(&self, name: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) {
-        let items = items.into_iter().map(Into::into).collect();
-        self.push_op(name, ItemsOp::Set(items));
+impl NoesisItems {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Append one item to the element named `name`.
-    pub fn push(&self, name: impl Into<String>, item: impl Into<String>) {
-        self.push_op(name, ItemsOp::Push(item.into()));
-    }
-
-    /// Remove the item at `index` from the element named `name`. Out-of-range
-    /// indices are ignored render-side.
-    pub fn remove_at(&self, name: impl Into<String>, index: usize) {
-        self.push_op(name, ItemsOp::RemoveAt(index));
-    }
-
-    /// Clear the items of the element named `name`.
-    pub fn clear(&self, name: impl Into<String>) {
-        self.push_op(name, ItemsOp::Clear);
-    }
-
-    fn push_op(&self, name: impl Into<String>, op: ItemsOp) {
-        self.queue
-            .lock()
-            .expect("NoesisItemsSources queue poisoned")
-            .push((name.into(), op));
-    }
-
-    /// Drain pending edits. Render-world only; cheap when empty.
-    pub(crate) fn drain(&self) -> Vec<(String, ItemsOp)> {
-        let mut guard = self
-            .queue
-            .lock()
-            .expect("NoesisItemsSources queue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
-        }
-    }
-}
-
-impl ExtractResource for NoesisItemsSources {
-    type Source = NoesisItemsSources;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
+    /// Builder: set element `name`'s items.
+    #[must_use]
+    pub fn with(
+        mut self,
+        name: impl Into<String>,
+        items: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.sources
+            .insert(name.into(), items.into_iter().map(Into::into).collect());
+        self
     }
 }
 
@@ -150,13 +66,12 @@ impl ExtractResource for NoesisItemsSources {
 // Render-world binding — ItemsBinding
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// One named element's Rust-owned items list: an [`ObservableCollection`] plus
-/// the URI of the scene it's currently bound to. Owned by
-/// [`NoesisRenderState`](crate::render) and released before runtime shutdown.
+/// One element's Rust-owned items list: an [`ObservableCollection`] plus the URI
+/// of the scene it's currently bound to. Owned by
+/// [`NoesisRenderState`](crate::render), released before runtime shutdown.
 ///
-/// `pub` so headless tests can exercise the same translation the render systems
-/// use (op → `ObservableCollection` call → bound control), but apps drive it
-/// through [`NoesisItemsSources`], never directly.
+/// `pub` so headless tests can exercise the same op → collection translation the
+/// render systems use; apps drive it through [`NoesisItems`], never directly.
 pub struct ItemsBinding {
     coll: ObservableCollection,
     bound_for_uri: Option<String>,
@@ -206,19 +121,10 @@ impl ItemsBinding {
     }
 
     /// The backing collection, for handing to
-    /// [`FrameworkElement::set_items_source`](dm_noesis_runtime::view::FrameworkElement::set_items_source).
+    /// [`FrameworkElement::set_items_source`](noesis_runtime::view::FrameworkElement::set_items_source).
     #[must_use]
     pub fn collection(&self) -> &ObservableCollection {
         &self.coll
-    }
-
-    fn apply(&mut self, op: ItemsOp) {
-        match op {
-            ItemsOp::Set(items) => self.set(items),
-            ItemsOp::Push(item) => self.push(&item),
-            ItemsOp::RemoveAt(index) => self.remove_at(index),
-            ItemsOp::Clear => self.clear(),
-        }
     }
 
     pub(crate) fn needs_bind(&self, uri: &str) -> bool {
@@ -236,53 +142,27 @@ impl ItemsBinding {
     }
 }
 
-/// Apply a drained op to the binding for `name`, creating it on first use.
-/// Lives here (not on [`NoesisRenderState`]) so the op→collection translation
-/// is unit-testable without a render world.
-pub(crate) fn apply_op(
-    bindings: &mut std::collections::HashMap<String, ItemsBinding>,
-    name: String,
-    op: ItemsOp,
+/// Reconcile every view's [`NoesisItems`]: set collections when the component
+/// changed, and (re-)bind them to their elements each frame.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sync_items_bridge(
+    views: Query<(Entity, Ref<NoesisItems>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
 ) {
-    bindings.entry(name).or_default().apply(op);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Render-app system
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Drain pending items edits → apply to per-element collections → bind any
-/// unbound collection to its element's `ItemsSource`. No-op (queue retained)
-/// until [`NoesisRenderState`] and the target element exist.
-pub(crate) fn apply_items_sources(
-    requests: Option<Res<NoesisItemsSources>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
+    let Some(mut state) = state else {
         return;
     };
-    state.apply_items_sources(&requests);
+    for (entity, items) in &views {
+        state.apply_items_for(entity, &items.sources, items.is_changed());
+    }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Wires the `ItemsSource` bridge: installs [`NoesisItemsSources`], extracts it
-/// to the render world, and runs the render-side apply/bind pass in
-/// `RenderSystems::Prepare`. Added transitively by [`crate::NoesisPlugin`].
+/// Wires the per-view `ItemsSource` bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisItemsPlugin;
 
 impl Plugin for NoesisItemsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisItemsSources>()
-            .add_plugins(ExtractResourcePlugin::<NoesisItemsSources>::default());
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        render_app.add_systems(Render, apply_items_sources.in_set(RenderSystems::Prepare));
+        app.add_systems(PostUpdate, sync_items_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -291,43 +171,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ops_queue_round_trips_in_order() {
-        let items = NoesisItemsSources::default();
-        items.set("Combo", ["a", "b"]);
-        items.push("Combo", "c");
-        items.remove_at("Combo", 0);
-        items.clear("Other");
-
-        let drained = items.drain();
-        assert_eq!(
-            drained,
-            vec![
-                (
-                    "Combo".to_string(),
-                    ItemsOp::Set(vec!["a".to_string(), "b".to_string()]),
-                ),
-                ("Combo".to_string(), ItemsOp::Push("c".to_string())),
-                ("Combo".to_string(), ItemsOp::RemoveAt(0)),
-                ("Other".to_string(), ItemsOp::Clear),
-            ],
-        );
-        assert!(items.drain().is_empty());
-    }
-
-    #[test]
-    fn set_accepts_strings_and_str_slices() {
-        let items = NoesisItemsSources::default();
-        items.set("X", vec!["one".to_string(), "two".to_string()]);
-        items.set("Y", ["three", "four"]);
-        let drained = items.drain();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(
-            drained[0].1,
-            ItemsOp::Set(vec!["one".to_string(), "two".to_string()]),
-        );
-        assert_eq!(
-            drained[1].1,
-            ItemsOp::Set(vec!["three".to_string(), "four".to_string()]),
-        );
+    fn builder_collects_sources() {
+        let i = NoesisItems::new()
+            .with("Combo", ["a", "b"])
+            .with("List", vec!["x".to_string()]);
+        assert_eq!(i.sources["Combo"], vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(i.sources["List"], vec!["x".to_string()]);
     }
 }

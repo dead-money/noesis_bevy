@@ -1,15 +1,15 @@
 //! Build a `wgpu::VertexBufferLayout` from Noesis's `VertexFormat` enum +
 //! lookup tables (`ATTRIBUTES_FOR_FORMAT`, `TYPE_FOR_ATTR`, `SIZE_FOR_TYPE`,
-//! `SIZE_FOR_FORMAT` from `dm_noesis_runtime::render_device::types`).
+//! `SIZE_FOR_FORMAT` from `noesis_runtime::render_device::types`).
 //!
 //! Each Noesis vertex format is a bitmask of [`VertexAttr`] values; the
 //! attributes appear in the buffer in `VertexAttr` enum order with no padding.
 //! `shader_location` matches the `VertexAttr` index — that's the convention
 //! `shaders/noesis.wgsl` uses.
 //!
-//! [`VertexAttr`]: dm_noesis_runtime::render_device::types::VertexAttr
+//! [`VertexAttr`]: noesis_runtime::render_device::types::VertexAttr
 
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::types::{
     ATTRIBUTES_FOR_FORMAT, SIZE_FOR_FORMAT, SIZE_FOR_TYPE, TYPE_FOR_ATTR, VERTEX_ATTR_COUNT,
 };
 

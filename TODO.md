@@ -25,6 +25,15 @@ main→render extraction of scene + registries; the input plugin (pointer / keyb
 wheel / touch / focus); the routed `Click` bridge; and the custom class / markup-extension
 lifecycles.
 
+**Phase 1a (component / multi-view foundation) — done.** `NoesisScene` (resource) →
+`NoesisView` (component on the camera entity); `NoesisRenderState` owns a `scenes` map
+keyed by view entity, driven main-world (most main→render extraction deleted). Every
+per-element bridge — text / dp / visibility / layout / focus / geometry / items /
+viewmodel / **plain_vm** — is now a per-entity component reconciled in `NoesisSet::Apply`,
+and read-back `Message`s carry `view: Entity`. `bake` stays a global offscreen utility
+(intentionally not view-scoped). Bevy-app integration tests now exist:
+`tests/headless_app_{bridges,plain_vm,props}.rs`.
+
 ---
 
 ## 1. Render device / shaders
@@ -38,6 +47,15 @@ largest open area.
   shadow, opacity groups, custom `ShaderEffect` via `Batch.pixelShader`).
 - **`SDF_LCD_SOLID`.** Subpixel text needs dual-source blending (`@blend_src(1)` fragment
   output). Separate kickoff from `SDF_SOLID`.
+- **Onscreen-path draw renders nothing (`tests/wgpu_first_triangle.rs` fails).** Driving the
+  device's *onscreen* path manually — `set_onscreen_target` → `begin_onscreen_render` →
+  `draw_batch(PATH_SOLID)` → `end_onscreen_render` — with a hand-built identity-projection
+  triangle produces **zero** non-clear pixels (`cull_mode: None`, so not culling). Every
+  *offscreen*-path device test passes (`wgpu_{offscreen_rt,pattern,radial,uniform_ring,
+  multi_shader}`), so the regression is specific to the onscreen entry the test exercises.
+  The onscreen path also backs `bake` and the live intermediate, so this is worth a real
+  look. First step: confirm whether the vs projection uniform reaches the draw (a zeroed
+  cbuffer collapses the triangle to the origin → nothing rasterised).
 - **Stencil not attached.** `create_render_target` allocates a stencil texture but no
   pipeline declares `depth_stencil`. Suspected cause of the **ScrollViewer content-viewport
   blank under theme** bug (`03_scroll.xaml` + `NOESIS_VIEWER_THEME=DarkBlue`: scrollbar
@@ -59,13 +77,8 @@ largest open area.
 
 ## 3. Bevy integration
 
-- **Multi-view.** Effectively one scene today. Support multiple `NoesisView` entities, each
-  with its own `View`, intermediate, and target camera.
 - **XAML hot-reload.** Rebuild the `View` on Bevy asset-reload events so editing a `.xaml`
   refreshes live. Pairs with the runtime's `ParseXaml` / `LoadComponent` work.
-- **Component-vs-resource API.** `NoesisScene` is a single resource. A component-based scene
-  (one entity per view, scene config as a component) is the idiomatic Bevy shape and a
-  prerequisite for multi-view.
 - **Bevy surface for newly-wrapped runtime features.** As the runtime exposes more primitives
   (`VisualStateManager::GoToState`, additional routed events, …), add the matching Bevy
   ergonomics in the style of the existing bridges (`NoesisClicked`, `NoesisViewModels`, …): typed
@@ -74,9 +87,6 @@ largest open area.
 - **Typed `ItemsSource` / collection items.** The `ItemsSource` bridge handles string items only
   (the safe `ObservableCollection` surface is `push_string`). Non-string items (numbers, nested
   view models) need a safe `push_*` added to the runtime first.
-- **Per-entity plain view models.** `#[derive(NoesisViewModel)]` binds a Bevy `Resource` today
-  (`add_noesis_view_model::<T>()`). Extend to per-entity `Component` view models (one instance per
-  entity, routed to elements) once the component-based scene API lands.
 - **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without
   a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
   `BasedOn` a theme Style or dropping the custom Style.

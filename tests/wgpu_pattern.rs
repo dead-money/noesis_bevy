@@ -20,11 +20,11 @@
 use std::ffi::c_void;
 
 use dm_noesis_bevy::render_device::WgpuRenderDevice;
-use dm_noesis_runtime::render_device::types::{
+use noesis_runtime::render_device::types::{
     Batch, BlendMode, MinMagFilter, MipFilter, RenderState, SamplerState, Shader, StencilMode,
     TextureFormat, UniformData, WrapMode,
 };
-use dm_noesis_runtime::render_device::{RenderDevice, RenderTargetDesc, TextureDesc};
+use noesis_runtime::render_device::{RenderDevice, RenderTargetDesc, TextureDesc};
 
 const RT_SIZE: u32 = 4;
 const BYTES_PER_ROW: u32 = 256; // wgpu COPY_BYTES_PER_ROW_ALIGNMENT
@@ -37,11 +37,11 @@ fn path_pattern_samples_from_registered_texture() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
     pollster::block_on(run_test());
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
 
 #[allow(clippy::too_many_lines)]
@@ -57,7 +57,7 @@ async fn run_test() {
         .expect("no wgpu adapter");
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("dm_noesis_runtime pattern test device"),
+            label: Some("noesis_runtime pattern test device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::default(),
@@ -188,7 +188,7 @@ async fn run_test() {
 
     rd.begin_tile(
         rt.handle,
-        dm_noesis_runtime::render_device::types::Tile {
+        noesis_runtime::render_device::types::Tile {
             x: 0,
             y: 0,
             width: RT_SIZE,

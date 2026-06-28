@@ -3,11 +3,11 @@
 //! Lets you register Rust-backed `<myns:Foo>` types with Noesis from Bevy
 //! systems, with the resulting [`ClassRegistration`] managed by the Bevy
 //! resource lifecycle (dropped at app teardown, before
-//! [`dm_noesis_runtime::shutdown`] runs via [`crate::NoesisShutdownGuard`]).
+//! [`noesis_runtime::shutdown`] runs via [`crate::NoesisShutdownGuard`]).
 //!
 //! # Why this layer is intentionally thin
 //!
-//! The heavy lifting lives in [`dm_noesis_runtime::classes`] — `ClassBuilder`,
+//! The heavy lifting lives in [`noesis_runtime::classes`] — `ClassBuilder`,
 //! `ClassRegistration`, `Instance`, `PropertyChangeHandler`, `PropertyValue`,
 //! all re-exported here. The Bevy side adds:
 //!   * [`NoesisClassPlugin`] to declare the dependency explicitly and
@@ -44,7 +44,7 @@
 //!     }
 //! }
 //!
-//! fn register(mut registry: ResMut<NoesisClassRegistry>) {
+//! fn register(mut registry: NonSendMut<NoesisClassRegistry>) {
 //!     let mut b = ClassBuilder::new("AOR.NineSlicer", ClassBase::ContentControl,
 //!                                   NineSlicerHandler { /* ... */ });
 //!     b.add_property("Source", PropType::ImageSource);
@@ -58,21 +58,25 @@
 
 use bevy::prelude::*;
 
-pub use dm_noesis_runtime::classes::{
+pub use noesis_runtime::classes::{
     ClassBuilder, ClassRegistration, Instance, PropertyChangeHandler, PropertyDefault,
     PropertyValue,
 };
-pub use dm_noesis_runtime::ffi::{ClassBase, PropType};
+pub use noesis_runtime::ffi::{ClassBase, PropType};
 
 /// Owns the live [`ClassRegistration`] instances for the app lifetime.
 /// Insert finished registrations from a `Startup` system; the resource
-/// drops them at app teardown, before [`dm_noesis_runtime::shutdown`] runs.
+/// drops them at app teardown, before [`noesis_runtime::shutdown`] runs.
 ///
 /// Registrations must be added BEFORE any XAML referencing them is loaded —
 /// in practice that means a `Startup` system ordered after [`crate::NoesisPlugin`]
 /// initialization (Bevy's default startup order suffices unless explicitly
 /// overridden).
-#[derive(Resource, Default)]
+/// **Non-send** resource: [`ClassRegistration`] holds `!Send`/`!Sync` Noesis
+/// handles, so this is stored via `init_non_send_resource` and accessed through
+/// `NonSendMut`. Class registration is a main-thread, startup-time concern
+/// anyway (Noesis is thread-affine), so the non-send pinning is a natural fit.
+#[derive(Default)]
 pub struct NoesisClassRegistry {
     registrations: Vec<ClassRegistration>,
 }
@@ -97,7 +101,7 @@ impl NoesisClassRegistry {
 }
 
 /// Plugin that installs [`NoesisClassRegistry`]. Add **after**
-/// [`crate::NoesisPlugin`] so [`dm_noesis_runtime::init`] has already run by the
+/// [`crate::NoesisPlugin`] so [`noesis_runtime::init`] has already run by the
 /// time consumers register classes from `Startup` systems.
 ///
 /// The plugin itself is intentionally minimal: registration is a startup-time
@@ -107,7 +111,7 @@ pub struct NoesisClassPlugin;
 
 impl Plugin for NoesisClassPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisClassRegistry>();
+        app.init_non_send_resource::<NoesisClassRegistry>();
     }
 }
 

@@ -11,7 +11,7 @@
 //! - `ExtractResource` mirrors the registry into the render world every
 //!   frame.
 //! - [`BevyTextureProvider`] implements
-//!   [`dm_noesis_runtime::texture_provider::TextureProvider`] against a
+//!   [`noesis_runtime::texture_provider::TextureProvider`] against a
 //!   [`SharedImageMap`] kept fresh by a sync system in
 //!   [`crate::render::NoesisRenderPlugin`].
 //!
@@ -44,7 +44,7 @@ use bevy::asset::{AssetApp, AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
 use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
-use dm_noesis_runtime::texture_provider::{ImageData, TextureInfo, TextureProvider};
+use noesis_runtime::texture_provider::{ImageData, TextureInfo, TextureProvider};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ImageAsset + loader

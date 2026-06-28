@@ -1,4 +1,4 @@
-//! Imperative `Margin` writes against named XAML elements — the positioning
+//! Per-view `Margin` writes against named XAML elements — the positioning
 //! primitive for floating panels (context menus, popups, tooltips) that must
 //! follow gameplay coordinates.
 //!
@@ -10,120 +10,80 @@
 //! space), so a caller working in window pixels scales by `view_size /
 //! window_size` first — exactly the mapping the input bridge uses.
 //!
-//! [`NoesisLayoutRequests`] mirrors [`crate::visibility`]: a main-world resource
-//! is `Arc`-shared with the render world; the render-side system drains and
-//! writes during `RenderSystems::Prepare`.
+//! Add a [`NoesisLayout`] component to the view's camera entity. Its `margins`
+//! map is the desired `Margin` per `x:Name` — applied to the view's elements
+//! whenever the component changes (Bevy change detection). This is a write-only
+//! bridge: there is no read-back message.
 //!
 //! ```ignore
-//! commands.insert_resource(NoesisLayoutRequests::default());
-//! // ... later, in a Bevy system:
-//! layout.set_margin("PartMenu", cursor_x, cursor_y, 0.0, 0.0);
+//! commands.entity(view).insert(
+//!     NoesisLayout::new().margin("PartMenu", [cursor_x, cursor_y, 0.0, 0.0]),
+//! );
 //! ```
+//!
+//! Everything runs on the main thread (Noesis is thread-affine and lives there):
+//! the reconcile system reads each view's component and applies the margin
+//! writes against that view's live scene — no cross-world queues.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
 /// Left, top, right, bottom offsets in view DIPs.
 pub type Margin = [f32; 4];
 
-/// Main-app-side queue of pending margin writes. Push via [`Self::set_margin`];
-/// the render world drains and applies during `RenderSystems::Prepare`.
-///
-/// Cheap to keep around even when no writes are pending — the underlying `Vec`
-/// only allocates on first push.
-#[derive(Resource, Clone, Default)]
-pub struct NoesisLayoutRequests(SharedLayoutQueue);
+/// Per-view layout bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisLayout {
+    /// Desired `Margin` per element `x:Name`, as `[left, top, right, bottom]` in
+    /// view DIPs. Written to the view's elements whenever this component changes.
+    pub margins: HashMap<String, Margin>,
+}
 
-impl NoesisLayoutRequests {
-    /// Queue a write setting `name`'s `Margin` to `(left, top, right, bottom)`
-    /// (view DIPs). Multiple writes for the same name within a single frame are
-    /// applied in order; the last one wins.
-    pub fn set_margin(
-        &self,
-        name: impl Into<String>,
-        left: f32,
-        top: f32,
-        right: f32,
-        bottom: f32,
-    ) {
-        self.0.push(name.into(), [left, top, right, bottom]);
+impl NoesisLayout {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder: set element `name`'s `Margin` to `margin`
+    /// (`[left, top, right, bottom]`, view DIPs).
+    #[must_use]
+    pub fn margin(mut self, name: impl Into<String>, margin: Margin) -> Self {
+        self.margins.insert(name.into(), margin);
+        self
     }
 }
 
-impl ExtractResource for NoesisLayoutRequests {
-    type Source = NoesisLayoutRequests;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-/// Internal Arc-backed queue. Both apps share the same `Vec` via a clone of
-/// this `Arc`; the render-side drain mutates the original storage, not a
-/// per-frame copy.
-#[derive(Clone, Default)]
-pub(crate) struct SharedLayoutQueue(Arc<Mutex<Vec<(String, Margin)>>>);
-
-impl SharedLayoutQueue {
-    fn push(&self, name: String, margin: Margin) {
-        self.0
-            .lock()
-            .expect("SharedLayoutQueue poisoned")
-            .push((name, margin));
-    }
-
-    /// Take the pending writes out of the queue. Cheap when empty.
-    pub(crate) fn drain(&self) -> Vec<(String, Margin)> {
-        let mut guard = self.0.lock().expect("SharedLayoutQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
-        }
-    }
-}
-
-/// Render-app system: drain the layout queue and apply each entry to the live
-/// View. Runs in `RenderSystems::Prepare` so writes from this frame's main-world
-/// systems land before Noesis's `update_render_tree`.
+/// Reconcile every view's [`NoesisLayout`]: apply desired margin writes when the
+/// component changed. Write-only — no read-back message.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn apply_layout_requests(
-    requests: Option<Res<NoesisLayoutRequests>>,
-    state: Option<ResMut<NoesisRenderState>>,
+pub(crate) fn sync_layout_bridge(
+    views: Query<(Entity, Ref<NoesisLayout>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
 ) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
+    let Some(mut state) = state else {
         return;
     };
-    state.apply_layout_requests(&requests.0);
+    for (entity, layout) in &views {
+        if layout.is_changed() {
+            state.apply_layout_for(entity, &layout.margins);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Wires the layout-request bridge: extracts [`NoesisLayoutRequests`] to the
-/// render world and runs the render-side drain in `RenderSystems::Prepare`.
+/// Wires the per-view layout bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisLayoutPlugin;
 
 impl Plugin for NoesisLayoutPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisLayoutRequests>()
-            .add_plugins(ExtractResourcePlugin::<NoesisLayoutRequests>::default());
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        // `Prepare` runs after `ensure_noesis_scene`; on frames where the scene
-        // isn't built yet, `apply_layout_requests` is a no-op and the queue
-        // stays full for next frame.
-        render_app.add_systems(Render, apply_layout_requests.in_set(RenderSystems::Prepare));
+        app.add_systems(PostUpdate, sync_layout_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -132,33 +92,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drain_takes_all_and_resets() {
-        let q = SharedLayoutQueue::default();
-        q.push("Menu".into(), [10.0, 20.0, 0.0, 0.0]);
-        q.push("Tip".into(), [1.0, 2.0, 3.0, 4.0]);
-        let drained = q.drain();
-        assert_eq!(
-            drained,
-            vec![
-                ("Menu".to_string(), [10.0, 20.0, 0.0, 0.0]),
-                ("Tip".to_string(), [1.0, 2.0, 3.0, 4.0]),
-            ]
-        );
-        assert!(q.drain().is_empty());
-    }
-
-    #[test]
-    fn last_write_wins_within_a_frame() {
-        let r = NoesisLayoutRequests::default();
-        r.set_margin("Menu", 5.0, 5.0, 0.0, 0.0);
-        r.set_margin("Menu", 9.0, 9.0, 0.0, 0.0);
-        let drained = r.0.drain();
-        assert_eq!(
-            drained,
-            vec![
-                ("Menu".to_string(), [5.0, 5.0, 0.0, 0.0]),
-                ("Menu".to_string(), [9.0, 9.0, 0.0, 0.0]),
-            ]
-        );
+    fn builder_collects_margins() {
+        let l = NoesisLayout::new()
+            .margin("Menu", [10.0, 20.0, 0.0, 0.0])
+            .margin("Tip", [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(l.margins.get("Menu"), Some(&[10.0, 20.0, 0.0, 0.0]));
+        assert_eq!(l.margins.get("Tip"), Some(&[1.0, 2.0, 3.0, 4.0]));
     }
 }

@@ -2230,8 +2230,8 @@ dependencies = [
  "bevy_render",
  "bytemuck",
  "dm_noesis_bevy_derive",
- "dm_noesis_runtime",
  "image",
+ "noesis_runtime",
  "pollster",
  "thiserror 2.0.18",
  "wgpu",
@@ -2244,14 +2244,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "dm_noesis_runtime"
-version = "0.1.0"
-dependencies = [
- "cc",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3408,6 +3400,13 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "noesis_runtime"
+version = "0.9.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

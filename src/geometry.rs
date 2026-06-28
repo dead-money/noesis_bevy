@@ -1,98 +1,82 @@
-//! Imperative geometry writes against a named XAML `Path` element — a real
-//! vector polyline fed from Rust, the geometry counterpart of [`crate::text`].
+//! Per-view geometry bridge — imperative vector polyline writes against named
+//! XAML `Path` elements on a single [`NoesisView`](crate::NoesisView). The
+//! geometry counterpart of [`crate::text`].
 //!
-//! [`NoesisGeometryRequests`] is a main-app push queue of `(x:Name, points)`
-//! writes. It is drained on the render side each frame and applied via
-//! `dm_noesis_runtime::view::FrameworkElement::set_path_points`, which builds a
-//! Noesis `StreamGeometry` and assigns it as the `Path`'s `Data`. Same shape as
-//! [`crate::text::NoesisTextRequests`] — infrequent, main-driven writes through a
-//! single queue — so the live oscilloscope (or any Rust-driven graph) can draw a
-//! genuine line instead of rasterising to a text canvas.
+//! Add a [`NoesisGeometry`] component to the view's camera entity. Its `paths`
+//! map is the desired geometry per `x:Name` — applied to the view's `Path`
+//! elements whenever the component changes (Bevy change detection). Each set of
+//! points becomes a Noesis `StreamGeometry` assigned as the `Path`'s `Data`, so
+//! a live oscilloscope (or any Rust-driven graph) draws a genuine line instead
+//! of rasterising to a text canvas.
+//!
+//! ```ignore
+//! commands.entity(view).insert(
+//!     NoesisGeometry::new()
+//!         .path("ScopeTrace", vec![[0.0, 1.0], [2.0, 3.0]]),
+//! );
+//! ```
+//!
+//! Everything runs on the main thread (Noesis is thread-affine and lives there):
+//! the reconcile system reads each view's component and applies the writes
+//! against that view's live scene — no cross-world queues.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_render::{
-    Render, RenderApp, RenderSystems,
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
-};
 
-use crate::render::NoesisRenderState;
+use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Main-app-side queue of pending geometry writes. Push via [`Self::set_polyline`];
-/// the render world drains and applies during `RenderSystems::Prepare`.
-///
-/// Cheap to keep around even when no writes are pending — the underlying `Vec`
-/// only allocates on first push.
-#[derive(Resource, Clone, Default)]
-pub struct NoesisGeometryRequests(SharedGeometryQueue);
+/// Per-view geometry bridge. Attach to a [`NoesisView`](crate::NoesisView)
+/// entity.
+#[derive(Component, Clone, Default, Debug)]
+pub struct NoesisGeometry {
+    /// Desired geometry per element `x:Name`. Written to the view's `Path`
+    /// elements whenever this component changes. Each value is an open polyline
+    /// through `[x, y]` pairs in the Path's local coordinate space. Each target
+    /// must be a `Path`; a type mismatch (or fewer than two points) is skipped
+    /// with a warning on apply.
+    pub paths: HashMap<String, Vec<[f32; 2]>>,
+}
 
-impl NoesisGeometryRequests {
-    /// Queue a write setting `name`'s `Path` geometry to an open polyline through
-    /// `points` (`[x, y]` pairs in the Path's local coordinate space). The
-    /// element must be a `Path`; a type mismatch (or fewer than two points) is
-    /// skipped with a warning on apply.
-    pub fn set_polyline(&self, name: impl Into<String>, points: Vec<[f32; 2]>) {
-        self.0.push(name.into(), points);
+impl NoesisGeometry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder: set element `name`'s `Path` geometry to an open polyline through
+    /// `points`.
+    #[must_use]
+    pub fn path(mut self, name: impl Into<String>, points: Vec<[f32; 2]>) -> Self {
+        self.paths.insert(name.into(), points);
+        self
     }
 }
 
-impl ExtractResource for NoesisGeometryRequests {
-    type Source = NoesisGeometryRequests;
-    fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
-    }
-}
-
-/// A pending `(x:Name, points)` geometry write.
-type GeometryWrite = (String, Vec<[f32; 2]>);
-
-#[derive(Clone, Default)]
-pub(crate) struct SharedGeometryQueue(Arc<Mutex<Vec<GeometryWrite>>>);
-
-impl SharedGeometryQueue {
-    fn push(&self, name: String, points: Vec<[f32; 2]>) {
-        self.0
-            .lock()
-            .expect("SharedGeometryQueue poisoned")
-            .push((name, points));
-    }
-
-    pub(crate) fn drain(&self) -> Vec<GeometryWrite> {
-        let mut guard = self.0.lock().expect("SharedGeometryQueue poisoned");
-        if guard.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut *guard)
+/// Reconcile every view's [`NoesisGeometry`]: apply the desired geometry writes
+/// when the component changed.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sync_geometry_bridge(
+    views: Query<(Entity, Ref<NoesisGeometry>)>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for (entity, geometry) in &views {
+        if geometry.is_changed() {
+            state.apply_geometry_for(entity, &geometry.paths);
         }
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn apply_geometry_writes(
-    requests: Option<Res<NoesisGeometryRequests>>,
-    state: Option<ResMut<NoesisRenderState>>,
-) {
-    let (Some(requests), Some(mut state)) = (requests, state) else {
-        return;
-    };
-    state.apply_geometry_writes(&requests.0);
-}
-
-/// Wires the geometry-write bridge. Insert via [`crate::NoesisPlugin`] (which adds
-/// it transitively).
+/// Wires the per-view geometry bridge. Added transitively by
+/// [`crate::NoesisPlugin`].
 pub struct NoesisGeometryPlugin;
 
 impl Plugin for NoesisGeometryPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NoesisGeometryRequests>()
-            .add_plugins(ExtractResourcePlugin::<NoesisGeometryRequests>::default());
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        render_app.add_systems(Render, apply_geometry_writes.in_set(RenderSystems::Prepare));
+        app.add_systems(PostUpdate, sync_geometry_bridge.in_set(NoesisSet::Apply));
     }
 }
 
@@ -101,14 +85,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn geometry_write_queue_drain_round_trip() {
-        let q = SharedGeometryQueue::default();
-        q.push("ScopeTrace".into(), vec![[0.0, 1.0], [2.0, 3.0]]);
-        let drained = q.drain();
+    fn builder_collects_paths() {
+        let g = NoesisGeometry::new()
+            .path("ScopeTrace", vec![[0.0, 1.0], [2.0, 3.0]])
+            .path("Grid", vec![[4.0, 5.0]]);
         assert_eq!(
-            drained,
-            vec![("ScopeTrace".to_string(), vec![[0.0, 1.0], [2.0, 3.0]])],
+            g.paths.get("ScopeTrace"),
+            Some(&vec![[0.0, 1.0], [2.0, 3.0]]),
         );
-        assert!(q.drain().is_empty(), "second drain should be empty");
+        assert_eq!(g.paths.get("Grid"), Some(&vec![[4.0, 5.0]]));
     }
 }

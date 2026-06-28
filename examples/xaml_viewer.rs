@@ -50,7 +50,15 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::PrimaryWindow;
-use dm_noesis_bevy::{FontRegistry, ImageAsset, NoesisPlugin, NoesisScene, XamlRegistry};
+use dm_noesis_bevy::{
+    FontRegistry, ImageAsset, NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry,
+};
+
+/// Carries the initial [`NoesisView`] config from `main` to `setup_camera`,
+/// which spawns it onto the camera entity. (The view config is per-entity now,
+/// not a global resource.)
+#[derive(Resource)]
+struct InitialView(NoesisView);
 
 #[derive(Resource)]
 struct Viewer {
@@ -126,7 +134,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(NoesisPlugin::default())
-        .insert_resource(NoesisScene {
+        .insert_resource(InitialView(NoesisView {
             xaml_uri: scenes[0].uri.clone(),
             size,
             wait_for_fonts: vec!["Fonts".into()],
@@ -135,7 +143,7 @@ fn main() {
             ppaa: true,
             application_resources,
             ..default()
-        })
+        }))
         .insert_resource(StagedTheme(theme_files))
         .insert_resource(Viewer {
             scenes,
@@ -326,13 +334,20 @@ fn scene_from_file(abs: &Path) -> Option<ScenePath> {
     })
 }
 
-fn setup_camera(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_camera(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    initial: Res<InitialView>,
+) {
+    // One view: the scene config + Noesis marker live on the camera entity.
     commands.spawn((
         Camera2d,
         Camera {
             clear_color: ClearColorConfig::Custom(Color::srgb(0.05, 0.05, 0.05)),
             ..default()
         },
+        NoesisCamera,
+        initial.0.clone(),
     ));
     // Pull Fonts/ into the asset system so the Bevy FontProvider populates
     // FontRegistry — any scene that references `FontFamily="Fonts/#..."`
@@ -401,7 +416,7 @@ fn viewer_controls(
     mut viewer: ResMut<Viewer>,
     mut keys: MessageReader<KeyboardInput>,
     mut registry: ResMut<XamlRegistry>,
-    mut scene: ResMut<NoesisScene>,
+    mut views: Query<&mut NoesisView>,
 ) {
     for ev in keys.read() {
         if !matches!(ev.state, ButtonState::Pressed) || ev.repeat {
@@ -436,11 +451,10 @@ fn viewer_controls(
                 }
             }
             KeyCode::KeyP => {
-                scene.ppaa = !scene.ppaa;
-                info!(
-                    "xaml_viewer: PPAA {}",
-                    if scene.ppaa { "on" } else { "off" }
-                );
+                if let Some(mut scene) = views.iter_mut().next() {
+                    scene.ppaa = !scene.ppaa;
+                    info!("xaml_viewer: PPAA {}", if scene.ppaa { "on" } else { "off" });
+                }
             }
             KeyCode::KeyS => {
                 viewer.pending_screenshot = true;
@@ -452,10 +466,12 @@ fn viewer_controls(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn apply_scene_changes(viewer: Res<Viewer>, mut scene: ResMut<NoesisScene>) {
+fn apply_scene_changes(viewer: Res<Viewer>, mut views: Query<&mut NoesisView>) {
     let desired = &viewer.scenes[viewer.current].uri;
-    if scene.xaml_uri != *desired {
-        scene.xaml_uri = desired.clone();
+    for mut scene in &mut views {
+        if scene.xaml_uri != *desired {
+            scene.xaml_uri = desired.clone();
+        }
     }
 }
 

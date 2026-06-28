@@ -30,13 +30,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dm_noesis_bevy::viewmodel::{
-    SharedVmChangedQueue, ViewModelChangeForwarder, ViewModelId, VmValue,
-};
-use dm_noesis_runtime::classes::ClassBuilder;
-use dm_noesis_runtime::ffi::{ClassBase, PropType};
-use dm_noesis_runtime::view::{FrameworkElement, View};
-use dm_noesis_runtime::xaml_provider::XamlProvider;
+use bevy::prelude::Entity;
+use dm_noesis_bevy::viewmodel::{SharedVmChangedQueue, ViewModelChangeForwarder, VmValue};
+use noesis_runtime::classes::ClassBuilder;
+use noesis_runtime::ffi::{ClassBase, PropType};
+use noesis_runtime::view::{FrameworkElement, View};
+use noesis_runtime::xaml_provider::XamlProvider;
 
 /// `Slider.Value` (`Double`), `CheckBox.IsChecked` (`Bool`), and
 /// `ComboBox.SelectedIndex` (`Int32`) each two-way bound to a VM property.
@@ -71,13 +70,13 @@ fn approx(a: f64, b: f64) -> bool {
 }
 
 /// Assert the queue captured a change for `prop` with `value` (draining it).
-fn assert_change(queue: &SharedVmChangedQueue, id: ViewModelId, prop: &str, value: &VmValue) {
+fn assert_change(queue: &SharedVmChangedQueue, view: Entity, prop: &str, value: &VmValue) {
     let drained = queue.drain();
     assert!(
         drained
             .iter()
-            .any(|(i, p, v)| *i == id && p == prop && v == value),
-        "expected change ({id:?}, {prop:?}, {value:?}) on the queue, got {drained:?}",
+            .any(|(e, p, v)| *e == view && p == prop && v == value),
+        "expected change ({view:?}, {prop:?}, {value:?}) on the queue, got {drained:?}",
     );
 }
 
@@ -87,16 +86,17 @@ fn view_model_two_way_binding_round_trips() {
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        dm_noesis_runtime::set_license(&name, &key);
+        noesis_runtime::set_license(&name, &key);
     }
-    dm_noesis_runtime::init();
+    noesis_runtime::init();
 
     {
         // The bridge's change sink + forwarder, wired exactly as the render-side
         // plugin wires them. `id` is the stable handle the plugin would hand back
-        // from `NoesisViewModels::register`.
+        // tagged with the owning view entity (a placeholder here; the real
+        // bridge uses the `NoesisView` entity).
         let queue = SharedVmChangedQueue::default();
-        let id = ViewModelId(0);
+        let id = Entity::PLACEHOLDER;
         let prop_names = Arc::new(vec![
             "Foo".to_string(),
             "Muted".to_string(),
@@ -122,7 +122,7 @@ fn view_model_two_way_binding_round_trips() {
             "settings.xaml".to_string(),
             SETTINGS_XAML.as_bytes().to_vec(),
         );
-        let _guard = dm_noesis_runtime::xaml_provider::set_xaml_provider(InMem(bytes));
+        let _guard = noesis_runtime::xaml_provider::set_xaml_provider(InMem(bytes));
 
         let element = FrameworkElement::load("settings.xaml").expect("load_xaml returned None");
         let mut view = View::create(element);
@@ -216,5 +216,5 @@ fn view_model_two_way_binding_round_trips() {
         drop(registration);
     }
 
-    dm_noesis_runtime::shutdown();
+    noesis_runtime::shutdown();
 }
