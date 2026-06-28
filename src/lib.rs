@@ -18,6 +18,7 @@ pub mod font;
 pub mod geometry;
 pub mod image;
 pub mod input;
+pub mod items;
 pub mod layout;
 pub mod markup;
 pub mod render;
@@ -41,6 +42,7 @@ pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
+pub use items::{ItemsBinding, NoesisItemsPlugin, NoesisItemsSources};
 pub use layout::{NoesisLayoutPlugin, NoesisLayoutRequests};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use render::{NoesisCamera, NoesisRenderPlugin, NoesisScene};
@@ -119,6 +121,7 @@ impl Plugin for NoesisPlugin {
             geometry::NoesisGeometryPlugin,
             focus::NoesisFocusPlugin,
             viewmodel::NoesisViewModelPlugin,
+            items::NoesisItemsPlugin,
         ));
     }
 }

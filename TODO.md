@@ -76,10 +76,13 @@ largest open area.
     DPs from app code, and receive two-way control edits as `NoesisViewModelChanged` messages.
     Needed the safe `FrameworkElement::set_data_context(&ClassInstance)` accessor added to the
     runtime (`unsafe_code = forbid` here can't call the raw pointer variant).
+  - **`ItemsSource` bridge** (`src/items.rs`, `NoesisItemsPlugin`) — populate list controls
+    (`ComboBox` / `ListBox`) from Rust: `NoesisItemsSources::set`/`push`/`remove_at`/`clear` drive
+    a per-`x:Name` `ObservableCollection` bound via the safe
+    `set_items_source(&ObservableCollection)`. String items only (the safe collection surface is
+    `push_string`); typed items would need a safe `push_*` added to the runtime.
   - *Remaining:* a generic DP get/set bridge keyed by `(x:Name, property)` (a near-mechanical
-    mirror of `text.rs`, independently useful for binding-free control access) and an
-    `ObservableCollection` → `ItemsSource` bridge for populating list controls from Rust (the
-    safe `set_items_source(&ObservableCollection)` runtime accessor is already in place).
+    mirror of `text.rs`, independently useful for binding-free control access).
 - **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without
   a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
   `BasedOn` a theme Style or dropping the custom Style.
