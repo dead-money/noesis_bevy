@@ -41,15 +41,10 @@ Deviating from these is a design change — raise it before implementing.
 
 ## Known gaps / open work
 
-- **Effects pipeline (largest open area).** Opacity / Shadow / Blur / Downsample / Upsample shaders are unimplemented; scenes needing them (`Transform3D.xaml`, `Effects.xaml`) panic on `Shader(49)=DOWNSAMPLE`. Also covers offscreen render-target effects.
-- **`SDF_LCD_SOLID`** — subpixel text needs dual-source blending (`@blend_src(1)`). Separate from `SDF_SOLID`.
-- **Stencil not attached.** `create_render_target` allocates a stencil texture but no pipeline declares `depth_stencil`. Suspected cause of the **`ScrollViewer` content-viewport blank under theme** issue (`03_scroll.xaml` + `NOESIS_VIEWER_THEME=DarkBlue`: scrollbar chrome renders but the content interior is flat white, spilling its clip). Next step: log `draw_batch` for one frame and compare against the `scrollviewer-no-theme` baseline in `tests/headless_offscreen_brush.rs`. Other suspect: `LoadOp::Load` on a fresh RT reading uninitialised memory.
-- **PPAA + alpha blend.** `RenderFlag::Ppaa` produces fractional-alpha edges; with the blit's alpha-blending the camera clear color bleeds through. Toggleable via `NoesisScene.ppaa` (viewer `P` key), off by default. Proper handling (premultiplied blit, or opaque-with-pre-clear) lands when text/effects demand AA.
-- **`DrawingBrush` is unimplemented by Noesis itself** — SDK has only `SolidColorBrush`, `ImageBrush`, `VisualBrush`, `LinearGradientBrush`, `RadialGradientBrush`. XAML using `<DrawingBrush>` silently drops the fill. `VisualBrush` only paints when its `Visual` is in the logical tree. Real path for tiled visuals is `ImageBrush`.
-- **Multi-view + hot-reload** — effectively one scene today; multiple `NoesisView` entities and XAML asset-reload aren't wired.
-- **Windows target** — `build.rs` is Linux-only; needs MSVC `Noesis.lib` handling + DLL discovery/copy.
-- **Direct-to-`ViewTarget` (perf)** — key `PipelineCache` on color format and target the camera's `ViewTarget` format so `NoesisNode` can drop the intermediate + blit.
-- **Phase 5 corpus styling** — `assets/phase5/` Buttons set `Background`/`Foreground` without a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by `BasedOn` a theme Style or dropping the custom Style.
+The actionable work list lives in [`TODO.md`](./TODO.md) (render device, compositing, Bevy integration). Feature-exposure gaps in the FFI surface live in [`../dm_noesis_runtime/TODO.md`](https://github.com/dead-money/dm_noesis_runtime). Two constraints worth knowing while working:
+
+- **Effects shaders are the largest gap.** Opacity / Shadow / Blur / Downsample / Upsample are unimplemented, so scenes needing them (`Transform3D.xaml`, `Effects.xaml`) panic on `Shader(49)=DOWNSAMPLE`.
+- **`DrawingBrush` is unimplemented by Noesis itself** — the SDK has only `SolidColorBrush`, `ImageBrush`, `VisualBrush`, `LinearGradientBrush`, `RadialGradientBrush`. XAML using `<DrawingBrush>` silently drops the fill, and `VisualBrush` only paints when its `Visual` is in the logical tree. The real path for tiled visuals is `ImageBrush`. This is not ours to fix.
 
 ## Commands
 

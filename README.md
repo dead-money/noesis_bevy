@@ -4,15 +4,13 @@ A Bevy 0.18 plugin for [Noesis GUI](https://www.noesisengine.com/). It boots Noe
 
 It pairs with the FFI crate [`dm_noesis_runtime`](https://github.com/dead-money/dm_noesis_runtime), which owns the C++ shim and Rust bindings to the SDK.
 
-> **Status.** This crate is built for Dead Money's own game projects and was mostly written by AI agents (Claude Code) under human direction. It's published for transparency and internal use, not as a polished third-party library. Interfaces will change and not everything is well-tested, so expect to read some source and file the occasional issue.
+Built for Dead Money's own games and mostly written by AI agents under human direction. We publish it for transparency and internal use, so expect changing interfaces and rough edges.
 
 ## You need a Noesis license
 
-This crate links against the Noesis Native SDK, which is closed-source commercial software from Noesis Technologies S.L. We do not redistribute it. You obtain it separately and point `NOESIS_SDK_DIR` at your install.
+This crate links against the [Noesis Native SDK](https://www.noesisengine.com/), closed-source commercial software from Noesis Technologies S.L. We do not redistribute it. Every developer needs their own copy (Indie tier or higher); obtain it separately and point `NOESIS_SDK_DIR` at your install.
 
-- Every developer building this crate needs the [Noesis Native SDK](https://www.noesisengine.com/) (Indie tier or higher).
-- Shipping binaries that link the SDK is governed by your Noesis license. See the [pricing page](https://www.noesisengine.com/pricing.php).
-- Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to suppress the trial watermark. Without them the runtime still works but renders a trial banner.
+Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to your credentials. Without them the runtime runs unlicensed and eventually blanks the view with a "Trial expired" message.
 
 ## Quick start
 
@@ -123,7 +121,7 @@ ln -sfn $NOESIS_SDK_DIR/Data/Fonts assets/Fonts
 ln -sfn $NOESIS_SDK_DIR/Data        assets/Data
 ```
 
-Optionally apply your credentials to suppress the trial watermark:
+Apply your Noesis credentials so the runtime runs licensed:
 
 ```sh
 export NOESIS_LICENSE_NAME=...
