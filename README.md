@@ -146,6 +146,7 @@ For maintainers, what lives where:
 - `src/input.rs` — Bevy input forwarders and render-world ingestion.
 - `src/events.rs` — `NoesisClickWatch` / `NoesisClicked` and the click subscription bridge.
 - `src/viewmodel.rs` — `NoesisViewModels` / `NoesisViewModelChanged`: the data-binding bridge that attaches a Rust-owned ViewModel as a `DataContext` and round-trips two-way `{Binding}` edits.
+- `src/items.rs` — `NoesisItemsSources`: drives a named list control's `ItemsSource` from a Rust-owned `ObservableCollection` (populate a `ComboBox` from code, mutate it live).
 - `src/classes.rs`, `src/markup.rs` — custom XAML class and markup-extension lifecycles.
 - `assets/phase5/*.xaml` — the input and animation test corpus.
 - `examples/xaml_viewer.rs` — the main example. `examples/phase4_visual.rs` and `examples/bevy_wgpu_bridge.rs` are lower-level smoke tests.

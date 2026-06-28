@@ -56,6 +56,7 @@ use crate::focus::SharedFocusQueue;
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::geometry::SharedGeometryQueue;
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
+use crate::items::{ItemsBinding, NoesisItemsSources};
 use crate::render_device::WgpuRenderDevice;
 use crate::text::{SharedTextChangedQueue, SharedTextWriteQueue};
 use crate::viewmodel::{AttachTarget, NoesisViewModels, SharedVmChangedQueue, VmEntry};
@@ -311,6 +312,12 @@ pub(crate) struct NoesisRenderState {
     /// Released in [`Drop`] before the registered device, while Noesis is still
     /// initialized. See [`crate::viewmodel`].
     view_models: Vec<VmEntry>,
+    /// Rust-owned `ItemsSource` collections keyed by `x:Name` (TODO §3). Each
+    /// owns an `ObservableCollection` bound to a named `ItemsControl`. Like
+    /// [`Self::view_models`] they outlive scene rebuilds (re-bound by the apply
+    /// pass) and are released in [`Drop`] before the registered device. See
+    /// [`crate::items`].
+    items_sources: HashMap<String, ItemsBinding>,
 }
 
 struct SceneInstance {
@@ -408,6 +415,7 @@ impl NoesisRenderState {
             last_keydown_swallow: HashMap::new(),
             bake_rig: None,
             view_models: Vec::new(),
+            items_sources: HashMap::new(),
         }
     }
 
@@ -485,6 +493,49 @@ impl NoesisRenderState {
                     "NoesisViewModels: set_data_context returned false for {:?} \
                      (target not a FrameworkElement?)",
                     entry.id,
+                );
+            }
+        }
+    }
+
+    /// Drain pending [`NoesisItemsSources`] edits, apply them to per-element
+    /// [`ObservableCollection`](dm_noesis_runtime::binding::ObservableCollection)s
+    /// (creating one per `x:Name` on first use), then bind any unbound
+    /// collection to its element's `ItemsSource`. The apply step is independent
+    /// of the scene (the collection holds the data regardless); binding waits
+    /// until the named element exists and re-binds after a scene rebuild.
+    pub(crate) fn apply_items_sources(&mut self, requests: &NoesisItemsSources) {
+        for (name, op) in requests.drain() {
+            crate::items::apply_op(&mut self.items_sources, name, op);
+        }
+        if self.items_sources.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let uri = scene.built_for_uri.clone();
+        for (name, binding) in &mut self.items_sources {
+            if !binding.needs_bind(&uri) {
+                continue;
+            }
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisItemsSources: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if element.set_items_source(binding.collection()) {
+                binding.mark_bound(&uri);
+            } else {
+                warn!(
+                    "NoesisItemsSources: element {:?} is not an ItemsControl; \
+                     set_items_source skipped",
+                    name,
                 );
             }
         }
@@ -1298,10 +1349,13 @@ impl NoesisRenderState {
     }
 
     fn teardown_scene(&mut self) {
-        // View models outlive the scene; mark them detached so the next attach
-        // pass re-binds them against the rebuilt view.
+        // View models + items sources outlive the scene; mark them detached so
+        // the next apply/attach pass re-binds them against the rebuilt view.
         for entry in &mut self.view_models {
             entry.reset_attach();
+        }
+        for binding in self.items_sources.values_mut() {
+            binding.reset_bind();
         }
         let Some(mut scene) = self.scene.take() else {
             return;
@@ -1321,6 +1375,7 @@ impl Drop for NoesisRenderState {
         // (They don't need the device, but releasing them deterministically
         // here keeps teardown ordering obvious.)
         self.view_models.clear();
+        self.items_sources.clear();
         self.teardown_scene();
         self.teardown_bake_rig();
         drop(self.registered_device.take());
