@@ -1,0 +1,36 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#FF0A0B12">
+    <!-- Phase 4.E ImageBrush loader smoke scene.
+
+         - The Image element uses the full asset verbatim: confirms
+           ImageProvider.LoadTexture lands the pixels in a real
+           Noesis::Texture and the PATH_PATTERN draw samples it.
+         - The Rectangle with ImageBrush TileMode="Tile" hits
+           PATH_AA_PATTERN_REPEAT from the Phase 4.E wrap port — the
+           REPEAT wrap math now sources a real image atlas instead of
+           the blank DrawingBrush placeholder. -->
+    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+        <TextBlock Text="ImageBrush + Image loader (Phase 4.E)"
+                   Foreground="#FFE2FAFF" FontFamily="Fonts/#Bitter" FontSize="22"
+                   HorizontalAlignment="Center" Margin="0,0,0,16"/>
+
+        <Border BorderBrush="#FF3A5272" BorderThickness="2" Padding="8"
+                HorizontalAlignment="Center" Margin="0,0,0,16">
+            <Image Source="Data/Images/BgTile.png" Width="96" Height="96"
+                   Stretch="None"/>
+        </Border>
+
+        <TextBlock Text="Tiled ImageBrush (TileMode=Tile):"
+                   Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="16"
+                   HorizontalAlignment="Center" Margin="0,0,0,8"/>
+        <Rectangle Width="480" Height="120" HorizontalAlignment="Center">
+            <Rectangle.Fill>
+                <ImageBrush ImageSource="Data/Images/BgTile.png"
+                            TileMode="Tile"
+                            Viewport="0,0,12,12" ViewportUnits="Absolute"
+                            Viewbox="0,0,6,6" ViewboxUnits="Absolute"/>
+            </Rectangle.Fill>
+        </Rectangle>
+    </StackPanel>
+</Grid>

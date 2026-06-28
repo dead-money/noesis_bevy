@@ -1,0 +1,21 @@
+<!-- Desktop doesn't usually produce Bevy TouchInput, so this scene mostly
+     smokes the TouchDown/Move/Up FFI path on platforms that do. On a
+     desktop it falls back to showing a hint and reacting to the mouse. -->
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#FF120818">
+    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+        <TextBlock Text="Touch the screen — each finger should leave a glow."
+                   Foreground="#FFE6D5FF" FontFamily="Fonts/#Bitter" FontSize="20"
+                   HorizontalAlignment="Center" Margin="0,0,0,20"/>
+        <Border Width="500" Height="300"
+                Background="#FF291744" BorderBrush="#FF6B3BAC" BorderThickness="2"
+                CornerRadius="16">
+            <Grid>
+                <TextBlock Text="(no touch events on desktop)"
+                           Foreground="#FF9884B8" FontFamily="Fonts/#Bitter" FontSize="14"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+    </StackPanel>
+</Grid>

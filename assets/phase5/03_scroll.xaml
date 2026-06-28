@@ -1,0 +1,33 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#FF0E1520">
+    <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" Text="Scroll with mouse wheel or drag — tests MouseWheel + Scroll routing."
+               Foreground="#FFE0E2EA" FontFamily="Fonts/#Bitter" FontSize="18"
+               Margin="16" HorizontalAlignment="Center"/>
+    <ScrollViewer Grid.Row="1" Margin="16,0,16,16"
+                  VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled"
+                  Background="#FF14203A">
+        <StackPanel>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 01 — The quick brown fox jumps over the lazy dog.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 02 — Pack my box with five dozen liquor jugs.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 03 — Sphinx of black quartz, judge my vow.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 04 — How vexingly quick daft zebras jump.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 05 — Bright vixens jump; dozy fowl quack.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 06 — Waltz, bad nymph, for quick jigs vex.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 07 — Glib jocks quiz nymph to vex dwarf.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 08 — Jackdaws love my big sphinx of quartz.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 09 — The five boxing wizards jump quickly.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 10 — Crazy Fredrick bought many very exquisite opal jewels.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 11 — We promptly judged antique ivory buckles for the next prize.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 12 — A mad boxer shot a quick, gloved jab to the jaw of his dizzy opponent.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 13 — Two driven jocks help fax my big quiz.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 14 — Quick zephyrs blow, vexing daft Jim.</TextBlock>
+            <TextBlock Foreground="#FFBED3FF" FontFamily="Fonts/#Bitter" FontSize="20" Margin="12">Line 15 — End of scroll content.</TextBlock>
+        </StackPanel>
+    </ScrollViewer>
+</Grid>

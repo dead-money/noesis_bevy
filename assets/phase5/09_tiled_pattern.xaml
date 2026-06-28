@@ -1,0 +1,37 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#FF101418">
+    <!-- Historical smoke scene. DrawingBrush is documented as NOT
+         implemented by Noesis (SDK has no DrawingBrush.h), so the tiled
+         Rectangle deliberately does nothing; kept as a negative-case
+         load-without-panic demonstration and a regression guard for the
+         Phase 4.E wrap shader variants compiling cleanly. The pixel
+         correctness of PATH_PATTERN_REPEAT is covered by
+         tests/wgpu_pattern_wrap.rs; real use of the REPEAT variant is
+         unblocked by the `ImageBrush` loader (Phase 4.E follow-up). -->
+    <Rectangle HorizontalAlignment="Center" VerticalAlignment="Center"
+               Width="480" Height="320">
+        <Rectangle.Fill>
+            <DrawingBrush TileMode="Tile"
+                          Viewport="0,0,24,24" ViewportUnits="Absolute"
+                          Viewbox="0,0,24,24" ViewboxUnits="Absolute">
+                <DrawingBrush.Drawing>
+                    <GeometryDrawing Brush="#FF3AA0FF">
+                        <GeometryDrawing.Geometry>
+                            <RectangleGeometry Rect="0,0,24,24"/>
+                        </GeometryDrawing.Geometry>
+                        <GeometryDrawing.Pen>
+                            <Pen Thickness="1" Brush="#FF0B1526"/>
+                        </GeometryDrawing.Pen>
+                    </GeometryDrawing>
+                </DrawingBrush.Drawing>
+            </DrawingBrush>
+        </Rectangle.Fill>
+    </Rectangle>
+
+    <TextBlock Text="DrawingBrush is not implemented by Noesis — the Rectangle above is intentionally blank."
+               Foreground="#FFE2FAFF" FontFamily="Fonts/#Bitter" FontSize="16"
+               HorizontalAlignment="Center" VerticalAlignment="Bottom"
+               Margin="0,0,0,32" TextWrapping="Wrap" MaxWidth="960"
+               TextAlignment="Center"/>
+</Grid>

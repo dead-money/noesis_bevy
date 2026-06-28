@@ -1,0 +1,38 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#FF050814">
+    <Grid.Triggers>
+        <EventTrigger RoutedEvent="Grid.Loaded">
+            <BeginStoryboard>
+                <Storyboard RepeatBehavior="Forever">
+                    <DoubleAnimation
+                        Storyboard.TargetName="ring"
+                        Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                        From="0" To="360" Duration="0:0:3"/>
+                    <DoubleAnimation
+                        Storyboard.TargetName="pulse"
+                        Storyboard.TargetProperty="Opacity"
+                        From="0.2" To="1" Duration="0:0:1" AutoReverse="True"/>
+                </Storyboard>
+            </BeginStoryboard>
+        </EventTrigger>
+    </Grid.Triggers>
+    <Ellipse Width="220" Height="220" Stroke="#FF8AE8FF" StrokeThickness="4"
+             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    <Ellipse x:Name="ring" Width="220" Height="220" StrokeThickness="12"
+             HorizontalAlignment="Center" VerticalAlignment="Center"
+             RenderTransformOrigin="0.5,0.5">
+        <Ellipse.Stroke>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Offset="0" Color="#FF5AF0E8"/>
+                <GradientStop Offset="1" Color="#00000000"/>
+            </LinearGradientBrush>
+        </Ellipse.Stroke>
+        <Ellipse.RenderTransform>
+            <RotateTransform Angle="0"/>
+        </Ellipse.RenderTransform>
+    </Ellipse>
+    <TextBlock x:Name="pulse" Text="idle"
+               Foreground="#FFE2FAFF" FontFamily="Fonts/#Bitter" FontSize="28"
+               HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0.2"/>
+</Grid>

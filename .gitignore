@@ -1,0 +1,23 @@
+/target
+*.swp
+.DS_Store
+.idea/
+
+# Screenshot-example output lands in the crate root by default.
+/*.png
+
+# Noesis SDK assets symlinked in for examples — the SDK itself is
+# per-developer-licensed and must never be committed. Committing the
+# symlink is fine (it's just a path), but we gitignore out of caution.
+/assets/Noesis.xaml
+/assets/Text.xaml
+/assets/CarHud.xaml
+/assets/Lottie.xaml
+/assets/Styles/
+# No trailing slash: `assets/Fonts` is a per-dev symlink into the SDK (a file,
+# not a dir), so the dir-only `Fonts/` form failed to ignore it.
+/assets/Fonts
+/assets/Images/
+# Phase 5.F convenience — symlink `assets/Data -> $NOESIS_SDK_DIR/Data` so
+# `xaml_viewer` can cycle through SDK samples. Same rule: don't commit.
+/assets/Data

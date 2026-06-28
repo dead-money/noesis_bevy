@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Opt in to Node 24 for any JS-based actions. Node 20 is deprecated
+  # and will be forced off by GitHub in June 2026; this flips the
+  # switch early so we're running on the same Node they'll default to.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+# fmt is the only build-step we can run on a hosted runner: cargo
+# build / clippy / test all transitively pull in dm_noesis_runtime,
+# whose build.rs requires the Noesis Native SDK (see
+# ../dm_noesis_runtime/README.md "Setup"). The SDK is closed-source
+# and not available on GitHub-hosted runners.
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all --check

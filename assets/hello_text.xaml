@@ -1,0 +1,15 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      Background="#FF1B2838"
+      TextElement.FontFamily="Fonts/#Bitter">
+  <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+    <TextBlock Text="Hello, Noesis!"
+               Foreground="White"
+               FontSize="120"
+               TextAlignment="Center"/>
+    <TextBlock Text="SDF text via dm_noesis_bevy"
+               Foreground="#FFFFC857"
+               FontSize="48"
+               TextAlignment="Center"
+               Margin="0,40,0,0"/>
+  </StackPanel>
+</Grid>

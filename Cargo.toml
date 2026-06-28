@@ -1,0 +1,50 @@
+[package]
+name = "dm_noesis_bevy"
+version = "0.1.0"
+edition = "2024"
+description = "Bevy plugin that drives the Noesis GUI Native SDK and renders into Bevy via wgpu compositing."
+repository = "https://github.com/dead-money/dm_noesis_bevy"
+license = "MIT"
+publish = false
+
+[dependencies]
+# `debug` surfaces system / resource names in panic messages — cheap diagnostic
+# help, small compile-time cost. Drop once the plugin is stable if needed.
+bevy = { version = "0.18", features = ["debug"] }
+bevy_render = "0.18"
+bytemuck = { version = "1.25", features = ["derive"] }
+dm_noesis_runtime = { path = "../dm_noesis_runtime" }
+# Image decoding for the ImageBrush loader (Phase 4.E). PNG / JPEG cover the
+# SDK samples (BgTile.png, Aladin/aladin-atlas.png). Add more formats here as
+# scenes demand them.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+thiserror = "2"
+# Pinned to match Bevy 0.18's transitive wgpu version. Cargo dedupes them
+# into a single crate, so RenderDevice traits remain interchangeable between
+# this crate's wgpu types and Bevy's.
+wgpu = "27.0.1"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+module_name_repetitions = "allow"
+
+[[example]]
+name = "phase4_visual"
+path = "examples/phase4_visual.rs"
+
+[[example]]
+name = "bevy_wgpu_bridge"
+path = "examples/bevy_wgpu_bridge.rs"
+
+[[example]]
+name = "xaml_viewer"
+path = "examples/xaml_viewer.rs"
