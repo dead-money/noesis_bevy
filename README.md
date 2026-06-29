@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/dead-money/noesis_bevy/actions/workflows/ci.yml/badge.svg)](https://github.com/dead-money/noesis_bevy/actions/workflows/ci.yml)
 
-A Bevy 0.18 plugin for [Noesis GUI](https://www.noesisengine.com/). It boots Noesis at startup, renders a XAML scene through an implementation of `Noesis::RenderDevice` on Bevy's wgpu device, and composites the result into your Bevy frame.
+A Bevy 0.18 plugin that renders [Noesis GUI](https://www.noesisengine.com/) interfaces inside your game. Noesis is a commercial UI engine that draws XAML, the markup language behind WPF and Unity's UI, so you can design menus, HUDs, and inventories in a real authoring tool and run them in Bevy. The plugin draws the UI on Bevy's own GPU and composites it into your frame.
 
-It pairs with the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which owns the C++ shim and Rust bindings to the SDK. All `unsafe` lives there; this crate is `forbid(unsafe_code)`.
+It builds on the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which wraps the C++ SDK. All `unsafe` lives there; this crate has none (`forbid(unsafe_code)`).
 
 Built for Dead Money's own games and mostly written by AI agents under human direction.
 
@@ -15,11 +15,11 @@ Built for Dead Money's own games and mostly written by AI agents under human dir
 
 ## You need a Noesis license
 
-This crate links against the [Noesis Native SDK](https://www.noesisengine.com/), closed-source commercial software from Noesis Technologies S.L. We do not redistribute it. Every developer needs their own copy (Indie tier or higher); obtain it separately and point `NOESIS_SDK_DIR` at your install. `noesis_runtime`'s `build.rs` reads it at compile time and links `libNoesis` from the matching `Bin/<platform>/` directory.
+This crate links against the [Noesis Native SDK](https://www.noesisengine.com/), commercial software we can't redistribute. Each developer buys their own copy (Indie tier or higher) and points `NOESIS_SDK_DIR` at the install; the build links against it from there.
 
-This release targets **Noesis Native SDK 3.2.13**. The C ABI shim is compiled against that version's headers and checks key struct sizes at build time, so a different SDK version may fail to build or link. Match it unless you have verified a newer release.
+This release targets **Noesis Native SDK 3.2.13** and is compiled against that version's headers, so a different SDK version may not link. Match it unless you've tested a newer one.
 
-Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to your credentials. Without them the runtime works for a while, then blanks the view with a "Trial expired" message.
+Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to your credentials. Without them the UI runs for a while, then blanks out with a "Trial expired" message.
 
 ## Quick start
 
@@ -32,8 +32,9 @@ noesis_bevy = { git = "https://github.com/dead-money/noesis_bevy" }
 It is a git dependency, not a crates.io release, and it still links the Noesis SDK at build time. You need `NOESIS_SDK_DIR` set (see above) for it to compile.
 
 ```rust
+use std::sync::Arc;
 use bevy::prelude::*;
-use noesis_bevy::{NoesisPlugin, NoesisScene};
+use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
 
 fn main() {
     App::new()
@@ -43,20 +44,55 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn(Camera2d);
-    // Keep the handle alive. Otherwise asset GC drops the XAML bytes
-    // before Noesis's parser asks for them.
-    let _xaml = asset_server.load::<noesis_bevy::XamlAsset>("MainMenu.xaml");
-    commands.insert_resource(NoesisScene {
-        xaml_uri: "MainMenu.xaml".to_string(),
-        size: UVec2::new(1920, 1080),
-        ..default()
-    });
+fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
+    // Register XAML by URI. You can also load it through the asset server as a
+    // `XamlAsset`; the loader feeds these same bytes into the registry.
+    xaml.insert("MainMenu.xaml", Arc::new(include_bytes!("MainMenu.xaml").to_vec()));
+
+    // A view is a `NoesisView` component on a 2D camera. Noesis renders the
+    // scene into an offscreen texture and composites it onto that camera.
+    commands.spawn((
+        Camera2d,
+        NoesisCamera,
+        NoesisView {
+            xaml_uri: "MainMenu.xaml".to_string(),
+            size: UVec2::new(1920, 1080),
+            ..default()
+        },
+    ));
 }
 ```
 
 `NoesisPlugin::default()` reads `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` from the environment. Pass `NoesisLicense { name, key }` to set them explicitly.
+
+## Driving the UI from systems
+
+Each piece of UI state is a component on the view entity: text, visibility, data binding, list contents, and more. Add one when you spawn the view, then change it at runtime from any system. For an app with a single UI, `NoesisUi` finds that one view for you so a system doesn't have to spell out the query:
+
+```rust
+use bevy::prelude::*;
+use noesis_bevy::{NoesisCamera, NoesisText, NoesisUi, NoesisView};
+
+fn spawn(mut commands: Commands) {
+    commands.spawn((
+        Camera2d,
+        NoesisCamera,
+        NoesisView { xaml_uri: "Hud.xaml".into(), size: UVec2::new(1920, 1080), ..default() },
+        // Seed initial text for named elements; applied once the scene builds.
+        NoesisText::new().with("Score", "0").with("Lives", "3"),
+    ));
+}
+
+fn update_score(score: Res<Score>, mut ui: NoesisUi<&mut NoesisText>) {
+    if !score.is_changed() { return; }
+    let Some(mut text) = ui.get_mut() else { return };
+    text.write("Score", score.0.to_string()); // &mut self setter, no raw map access
+}
+```
+
+`NoesisUi<&mut T>` reads or writes a bridge component `T` on the single view; plain `NoesisUi` just yields the view entity via `ui.entity()`, handy for matching the `view: Entity` that read-back messages carry. Its accessors return `None` (rather than skipping the system) when there is not exactly one view, so a multi-view app routes by that entity instead.
+
+Components seeded before the scene exists are not lost: a freshly built (or hot-reloaded) scene re-applies the current state.
 
 ## The Scoreboard sample
 
@@ -64,20 +100,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 cargo run --example scoreboard
 ```
 
-`scoreboard` is the flagship example: a faithful port of Noesis's own Scoreboard demo, driven entirely through the crate's safe bridges. The sample's real `MainWindow.xaml` (the emblem geometries, gradient and radial brushes, control templates, the per-player `DataTemplate` with its `DataTrigger`s, and the `b:Interaction` behaviors) is the SDK's own XAML, parsed byte for byte. The data flows in without raw FFI:
-
-- `NoesisVm` attaches a `DependencyObject`-backed `Scoreboard.Game` view model as the view-root `DataContext`, supplying the scalar bindings (`Name`, `AllianceScore`, `HordeScore`, `ElapsedTime`, `SelectedTeam`).
-- `NoesisItems::with_objects` fills the per-player `ItemsControl` with ten bindable object rows (one Rust-backed Noesis class per row), so the per-player `DataTemplate` bindings resolve and the team/class `DataTrigger`s fire.
-- `NoesisItems::with` fills the team-filter `ComboBox`, whose `SelectedIndex` binds two-way to `Game.SelectedTeam`; `NoesisDp` reads the bound `SelectedIndex` back.
-- `NoesisWindowCompatPlugin` registers a content-host stand-in for the sample's `<Window>` root, an App-framework type absent from the core runtime, so the genuine XAML parses unmodified.
-
-The sample reads the SDK's real `MainWindow.xaml` and its two fonts from `$NOESIS_SDK_DIR` at runtime (nothing is vendored), so it needs that variable set. When it is unset, the example skips gracefully with a warning. The headless data round-trip (the ten players reaching the control, and a mid-run `SelectedTeam` edit surfacing on the combo's `SelectedIndex`) is asserted by `tests/headless_example_scoreboard.rs`.
-
-```sh
-# Headless screenshot:
-NOESIS_VIEWER_EXIT_AFTER=1 NOESIS_SCREENSHOT=scoreboard.png \
-    cargo run --example scoreboard
-```
+The flagship example (pictured above): a faithful port of Noesis's own Scoreboard demo, driven entirely through the crate's safe bridges. It parses the SDK's real `MainWindow.xaml` byte for byte and feeds it with `NoesisVm` (the `Game` view model as `DataContext`), `NoesisItems` (the ten player rows and the team-filter combo), and `NoesisDp` (reading bound values back), with `NoesisWindowCompatPlugin` standing in for the sample's `<Window>` root. It reads the XAML and its fonts from `$NOESIS_SDK_DIR` at runtime (nothing vendored), so it needs that set and skips gracefully when unset. The data round-trip is covered by `tests/headless_example_scoreboard.rs`.
 
 ## The viewer example
 
@@ -103,7 +126,7 @@ Environment variables: `NOESIS_VIEWER_PATH`, `NOESIS_VIEWER_SIZE` (`WxH`), `NOES
 
 ## Custom controls and markup extensions
 
-Register Rust-backed XAML types from a `Startup` system, then load XAML that uses them:
+Need a control the SDK doesn't ship, or your own `{Binding}`-style markup? Write it in Rust, register it from a `Startup` system, and XAML can then use it by name:
 
 ```rust
 use bevy::prelude::*;
@@ -153,16 +176,16 @@ App::new()
 
 Mutating the resource updates the bound controls (Bevy change detection drives `INotifyPropertyChanged`); a control edit writes back into the resource. Supported field types are `f32`/`f64`, `i32`/`u32`, `bool`, and `String`; mark other fields `#[noesis(skip)]`.
 
-For lower-level access there are also `NoesisVm` (a `DependencyObject`-backed view model with explicit properties), `NoesisItems` (drive an `ItemsControl`/`ComboBox`/`ListBox` from a Rust collection, with `with_objects` for bindable object rows), and `NoesisDp` (binding-free get/set/watch of any dependency property by `(x:Name, property)`).
+When you need finer control, three lower-level bridges sit underneath: `NoesisVm` (a view model you build one property at a time), `NoesisItems` (fill a list or dropdown from a Rust collection), and `NoesisDp` (get, set, or watch any property on a named element directly, no binding required).
 
 ## How it works
 
-- **The bridge pattern.** A feature is a `#[derive(Component)]` on the `NoesisView` camera entity plus a reconcile system in `NoesisSet::Apply` that calls into that view's live scene; read-backs surface as a `Message { view, ... }`. `NoesisVm`, `NoesisItems`, `NoesisDp`, `NoesisText`, and the rest follow the same shape, so adding a capability means mirroring an existing bridge module.
-- **Noesis lives in the render world.** The main world owns the `NoesisScene` config, the asset registries, and the input event source. Everything Noesis touches (View, Renderer, RenderDevice, providers) sits on the render side behind `!Send` resources. Bevy's `ExtractResourcePlugin` mirrors the asset registries each frame.
-- **One intermediate texture, then a blit.** Noesis renders into an offscreen texture sized to the scene. A `NoesisNode` graph node then samples that into the camera's `ViewTarget` with the correct sRGB conversion. Rendering straight to `ViewTarget` is a future optimization.
-- **No unsafe here.** This crate is `forbid(unsafe_code)`. All `unsafe` lives in `noesis_runtime` behind type-checked safe wrappers.
-- **Premultiplied alpha at decode time.** PNG and JPEG decode to straight alpha; we premultiply once at load so Noesis's `SrcOver` blend does not fringe transparent edges. The loader is idempotent and never sees its own output.
-- **Font fallback ordering.** Noesis's `CachedFontProvider` will not lazy-scan a folder for an explicit `FontFamily` reference. Listing your primary font in `NoesisScene::font_fallbacks` forces the scan early so those references resolve.
+- **The bridge pattern.** Each feature is a component you add to the view's camera entity. A system runs every frame, pushes that component's state into the live UI, and surfaces anything the UI reports back as a message tagged with the view it came from. `NoesisVm`, `NoesisItems`, `NoesisText`, and the rest all share this shape, so adding a feature means copying an existing bridge.
+- **Noesis runs on the main thread.** Noesis is single-threaded, so its view, renderer, and device stay on Bevy's main thread, and the bridges run there too. Only the finished image is handed to the render thread, which keeps Bevy's normal multi-threaded rendering intact.
+- **One texture, then a copy.** Each frame Noesis paints the UI into an offscreen texture sized to the scene, and a render-graph node copies that onto your camera's output with the right color handling.
+- **No unsafe here.** This crate is `forbid(unsafe_code)`. All `unsafe` lives in `noesis_runtime` behind safe wrappers.
+- **Transparency that doesn't fringe.** PNG and JPEG images are blended once when they load, so transparent edges stay clean instead of showing dark halos.
+- **Fonts must load before the UI.** Noesis remembers a font folder the first time it looks inside, so if your fonts haven't loaded yet, text in them renders blank forever. List the folder in `NoesisView::wait_for_fonts` and the view waits for them before it builds.
 
 ## Setup
 
