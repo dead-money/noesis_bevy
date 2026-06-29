@@ -16,6 +16,7 @@ pub mod binding;
 pub mod brushes;
 pub mod classes;
 pub mod commands;
+pub mod diagnostics;
 pub mod dp;
 pub mod events;
 pub mod focus;
@@ -23,6 +24,7 @@ pub mod focus_input;
 pub mod font;
 pub mod geometry;
 pub mod image;
+pub mod imaging;
 pub mod input;
 pub mod integration;
 pub mod items;
@@ -32,6 +34,7 @@ pub mod plain_vm;
 pub mod render;
 pub mod render_device;
 pub mod routed_events;
+pub mod svg;
 pub mod text;
 pub mod theme;
 pub mod transforms;
@@ -56,6 +59,7 @@ pub use commands::{
     CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
     SharedCommandQueue,
 };
+pub use diagnostics::{NoesisDiagnostics, NoesisDiagnosticsPlugin};
 /// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
 pub use dm_noesis_bevy_derive::NoesisViewModel;
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
@@ -73,6 +77,9 @@ pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
 pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
 };
+pub use imaging::{
+    ImageBitmap, ImageReadback, NoesisImageChanged, NoesisImaging, NoesisImagingPlugin,
+};
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use integration::{
     CursorType, NoesisCursorRequested, NoesisIntegrationPlugin, NoesisOpenUrl, NoesisPlayAudio,
@@ -87,6 +94,7 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
+pub use svg::{NoesisSvg, NoesisSvgChanged, NoesisSvgPlugin};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use transforms::{
@@ -188,6 +196,9 @@ impl Plugin for NoesisPlugin {
             animation::NoesisAnimationPlugin,
             typography::NoesisTypographyPlugin,
             binding::NoesisBindingPlugin,
+            imaging::NoesisImagingPlugin,
+            svg::NoesisSvgPlugin,
+            diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
     }
 }
