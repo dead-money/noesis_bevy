@@ -48,7 +48,9 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::PrimaryWindow;
-use noesis_bevy::{FontRegistry, ImageAsset, NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{
+    FontRegistry, ImageAsset, NoesisCamera, NoesisPlugin, NoesisUi, NoesisView, XamlRegistry,
+};
 
 /// Carries the initial [`NoesisView`] config from `main` to `setup_camera`,
 /// which spawns it onto the camera entity.
@@ -401,7 +403,7 @@ fn viewer_controls(
     mut viewer: ResMut<Viewer>,
     mut keys: MessageReader<KeyboardInput>,
     mut registry: ResMut<XamlRegistry>,
-    mut views: Query<&mut NoesisView>,
+    mut view: NoesisUi<&mut NoesisView>,
 ) {
     for ev in keys.read() {
         if !matches!(ev.state, ButtonState::Pressed) || ev.repeat {
@@ -436,7 +438,7 @@ fn viewer_controls(
                 }
             }
             KeyCode::KeyP => {
-                if let Some(mut scene) = views.iter_mut().next() {
+                if let Some(mut scene) = view.get_mut() {
                     scene.ppaa = !scene.ppaa;
                     info!(
                         "xaml_viewer: PPAA {}",
@@ -454,9 +456,9 @@ fn viewer_controls(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn apply_scene_changes(viewer: Res<Viewer>, mut views: Query<&mut NoesisView>) {
+fn apply_scene_changes(viewer: Res<Viewer>, mut view: NoesisUi<&mut NoesisView>) {
     let desired = &viewer.scenes[viewer.current].uri;
-    for mut scene in &mut views {
+    if let Some(mut scene) = view.get_mut() {
         if scene.xaml_uri != *desired {
             scene.xaml_uri = desired.clone();
         }

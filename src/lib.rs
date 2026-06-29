@@ -44,6 +44,7 @@ pub mod theme;
 pub mod transforms;
 pub mod transforms3d;
 pub mod typography;
+pub mod ui;
 pub mod viewmodel;
 pub mod visibility;
 pub mod visual_state;
@@ -128,6 +129,7 @@ pub use typography::{
     FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
     NoesisTypographyPlugin, TypographyField, TypographyValue, TypographyWatch,
 };
+pub use ui::NoesisUi;
 pub use viewmodel::{
     NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,
     ViewModelChangeForwarder, ViewModelDef, VmValue,
