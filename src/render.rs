@@ -4182,7 +4182,10 @@ mod tests {
                 name: "MainMenu",
                 children: vec![Scope {
                     name: "Footer",
-                    children: vec![Scope { name: "PlayButton", children: vec![] }],
+                    children: vec![Scope {
+                        name: "PlayButton",
+                        children: vec![],
+                    }],
                 }],
             }],
         };
@@ -4191,7 +4194,10 @@ mod tests {
         assert_eq!(resolve(&tree, "MainMenu"), Some("MainMenu"));
         // Qualified: descend into the host's private scope to reach its leaf.
         assert_eq!(resolve(&tree, "MainMenu/Footer"), Some("Footer"));
-        assert_eq!(resolve(&tree, "MainMenu/Footer/PlayButton"), Some("PlayButton"));
+        assert_eq!(
+            resolve(&tree, "MainMenu/Footer/PlayButton"),
+            Some("PlayButton")
+        );
 
         // A leaf that only exists *inside* the host is unreachable as a plain
         // name from the root — the whole reason qualified names exist.
