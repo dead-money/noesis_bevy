@@ -14,71 +14,60 @@ this side is then mechanical glue once the runtime exposes the primitive. So thi
 
 ## 1. Render device / shaders
 
-The render device is entirely ours, so every shader gap is this crate's work. This is the
-largest open area.
-
-- **Effects pipeline (partial).** Opacity / Downsample / Upsample are implemented; the
-  separable-blur resolve halves (`DOWNSAMPLE` 49, `UPSAMPLE` 48) and opacity groups render
-  over the offscreen RT path (`tests/wgpu_effects.rs`). **Still open:** `SHADOW` (50) and
-  `BLUR` (51) need the `shadow` texture co-bound with `image` — blocked by the 4-bind-group
-  `downlevel_defaults` limit (groups 0–3 are full), so `shadow` must share group(3) with
-  `image` (texture+sampler at bindings 2/3), plus a second pixel uniform for `cbuffer1_ps`
-  (group(1) binding(1)). `CUSTOM_EFFECT` (52) needs user pixel-shader compilation via
-  `Batch.pixelShader`. Scenes using drop-shadow/blur still panic until SHADOW/BLUR land.
-- **`SDF_LCD_SOLID`.** Subpixel text needs dual-source blending (`@blend_src(1)` fragment
-  output). Separate kickoff from `SDF_SOLID`.
-
-(Resolved: the onscreen-path draw bug — the manual `wgpu_first_triangle` path was driven with
-`RenderState::default()`, whose colorEnable bit is 0, so the pipeline used an empty color-write
-mask; the test now passes with a proper render state. Stencil is now attached: render targets
-and the onscreen intermediate carry a `Stencil8` buffer, pipelines declare a `depth_stencil`
-state from the batch's stencil mode, and `draw_batch` clears + accumulates the clip stack —
-`tests/wgpu_stencil_clip.rs`.)
+- **Effects: `SHADOW` (50) / `BLUR` (51).** Need the `shadow` texture co-bound with `image` —
+  blocked by the 4-bind-group `downlevel_defaults` limit (groups 0–3 are full), so `shadow` must
+  share group(3) with `image` (texture+sampler at bindings 2/3), plus a second pixel uniform for
+  `cbuffer1_ps` (group(1) binding(1)). Until these land, drop-shadow / blur scenes panic.
+- **Effects: `CUSTOM_EFFECT` (52).** Needs user pixel-shader compilation via `Batch.pixelShader`.
+- **`SDF_LCD_SOLID`.** Subpixel text needs dual-source blending (`@blend_src(1)` fragment output).
+  Separate kickoff from `SDF_SOLID`.
 
 ## 2. Compositing & perf
 
-- **PPAA + alpha blend.** `RenderFlag::Ppaa` produces fractional-alpha edges; with the
-  blit's alpha-blending the camera clear color bleeds through. Toggleable via
-  `NoesisView.ppaa` (viewer `P` key), off by default. Proper fix is a premultiplied blit,
-  or opaque-with-pre-clear; lands when text/effects demand AA.
+- **PPAA + alpha blend.** `RenderFlag::Ppaa` produces fractional-alpha edges; with the blit's
+  alpha-blending the camera clear color bleeds through. Toggleable via `NoesisView.ppaa` (viewer
+  `P` key), off by default. Proper fix is a premultiplied blit, or opaque-with-pre-clear.
 - **Direct-to-`ViewTarget`.** Today Noesis paints an intermediate `Rgba8Unorm` texture and
-  `NoesisNode` blits it into the camera's `ViewTarget`. Keying the `PipelineCache` on color
-  format and retargeting Noesis's pipelines at the `ViewTarget` format would let us drop the
-  intermediate and the blit pass entirely. The main perf win on the table (per view).
+  `NoesisNode` blits it into the camera's `ViewTarget`. Keying the `PipelineCache` on color format
+  and retargeting Noesis's pipelines at the `ViewTarget` format would drop the intermediate and the
+  blit pass entirely. The main perf win on the table (per view).
 
 ## 3. Bevy integration
 
-- ~~**XAML hot-reload.** Rebuild the `View` on Bevy asset-reload events so editing a `.xaml`
-  refreshes live.~~ Done: `ensure_scene` stamps each scene with the `Arc<Vec<u8>>` it parsed
-  and rebuilds (reusing the teardown/re-attach machinery, so bound view-models / items /
-  bindings survive) when an asset `Modified` (or direct `XamlRegistry::insert`) replaces those
-  bytes. Covered by `tests/headless_app_hot_reload.rs`.
-- **Remaining capability bridges.** The interaction core, visual richness (brushes, transforms,
-  animation, imaging, svg), data/text (typed items, binding/converters, typography), and
-  system surface (diagnostics, integration) are bridged. Still un-bridged, in the established
-  per-element-component / app-plugin style: **styles / templates / triggers + `ResourceDictionary`**
-  access (code-built styles beyond `install_app_resources_chain`); **formatted text / inlines /
-  OpenType typography** attached properties; **3D transforms** (`CompositeTransform3D` /
-  `MatrixTransform3D`); a richer **geometry / shapes** object model (beyond the polyline `Path`);
-  and **collection-view** operations (sort/filter/group/navigation). Each rides the same pattern.
-- **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without
-  a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
+- **Remaining capability bridges**, in the established per-element-component / app-plugin style:
+  - **Deeper styling** — `Style` `BasedOn` inheritance; `DataTrigger` / `MultiTrigger` /
+    `MultiDataTrigger` / `EventTrigger` (only property `Trigger` setters are wired);
+    `ControlTemplate` / `DataTemplate` parse + assign.
+  - **`ResourceDictionary` access** — get / add / merge / contains beyond
+    `install_app_resources_chain`.
+  - **Richer geometry / shapes** object model (beyond the polyline `Path`).
+  - **`MatrixTransform3D`** (the `CompositeTransform3D` bridge is in; matrix form isn't).
+  - **`InlineUIContainer`** (hosting a `UIElement` in flow content) + per-inline `TextDecorations`.
+- **Bevy-idiomatic SDK examples.** Re-implement a selection of the Noesis SDK samples
+  (`$NOESIS_SDK_DIR/Data/`) as in-crate `examples/` driven through the bridge components — visible
+  runnable demos that also exercise the bridges end-to-end.
+- **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without a
+  `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
   `BasedOn` a theme Style or dropping the custom Style.
 
 ## 4. Platform
 
-- **Windows.** `build.rs` is Linux-only. Needs MSVC `Noesis.lib` import-library handling and
-  DLL discovery/copy. Shared concern with the runtime crate's `build.rs`; coordinate the two.
+- **Windows.** `build.rs` is Linux-only. Needs MSVC `Noesis.lib` import-library handling and DLL
+  discovery/copy. Shared concern with the runtime crate's `build.rs`; coordinate the two.
+
+## 5. Runtime-blocked (file under `noesis_runtime` first, then add Bevy glue)
+
+- **Inline content re-apply.** The inlines bridge only populates a TextBlock whose `Inlines` is
+  empty; changing content later needs a scene rebuild. Lifting this needs an
+  `InlineCollection::Clear` wrapper in the runtime FFI.
+- **Collection-view sort / filter / group.** libNoesis 3.2.13 exposes no programmatic
+  `SortDescription` collection or `Filter` delegate — only current-item navigation + `Refresh`
+  (which the items bridge already drives). Needs a runtime surface first.
 
 ---
 
 ### Notes on prioritization
 
-If we build nothing else, the two highest-leverage items are:
-
-1. **The effects pipeline (§1)** — the difference between "renders our hand-authored scenes"
-   and "renders the SDK sample corpus," and it gates a real chunk of XAML.
-2. **Direct-to-`ViewTarget` (§2)** — removes a full-frame texture allocation and blit per view.
-
-The stencil fix (§1) is smaller and unblocks themed `ScrollViewer`, which shows up in almost
-every real control gallery, so it's a good early win despite the lower leverage.
+The highest-leverage remaining items: **effects `SHADOW`/`BLUR` (§1)** — the last gate on the
+shadow/blur slice of the SDK corpus — and **direct-to-`ViewTarget` (§2)**, the main per-view perf
+win.
