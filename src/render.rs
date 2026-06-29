@@ -60,7 +60,7 @@ use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
-use crate::items::{ItemValue, ItemsBinding};
+use crate::items::{CollectionViewOp, ItemValue, ItemsBinding};
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
@@ -729,12 +729,14 @@ impl NoesisRenderState {
     /// desired selection (creating a collection per `(entity, name)` on first
     /// use, pruning names no longer present). Every frame, bind any unbound
     /// collection to its element's `ItemsSource` — handles first resolution and
-    /// re-binding after a rebuild — then drive any pending selection.
+    /// re-binding after a rebuild — then drive any pending selection and
+    /// collection-view navigation.
     pub(crate) fn apply_items_for(
         &mut self,
         entity: Entity,
         sources: &HashMap<String, Vec<ItemValue>>,
         select: &HashMap<String, i32>,
+        navigate: &HashMap<String, CollectionViewOp>,
         changed: bool,
     ) {
         if changed {
@@ -748,6 +750,7 @@ impl NoesisRenderState {
                     .or_default();
                 binding.set_typed(items);
                 binding.set_desired_select(select.get(name).copied());
+                binding.set_desired_nav(navigate.get(name).copied());
             }
         }
 
@@ -780,17 +783,20 @@ impl NoesisRenderState {
                 }
             }
             binding.drive_selection(&mut element);
+            // Navigation runs last so it wins when both select and navigate are
+            // set for the same control (both move the shared current item).
+            binding.drive_navigation();
         }
     }
 
     /// Poll each of view `entity`'s bound list controls, returning
-    /// `(x:Name, count, selected_index, current-typed-value)` for every control
-    /// whose snapshot changed since the last poll. Drives the
+    /// `(x:Name, count, selected_index, current_position, current-typed-value)`
+    /// for every control whose snapshot changed since the last poll. Drives the
     /// [`NoesisItemsCurrent`](crate::items::NoesisItemsCurrent) read-back.
     pub(crate) fn poll_items_for(
         &mut self,
         entity: Entity,
-    ) -> Vec<(String, usize, i32, Option<ItemValue>)> {
+    ) -> Vec<(String, usize, i32, i32, Option<ItemValue>)> {
         let mut out = Vec::new();
         let Some(scene) = self.scenes.get(&entity) else {
             return out;
@@ -805,8 +811,16 @@ impl NoesisRenderState {
             let Some(element) = content.find_name(name) else {
                 continue;
             };
-            if let Some((count, selected_index, current)) = binding.read_changed(&element) {
-                out.push((name.clone(), count, selected_index, current));
+            if let Some((count, selected_index, current_position, current)) =
+                binding.read_changed(&element)
+            {
+                out.push((
+                    name.clone(),
+                    count,
+                    selected_index,
+                    current_position,
+                    current,
+                ));
             }
         }
         out
