@@ -45,6 +45,7 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice, RenderQueue},
     view::ViewTarget,
 };
+use noesis_runtime::animation::{Animation, DoubleAnimation, Timeline};
 use noesis_runtime::commands::Command;
 use noesis_runtime::events::{
     ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, subscribe_click,
@@ -1099,6 +1100,54 @@ impl NoesisRenderState {
                     "NoesisVisualState: GoToState({state:?}) failed for {name:?} \
                      in scene {:?} (not a templated control, or unknown state)",
                     scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Begin view `entity`'s requested code-built animations
+    /// (`x:Name → AnimationSpec`) via `Animation::begin_on` against each named
+    /// element's scalar dependency property. No-op until the scene exists;
+    /// missing names warn, and a failed begin (unknown / non-`float` property,
+    /// or a disconnected target) warns too. Re-begin replaces any clock already
+    /// running on the same property (`SnapshotAndReplace`).
+    pub(crate) fn begin_animations_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::animation::AnimationSpec>,
+    ) {
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, spec) in desired {
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisAnimation: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let mut anim = DoubleAnimation::new();
+            // From/To/Duration return false only on a type/read-only mismatch,
+            // impossible on a freshly-created DoubleAnimation — ignore them.
+            let _ = anim.set_from(spec.from);
+            let _ = anim.set_to(Some(spec.to));
+            let _ = anim.set_duration_secs(spec.duration_secs);
+            if !anim.begin_on(
+                &element,
+                &spec.property,
+                noesis_runtime::animation::HandoffBehavior::SnapshotAndReplace,
+            ) {
+                warn!(
+                    "NoesisAnimation: begin_on({:?}) failed for {name:?} in scene {:?} \
+                     (unknown / non-float property, or disconnected target)",
+                    spec.property, scene.built_for_uri,
                 );
             }
         }

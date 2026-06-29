@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 
+pub mod animation;
 pub mod bake;
 pub mod classes;
 pub mod commands;
@@ -35,6 +36,7 @@ pub mod visibility;
 pub mod visual_state;
 pub mod xaml;
 
+pub use animation::{AnimationSpec, NoesisAnimation, NoesisAnimationPlugin};
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
 pub use commands::{
@@ -153,6 +155,9 @@ impl Plugin for NoesisPlugin {
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,
             ),
+            // Bridge group C — overflow past Bevy's 15-element `Plugins` limit on
+            // the group-B tuple. New bridges append here.
+            (animation::NoesisAnimationPlugin,),
         ));
     }
 }
