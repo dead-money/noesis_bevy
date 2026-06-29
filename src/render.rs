@@ -287,7 +287,44 @@ fn build_noesis_style(
 /// entity via [`ExtractComponent`]. One [`NoesisView`] == one live Noesis
 /// `View` + intermediate, composited onto that camera. Multiple tagged
 /// cameras drive multiple independent views.
+///
+/// Spawning a `NoesisView` auto-attaches every per-view bridge component (text,
+/// visibility, dependency properties, items, focus, geometry, and the rest) via
+/// required components, each defaulting to empty. This is what makes a write
+/// survive when it is set before the scene exists: the component is already
+/// there, so a `Startup`/`OnEnter` system can write into it and the value lands
+/// once the scene builds (a freshly built scene re-applies each bridge's current
+/// state). An empty bridge component costs nothing: its `Default` allocates no
+/// heap and its reconcile pass returns immediately. The data-binding bridges
+/// [`NoesisVm`](crate::NoesisVm) and [`NoesisCommands`](crate::commands::NoesisCommands)
+/// are not auto-attached: they require an explicit class or command-host name, so
+/// you add them yourself, and they keep their own state across scene rebuilds.
 #[derive(Component, ExtractComponent, Clone, Debug)]
+#[require(
+    crate::animation::NoesisAnimation,
+    crate::binding::NoesisBinding,
+    crate::brushes::NoesisBrushes,
+    crate::dp::NoesisDp,
+    crate::events::NoesisClickWatch,
+    crate::events::NoesisKeyDownWatch,
+    crate::focus::NoesisFocus,
+    crate::focus_input::NoesisFocusControl,
+    crate::geometry::NoesisGeometry,
+    crate::imaging::NoesisImaging,
+    crate::inlines::NoesisInlines,
+    crate::items::NoesisItems,
+    crate::layout::NoesisLayout,
+    crate::routed_events::NoesisEventWatch,
+    crate::shapes::NoesisShapes,
+    crate::styles::NoesisStyles,
+    crate::svg::NoesisSvg,
+    crate::text::NoesisText,
+    crate::transforms::NoesisTransform,
+    crate::transforms3d::NoesisTransform3D,
+    crate::typography::NoesisTypography,
+    crate::visibility::NoesisVisibility,
+    crate::visual_state::NoesisVisualState
+)]
 pub struct NoesisView {
     /// Asset URI [`XamlRegistry`] keys on, typically the path passed to
     /// `AssetServer::load("foo.xaml")`.
@@ -370,9 +407,11 @@ pub struct NoesisView {
     /// chain; there's no need to mention non-fallback families just
     /// to make `FontFamily="Fonts/#X"` references resolve.
     ///
-    /// The default chain (`["Fonts/#Bitter"]`) keeps the SDK examples
-    /// working; downstream apps shipping their own font set should
-    /// override.
+    /// Defaults to empty: with no fallback declared, Noesis uses the faces it
+    /// resolves from `FontFamily` references directly. Set this to your own
+    /// chain (e.g. `["Fonts/#Bitter"]`) when you want a process-wide fallback.
+    /// An earlier release defaulted to `["Fonts/#Bitter"]`, which warned in apps
+    /// that didn't ship that font.
     pub font_fallbacks: Vec<String>,
 }
 
@@ -387,7 +426,7 @@ impl Default for NoesisView {
             wait_for_images: Vec::new(),
             ppaa: true,
             application_resources: Vec::new(),
-            font_fallbacks: vec!["Fonts/#Bitter".to_string()],
+            font_fallbacks: Vec::new(),
         }
     }
 }
@@ -4086,6 +4125,33 @@ mod tests {
         assert!(is_linear_float(TextureFormat::Rgba16Float));
         assert!(is_linear_float(TextureFormat::Rgba32Float));
         assert!(is_linear_float(TextureFormat::Rg11b10Ufloat));
+    }
+
+    #[test]
+    fn noesis_view_requires_the_bridge_components() {
+        use bevy::prelude::*;
+
+        // Spawning a bare NoesisView must auto-attach every per-view bridge, so a
+        // write set before the scene exists has somewhere to land. No Noesis
+        // runtime needed: required components are pure ECS composition.
+        let mut world = World::new();
+        let view = world
+            .spawn(super::NoesisView {
+                xaml_uri: "x.xaml".to_string(),
+                ..default()
+            })
+            .id();
+        let e = world.entity(view);
+        assert!(e.contains::<crate::text::NoesisText>());
+        assert!(e.contains::<crate::visibility::NoesisVisibility>());
+        assert!(e.contains::<crate::dp::NoesisDp>());
+        assert!(e.contains::<crate::items::NoesisItems>());
+        assert!(e.contains::<crate::focus::NoesisFocus>());
+        assert!(e.contains::<crate::svg::NoesisSvg>());
+        assert!(e.contains::<crate::events::NoesisClickWatch>());
+        // The explicitly-constructed binding bridges are not auto-attached.
+        assert!(!e.contains::<crate::viewmodel::NoesisVm>());
+        assert!(!e.contains::<crate::commands::NoesisCommands>());
     }
 
     #[test]
