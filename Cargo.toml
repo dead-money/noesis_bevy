@@ -40,9 +40,8 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # dev, version for the published crate).
 noesis_bevy_derive = { path = "./derive", version = "0.10" }
 # The public crate from crates.io. This release needs 0.10 (it uses APIs not in
-# 0.9), so noesis_runtime 0.10 must be published before noesis_bevy can be. We
-# build against the sibling checkout via the [patch.crates-io] below until then;
-# customers and the published crate resolve it from crates.io.
+# 0.9). For local co-development against an unpublished runtime, add a
+# `[patch.crates-io]` override pointing at your sibling checkout (see RELEASING.md).
 noesis_runtime = "0.10"
 # Image decoding for the ImageBrush loader. Add formats here as scenes demand.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -128,11 +127,3 @@ path = "examples/xaml_viewer.rs"
 [[example]]
 name = "scoreboard"
 path = "examples/scoreboard.rs"
-
-# Build against the sibling noesis_runtime checkout while 0.10 is unpublished.
-# `cargo` strips [patch] from the published manifest and downstream consumers
-# ignore it (patch applies only at the workspace root), so the released crate and
-# its users resolve noesis_runtime from crates.io. Remove this once 0.10 is on
-# crates.io. See RELEASING.md.
-[patch.crates-io]
-noesis_runtime = { path = "../noesis_runtime" }

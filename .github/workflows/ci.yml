@@ -13,14 +13,8 @@ env:
   # the same Node they'll default to.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
-# This crate depends on noesis_runtime. Until runtime 0.10 is on crates.io, the
-# manifest patches it to the sibling checkout (see Cargo.toml [patch.crates-io]),
-# so the jobs that resolve dependencies check out noesis_runtime alongside this
-# repo. Both repos must be public for the token-free sibling checkout; once
-# runtime 0.10 is published you can drop the patch and the sibling checkout (see
-# RELEASING.md).
 jobs:
-  # Runs everywhere, including fork PRs. No SDK and no dependency resolution.
+  # Runs everywhere, including fork PRs. No SDK needed.
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -45,16 +39,8 @@ jobs:
       DOCS_RS: "1"
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - name: Checkout noesis_bevy
+      - name: Checkout
         uses: actions/checkout@v6
-        with:
-          path: noesis_bevy
-
-      - name: Checkout noesis_runtime (sibling for the patched dependency)
-        uses: actions/checkout@v6
-        with:
-          repository: dead-money/noesis_runtime
-          path: noesis_runtime
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -69,7 +55,6 @@ jobs:
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - name: cargo doc
-        working-directory: noesis_bevy
         run: cargo doc --no-deps
 
   # build / clippy / test need the closed-source Noesis SDK, which only lives on
@@ -80,24 +65,14 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, noesis-sdk]
     steps:
-      - name: Checkout noesis_bevy
+      - name: Checkout
         uses: actions/checkout@v6
         with:
-          path: noesis_bevy
           # Keep target/ between runs for fast incremental builds.
           clean: false
 
-      - name: Checkout noesis_runtime (sibling for the patched dependency)
-        uses: actions/checkout@v6
-        with:
-          repository: dead-money/noesis_runtime
-          path: noesis_runtime
-          clean: false
-
       - name: cargo clippy
-        working-directory: noesis_bevy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: cargo test
-        working-directory: noesis_bevy
         run: cargo test --all-features

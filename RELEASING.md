@@ -15,10 +15,9 @@ How `noesis_bevy` gets published to crates.io.
    `#[derive(NoesisViewModel)]` macro) and `noesis_bevy`. The derive crate must be
    published first, because `noesis_bevy` depends on it. They version in lockstep.
 3. **`noesis_bevy` depends on `noesis_runtime`**, and this release needs runtime
-   `0.10` (it uses APIs not in `0.9`). Runtime `0.10` must be on crates.io before
-   `noesis_bevy` can publish. Until it is, `Cargo.toml` patches `noesis_runtime`
-   to the sibling checkout (`[patch.crates-io]`), and CI checks out
-   `noesis_runtime` alongside this repo.
+   `0.10` (it uses APIs not in `0.9`), which is on crates.io. For local
+   co-development against an unpublished runtime, add a `[patch.crates-io]`
+   override pointing at your sibling checkout (do not commit it).
 4. The initial release is **Linux only** (`build.rs` is Linux-only; Windows
    linking is not done yet).
 
@@ -30,22 +29,19 @@ How `noesis_bevy` gets published to crates.io.
   tags, and same-repo PRs. Fork PRs are skipped so untrusted code never touches
   the SDK runner.
 
-The `doc` and `build-test` jobs check out `noesis_runtime` as a sibling because of
-the `[patch]` above. Both repos must be public for the token-free checkout.
+The self-hosted runner needs Bevy's Linux build dependencies provisioned
+(`libasound2-dev`, `libudev-dev`, `libwayland-dev`, `libxkbcommon-dev`); the
+hosted `doc` job installs them itself.
 
 ## Going public / first publish
 
 The first publish is deliberate and manual (crates.io does not allow Trusted
-Publishing for a crate that does not exist yet). In order:
+Publishing for a crate that does not exist yet). `noesis_runtime` 0.10 is already
+on crates.io, so in order:
 
-1. **Publish `noesis_runtime` 0.10** from its own repo (see that repo's
-   RELEASING.md). Nothing here can publish until it is on crates.io.
-2. **Drop the sibling patch.** Remove the `[patch.crates-io]` block from
-   `Cargo.toml`; with runtime 0.10 on crates.io it resolves normally. You can also
-   remove the sibling-checkout steps from the CI workflows.
-3. **Make both crates publishable.** Remove `publish = false` from `Cargo.toml`
+1. **Make both crates publishable.** Remove `publish = false` from `Cargo.toml`
    and `derive/Cargo.toml`.
-4. **Claim the names with a manual first publish**, derive first. Create a
+2. **Claim the names with a manual first publish**, derive first. Create a
    crates.io API token (scope `publish-new`), then from a machine with the SDK:
 
    ```sh
@@ -54,7 +50,7 @@ Publishing for a crate that does not exist yet). In order:
    ```
 
    Revoke the token afterward; later releases use Trusted Publishing.
-5. **Configure crates.io Trusted Publishing** for both crates
+3. **Configure crates.io Trusted Publishing** for both crates
    (`noesis_bevy_derive` and `noesis_bevy`). On crates.io, the crate, Settings,
    Trusted Publishing, add a GitHub publisher:
    - Repository: `dead-money/noesis_bevy`

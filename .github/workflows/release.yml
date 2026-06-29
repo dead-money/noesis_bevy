@@ -23,21 +23,10 @@ jobs:
     name: publish to crates.io
     runs-on: [self-hosted, noesis-sdk]
     steps:
-      - name: Checkout noesis_bevy
+      - name: Checkout
         uses: actions/checkout@v6
-        with:
-          path: noesis_bevy
-
-      # Only needed while noesis_runtime 0.10 is unpublished and patched to the
-      # sibling. Once it's on crates.io and the [patch] is removed, drop this.
-      - name: Checkout noesis_runtime (sibling for the patched dependency)
-        uses: actions/checkout@v6
-        with:
-          repository: dead-money/noesis_runtime
-          path: noesis_runtime
 
       - name: cargo test
-        working-directory: noesis_bevy
         run: cargo test --all-features
 
       # Publish the derive crate first; noesis_bevy depends on it. Skip if this
@@ -45,7 +34,6 @@ jobs:
       # and a re-run stays idempotent).
       - name: Check noesis_bevy_derive published
         id: derive
-        working-directory: noesis_bevy
         run: |
           ver=$(grep -m1 '^version' derive/Cargo.toml | cut -d'"' -f2)
           code=$(curl -s -o /dev/null -w '%{http_code}' \
@@ -60,14 +48,12 @@ jobs:
 
       - name: Publish noesis_bevy_derive
         if: steps.derive.outputs.skip != 'true'
-        working-directory: noesis_bevy
         run: cargo publish --manifest-path derive/Cargo.toml
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.derive-auth.outputs.token }}
 
       - name: Check noesis_bevy published
         id: bevy
-        working-directory: noesis_bevy
         run: |
           ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           code=$(curl -s -o /dev/null -w '%{http_code}' \
@@ -82,7 +68,6 @@ jobs:
 
       - name: Publish noesis_bevy
         if: steps.bevy.outputs.skip != 'true'
-        working-directory: noesis_bevy
         run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.bevy-auth.outputs.token }}
