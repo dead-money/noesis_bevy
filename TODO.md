@@ -55,10 +55,14 @@ largest open area.
 
 - **XAML hot-reload.** Rebuild the `View` on Bevy asset-reload events so editing a `.xaml`
   refreshes live. Pairs with the runtime's `ParseXaml` / `LoadComponent` work.
-- **Bevy surface for newly-wrapped runtime features.** As the runtime exposes more primitives
-  (animation/storyboards, multi-binding + converters, brushes/transforms/geometry, typography,
-  …), add the matching Bevy ergonomics in the style of the existing bridges: typed components,
-  `Reflect` integration where it fits, and event bridges. Driven by `../dm_noesis_runtime/TODO.md`.
+- **Remaining capability bridges.** The interaction core, visual richness (brushes, transforms,
+  animation, imaging, svg), data/text (typed items, binding/converters, typography), and
+  system surface (diagnostics, integration) are bridged. Still un-bridged, in the established
+  per-element-component / app-plugin style: **styles / templates / triggers + `ResourceDictionary`**
+  access (code-built styles beyond `install_app_resources_chain`); **formatted text / inlines /
+  OpenType typography** attached properties; **3D transforms** (`CompositeTransform3D` /
+  `MatrixTransform3D`); a richer **geometry / shapes** object model (beyond the polyline `Path`);
+  and **collection-view** operations (sort/filter/group/navigation). Each rides the same pattern.
 - **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without
   a `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by
   `BasedOn` a theme Style or dropping the custom Style.
@@ -67,21 +71,6 @@ largest open area.
 
 - **Windows.** `build.rs` is Linux-only. Needs MSVC `Noesis.lib` import-library handling and
   DLL discovery/copy. Shared concern with the runtime crate's `build.rs`; coordinate the two.
-
-## 5. Runtime-blocked (file under `noesis_runtime` first, then add Bevy glue)
-
-- **Typed `ItemsSource` items.** The `ItemsSource` bridge handles string items only (the safe
-  `ObservableCollection` surface is `push_string`). Non-string items (numbers, nested view
-  models) need a safe `push_*` first.
-- **Command parameter decoding.** `NoesisCommandInvoked.parameter` is always `None` — decoding
-  the boxed `CommandParameter` needs a *safe* unbox (`ConvertArg` / `noesis_unbox_*` are
-  `unsafe`/`pub(crate)`, unreachable from this `unsafe_code = forbid` crate). The invoke path
-  itself is complete.
-- **`predict_focus_name`.** `PredictFocus` returns a borrowed element pointer; naming the
-  predicted element needs a `predict_focus_name(direction) -> Option<String>` wrapper (today
-  the focus bridge pointer-compares against a caller-supplied expected name).
-- **`remove_input_binding`.** The shim wraps `InputBindings.Add` but not remove, so installed
-  `KeyBinding`s are append-only per scene. A remove wrapper enables true diff-sync teardown.
 
 ---
 
