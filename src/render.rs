@@ -159,6 +159,125 @@ fn create_intermediate(device: &wgpu::Device, size: UVec2) -> Intermediate {
     }
 }
 
+/// Build a live `Noesis::Style` from a [`StyleSpec`](crate::styles::StyleSpec):
+/// its `BasedOn` base (recursively), unconditional setters, and property / data /
+/// multi triggers. `name` / `uri` are for diagnostics only. Returns `None` (and
+/// warns) when the target type can't be resolved; an unresolvable base style
+/// warns and is skipped, but the style is still built. The returned style is
+/// unsealed — seal it by applying it to an element.
+fn build_noesis_style(
+    spec: &crate::styles::StyleSpec,
+    name: &str,
+    uri: &str,
+) -> Option<noesis_runtime::styles::Style> {
+    use noesis_runtime::binding::Binding;
+    use noesis_runtime::styles::{DataTrigger, MultiTrigger, Style, Trigger};
+
+    let mut style = Style::new();
+    if !style.set_target_type(&spec.target_type) {
+        warn!(
+            "NoesisStyles: unknown TargetType {:?} for {name:?} in scene {uri:?}",
+            spec.target_type,
+        );
+        return None;
+    }
+
+    // BasedOn: build the base chain first and link it. Noesis takes its own
+    // reference, so `base` may drop at the end of this scope.
+    if let Some(base_spec) = &spec.based_on {
+        if let Some(base) = build_noesis_style(base_spec, name, uri) {
+            style.set_based_on(&base);
+        } else {
+            warn!(
+                "NoesisStyles: BasedOn style (TargetType {:?}) skipped for {name:?} in scene {uri:?}",
+                base_spec.target_type,
+            );
+        }
+    }
+
+    for (property, value) in &spec.setters {
+        if !style.add_setter(property, &value.to_boxed()) {
+            warn!(
+                "NoesisStyles: setter {property:?} unresolved on {:?} ({name:?})",
+                spec.target_type,
+            );
+        }
+    }
+
+    for trig in &spec.triggers {
+        let mut trigger = Trigger::new();
+        if !trigger.set_property(&spec.target_type, &trig.property) {
+            warn!(
+                "NoesisStyles: trigger property {:?} unresolved on {:?} ({name:?})",
+                trig.property, spec.target_type,
+            );
+            continue;
+        }
+        if !trigger.set_value(&trig.value.to_boxed()) {
+            warn!(
+                "NoesisStyles: trigger value for {:?} rejected ({name:?})",
+                trig.property
+            );
+        }
+        for (property, value) in &trig.setters {
+            if !trigger.add_setter(&spec.target_type, property, &value.to_boxed()) {
+                warn!(
+                    "NoesisStyles: trigger setter {property:?} unresolved on {:?} ({name:?})",
+                    spec.target_type,
+                );
+            }
+        }
+        let _ = style.add_trigger(&trigger);
+    }
+
+    for dt in &spec.data_triggers {
+        let mut trigger = DataTrigger::new();
+        let mut binding = Binding::new(&dt.binding_path);
+        if dt.relative_source_self {
+            binding = binding.relative_source_self();
+        }
+        let _ = trigger.set_binding(&binding);
+        if !trigger.set_value(&dt.value.to_boxed()) {
+            warn!(
+                "NoesisStyles: data-trigger value for {:?} rejected ({name:?})",
+                dt.binding_path
+            );
+        }
+        for (property, value) in &dt.setters {
+            if !trigger.add_setter(&spec.target_type, property, &value.to_boxed()) {
+                warn!(
+                    "NoesisStyles: data-trigger setter {property:?} unresolved on {:?} ({name:?})",
+                    spec.target_type,
+                );
+            }
+        }
+        let _ = style.add_trigger(&trigger);
+    }
+
+    for mt in &spec.multi_triggers {
+        let mut trigger = MultiTrigger::new();
+        for (property, value) in &mt.conditions {
+            if !trigger.add_condition(&spec.target_type, property, &value.to_boxed()) {
+                warn!(
+                    "NoesisStyles: multi-trigger condition {property:?} unresolved on {:?} ({name:?})",
+                    spec.target_type,
+                );
+            }
+        }
+        for (property, value) in &mt.setters {
+            if !trigger.add_setter(&spec.target_type, property, &value.to_boxed()) {
+                warn!(
+                    "NoesisStyles: multi-trigger setter {property:?} unresolved on {:?} ({name:?})",
+                    spec.target_type,
+                );
+            }
+        }
+        let _ = style.add_trigger(&trigger);
+    }
+
+    Some(style)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public configuration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2605,8 +2724,6 @@ impl NoesisRenderState {
         entity: Entity,
         desired: &HashMap<String, crate::styles::StyleSpec>,
     ) {
-        use noesis_runtime::styles::{Style, Trigger};
-
         if desired.is_empty() {
             return;
         }
@@ -2623,49 +2740,9 @@ impl NoesisRenderState {
                 warn!("NoesisStyles: x:Name {name:?} not found in scene {uri:?}");
                 continue;
             };
-
-            let mut style = Style::new();
-            if !style.set_target_type(&spec.target_type) {
-                warn!(
-                    "NoesisStyles: unknown TargetType {:?} for {name:?} in scene {uri:?}",
-                    spec.target_type,
-                );
+            let Some(style) = build_noesis_style(spec, name, &uri) else {
                 continue;
-            }
-            for (property, value) in &spec.setters {
-                if !style.add_setter(property, &value.to_boxed()) {
-                    warn!(
-                        "NoesisStyles: setter {property:?} unresolved on {:?} ({name:?})",
-                        spec.target_type,
-                    );
-                }
-            }
-            for trig in &spec.triggers {
-                let mut trigger = Trigger::new();
-                if !trigger.set_property(&spec.target_type, &trig.property) {
-                    warn!(
-                        "NoesisStyles: trigger property {:?} unresolved on {:?} ({name:?})",
-                        trig.property, spec.target_type,
-                    );
-                    continue;
-                }
-                if !trigger.set_value(&trig.value.to_boxed()) {
-                    warn!(
-                        "NoesisStyles: trigger value for {:?} rejected ({name:?})",
-                        trig.property
-                    );
-                }
-                for (property, value) in &trig.setters {
-                    if !trigger.add_setter(&spec.target_type, property, &value.to_boxed()) {
-                        warn!(
-                            "NoesisStyles: trigger setter {property:?} unresolved on {:?} ({name:?})",
-                            spec.target_type,
-                        );
-                    }
-                }
-                let _ = style.add_trigger(&trigger);
-            }
-
+            };
             if !element.set_style(&style) {
                 warn!("NoesisStyles: {name:?} is not a FrameworkElement in scene {uri:?}");
             }
