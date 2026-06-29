@@ -444,21 +444,23 @@ struct SceneInstance {
         HashMap<(String, crate::typography::TypographyField), crate::typography::TypographyValue>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
-    /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
+    /// Diff-reconciled: a spec dropped from the component detaches its binding
+    /// via `KeyBinding::remove_from`. Remaining entries drop with the scene.
     input_bindings: HashMap<(String, i32, i32), InstalledKeyBinding>,
-    /// Last `(candidate, matches_expected)` per [`crate::focus_input::FocusPredict`]
-    /// ident, to dedupe [`crate::focus_input::NoesisFocusPredicted`] emissions.
-    /// Resets on scene rebuild.
-    predict_snapshots: HashMap<(String, i32, Option<String>), (bool, bool)>,
+    /// Last `(candidate, predicted_name, matches_expected)` per
+    /// [`crate::focus_input::FocusPredict`] ident, to dedupe
+    /// [`crate::focus_input::NoesisFocusPredicted`] emissions. Resets on scene
+    /// rebuild.
+    predict_snapshots: HashMap<(String, i32, Option<String>), (bool, Option<String>, bool)>,
 }
 
 /// One installed `KeyBinding`. Holds the `Command` *and* the `KeyBinding` at +1
 /// so neither is released while the binding lives in the element's
-/// `InputBindings`. Dropping it (scene teardown) releases our references; the
-/// binding is NOT detached from the element — Noesis exposes no remove (see the
-/// `focus_input` NOTES). Kept keyed so we never double-install the same chord.
-#[allow(dead_code)] // held only to keep the +1 references alive.
+/// `InputBindings`. On reconcile a dropped spec calls `binding.remove_from` to
+/// detach it; scene teardown drops both, releasing our references. `command` is
+/// held only to keep its +1 alive for the binding's lifetime.
 struct InstalledKeyBinding {
+    #[allow(dead_code)] // held only to keep the command's +1 alive.
     command: Command,
     binding: KeyBinding,
 }
@@ -1773,8 +1775,9 @@ impl NoesisRenderState {
     /// command callback pushes `(entity, name, key, modifiers)` onto `queue`, so
     /// the emitted `NoesisFocusBindingFired` carries the originating view.
     /// Bindings already installed are left alone; bindings dropped from `specs`
-    /// release their `+1` references (but stay attached to the element — no
-    /// Noesis remove API). Mirrors `sync_click_subscriptions_for`.
+    /// are detached from their element via `KeyBinding::remove_from` and then
+    /// forgotten (releasing our `+1` references). Mirrors
+    /// `sync_click_subscriptions_for`.
     pub(crate) fn sync_key_bindings_for(
         &mut self,
         entity: Entity,
@@ -1785,20 +1788,35 @@ impl NoesisRenderState {
             return;
         };
 
-        // Forget bindings no longer requested (releases our +1s in place).
-        scene
+        // Idents installed but no longer requested — detach + forget these.
+        let dropped: Vec<(String, i32, i32)> = scene
             .input_bindings
-            .retain(|k, _| specs.iter().any(|s| &s.ident() == k));
-
+            .keys()
+            .filter(|k| !specs.iter().any(|s| &s.ident() == *k))
+            .cloned()
+            .collect();
         let needs_new = specs
             .iter()
             .any(|s| !scene.input_bindings.contains_key(&s.ident()));
-        if !needs_new {
+        if dropped.is_empty() && !needs_new {
             return;
         }
         let Some(content) = scene.view.content() else {
             return;
         };
+
+        // Detach dropped bindings from their element, then drop our refs. The
+        // element name is the ident's first field; `remove_from` is a no-op if
+        // the element vanished. Detaching before drop ensures the chord stops
+        // firing immediately, not just when the scene tears down.
+        for ident in dropped {
+            if let Some(installed) = scene.input_bindings.remove(&ident)
+                && let Some(element) = content.find_name(&ident.0)
+            {
+                installed.binding.remove_from(&element);
+            }
+        }
+
         for spec in specs {
             let ident = spec.ident();
             if scene.input_bindings.contains_key(&ident) {
@@ -1843,11 +1861,12 @@ impl NoesisRenderState {
     }
 
     /// Poll view `entity`'s focus predictions. For each `FocusPredict` returns
-    /// `(from, direction, candidate, matches_expected)` when the answer changed
-    /// since last frame (deduped against the per-scene snapshot). First poll
-    /// after a watch is added always reports. `matches_expected` is a safe
-    /// raw-pointer identity compare of `PredictFocus`'s borrowed result against
-    /// the `expect` element's pointer (no deref). Mirrors `poll_dp_reads_for`.
+    /// `(from, direction, candidate, predicted_name, matches_expected)` when the
+    /// answer changed since last frame (deduped against the per-scene snapshot).
+    /// First poll after a watch is added always reports. `predicted_name` is the
+    /// predicted element's actual `x:Name` (via
+    /// `FrameworkElement::predict_focus_name`); `matches_expected` is `true` when
+    /// that name equals the watch's `expect`. Mirrors `poll_dp_reads_for`.
     pub(crate) fn poll_focus_predictions_for(
         &mut self,
         entity: Entity,
@@ -1856,6 +1875,7 @@ impl NoesisRenderState {
         String,
         crate::focus_input::FocusNavigationDirection,
         bool,
+        Option<String>,
         bool,
     )> {
         let mut changed = Vec::new();
@@ -1875,22 +1895,25 @@ impl NoesisRenderState {
             let Some(from) = content.find_name(&p.from) else {
                 continue;
             };
-            let predicted = from.predict_focus(p.direction);
-            let candidate = predicted.is_some();
-            let matches_expected = match (&p.expect, predicted) {
-                (Some(expect), Some(ptr)) => content
-                    .find_name(expect)
-                    .is_some_and(|target| target.raw() == ptr.as_ptr()),
-                _ => false,
+            let candidate = from.predict_focus(p.direction).is_some();
+            let predicted_name = from.predict_focus_name(p.direction);
+            let matches_expected = match &p.expect {
+                Some(expect) => predicted_name.as_deref() == Some(expect.as_str()),
+                None => false,
             };
             let ident = p.ident();
-            if scene.predict_snapshots.get(&ident) == Some(&(candidate, matches_expected)) {
+            let snapshot = (candidate, predicted_name.clone(), matches_expected);
+            if scene.predict_snapshots.get(&ident) == Some(&snapshot) {
                 continue;
             }
-            scene
-                .predict_snapshots
-                .insert(ident, (candidate, matches_expected));
-            changed.push((p.from.clone(), p.direction, candidate, matches_expected));
+            scene.predict_snapshots.insert(ident, snapshot);
+            changed.push((
+                p.from.clone(),
+                p.direction,
+                candidate,
+                predicted_name,
+                matches_expected,
+            ));
         }
         changed
     }

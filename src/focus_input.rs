@@ -19,8 +19,9 @@
 //!    installs once the scene exists and persists across frames.
 //!  * **focus prediction** — [`FocusPredict`]: poll `UIElement::PredictFocus`
 //!    every frame (read-watch) and emit [`NoesisFocusPredicted`] when the
-//!    answer changes: whether a candidate exists in that direction and, if an
-//!    `expect` name was given, whether the predicted element *is* that one.
+//!    answer changes: whether a candidate exists in that direction, the
+//!    predicted element's actual `x:Name`, and — if an `expect` name was given —
+//!    whether the predicted element *is* that one.
 //!
 //! Attach a [`NoesisFocusControl`] to the view's camera entity. It is purely
 //! additive — the existing [`NoesisFocus`](crate::focus::NoesisFocus) bridge is
@@ -96,11 +97,11 @@ impl KeyBindingSpec {
 }
 
 /// One focus-prediction watch: poll `UIElement::PredictFocus` from `from` in
-/// `direction`. If `expect` is set, the emitted message reports whether the
-/// predicted element *is* the one named `expect` (a safe raw-pointer identity
-/// compare against `expect`'s element). `PredictFocus` only answers the spatial
-/// directions — `Next` / `Previous` / `First` / `Last` always report no
-/// candidate.
+/// `direction`. The emitted message always carries the predicted element's
+/// actual `x:Name` (via `FrameworkElement::predict_focus_name`). If `expect` is
+/// set, the message additionally reports whether that name equals `expect`.
+/// `PredictFocus` only answers the spatial directions — `Next` / `Previous` /
+/// `First` / `Last` always report no candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusPredict {
     pub from: String,
@@ -251,8 +252,13 @@ pub struct NoesisFocusPredicted {
     pub direction: FocusNavigationDirection,
     /// Whether `PredictFocus` found any candidate in that direction.
     pub candidate: bool,
-    /// Whether the predicted element is the watch's `expect` target. Always
-    /// `false` when the watch had no `expect`, or when there is no candidate.
+    /// The predicted element's actual `x:Name`, as reported by
+    /// `FrameworkElement::predict_focus_name`. `None` when there is no candidate
+    /// or the predicted element is unnamed / not a `FrameworkElement`.
+    pub predicted_name: Option<String>,
+    /// Whether the predicted element's name equals the watch's `expect` target.
+    /// Always `false` when the watch had no `expect`, or when there is no
+    /// candidate / the predicted element is unnamed.
     pub matches_expected: bool,
 }
 
@@ -337,7 +343,7 @@ pub(crate) fn poll_focus_predictions(
         return;
     };
     for (entity, ctl) in &views {
-        for (from, direction, candidate, matches_expected) in
+        for (from, direction, candidate, predicted_name, matches_expected) in
             state.poll_focus_predictions_for(entity, &ctl.predicts)
         {
             messages.write(NoesisFocusPredicted {
@@ -345,6 +351,7 @@ pub(crate) fn poll_focus_predictions(
                 from,
                 direction,
                 candidate,
+                predicted_name,
                 matches_expected,
             });
         }
