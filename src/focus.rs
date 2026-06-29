@@ -42,6 +42,19 @@ impl NoesisFocus {
         self.target = Some(name.into());
         self
     }
+
+    /// Focus element `name` from a system holding `&mut NoesisFocus`. The
+    /// runtime counterpart of [`focus`](Self::focus): the next reconcile
+    /// applies it to the live element.
+    pub fn focus_on(&mut self, name: impl Into<String>) {
+        self.target = Some(name.into());
+    }
+
+    /// Clear the pending focus target from a system holding `&mut NoesisFocus`.
+    /// The next reconcile applies nothing (`None` is a no-op).
+    pub fn clear(&mut self) {
+        self.target = None;
+    }
 }
 
 /// Reconcile every view's [`NoesisFocus`]: apply the focus action when the
@@ -55,7 +68,7 @@ pub(crate) fn sync_focus_bridge(
         return;
     };
     for (entity, focus) in &views {
-        if focus.is_changed() {
+        if focus.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_focus_for(entity, focus.target.as_deref());
         }
     }

@@ -66,6 +66,23 @@ impl NoesisText {
         self.watch.extend(names.into_iter().map(Into::into));
         self
     }
+
+    /// Set element `name`'s `Text` from a system holding `&mut NoesisText`. The
+    /// runtime counterpart of [`with`](Self::with): the next reconcile applies
+    /// it to the live element.
+    pub fn write(&mut self, name: impl Into<String>, text: impl Into<String>) {
+        self.set.insert(name.into(), text.into());
+    }
+
+    /// Observe element `name`'s `Text` from a system holding `&mut NoesisText`.
+    /// No-op if it is already watched. The runtime counterpart of
+    /// [`watching`](Self::watching).
+    pub fn watch(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if !self.watch.contains(&name) {
+            self.watch.push(name);
+        }
+    }
 }
 
 /// Emitted when a watched element's `Text` differs from the previous frame.
@@ -91,7 +108,7 @@ pub(crate) fn sync_text_bridge(
         return;
     };
     for (entity, text) in &views {
-        if text.is_changed() {
+        if text.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_text_writes_for(entity, &text.set);
         }
         for (name, value) in state.poll_text_reads_for(entity, &text.watch) {

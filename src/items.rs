@@ -349,6 +349,56 @@ impl NoesisItems {
         );
         self
     }
+
+    /// Set element `name`'s items from a system holding `&mut NoesisItems`, from
+    /// any homogeneous typed iterator. The runtime counterpart of
+    /// [`with`](Self::with): the next reconcile pushes them to the live control.
+    pub fn set(
+        &mut self,
+        name: impl Into<String>,
+        items: impl IntoIterator<Item = impl Into<ItemValue>>,
+    ) {
+        self.sources
+            .insert(name.into(), items.into_iter().map(Into::into).collect());
+    }
+
+    /// Set element `name`'s items from an explicit (possibly mixed) [`ItemValue`]
+    /// list. The runtime counterpart of [`with_items`](Self::with_items).
+    pub fn set_items(&mut self, name: impl Into<String>, items: Vec<ItemValue>) {
+        self.sources.insert(name.into(), items);
+    }
+
+    /// Drive element `name`'s `SelectedIndex` to `index` (`-1` clears) from a
+    /// system holding `&mut NoesisItems`. The runtime counterpart of
+    /// [`select`](Self::select).
+    pub fn set_selection(&mut self, name: impl Into<String>, index: i32) {
+        self.select.insert(name.into(), index);
+    }
+
+    /// Drive element `name`'s default `ICollectionView` current item with a
+    /// [`CollectionViewOp`] from a system holding `&mut NoesisItems`. The runtime
+    /// counterpart of [`navigate`](Self::navigate).
+    pub fn set_navigation(&mut self, name: impl Into<String>, op: CollectionViewOp) {
+        self.navigate.insert(name.into(), op);
+    }
+
+    /// Set element `name`'s items to bindable objects registered as the Noesis
+    /// class `class_name`. The runtime counterpart of
+    /// [`with_objects`](Self::with_objects); see it for the row schema.
+    pub fn set_objects(
+        &mut self,
+        name: impl Into<String>,
+        class_name: impl Into<String>,
+        rows: Vec<ObjectRow>,
+    ) {
+        self.objects.insert(
+            name.into(),
+            ObjectSource {
+                class_name: class_name.into(),
+                rows,
+            },
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

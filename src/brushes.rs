@@ -153,6 +153,32 @@ impl NoesisBrushes {
         );
         self
     }
+
+    /// Paint element `name`'s `target` with a flat `rgba` (`[r, g, b, a]`, each
+    /// `0..=1`) solid color from a system holding `&mut NoesisBrushes`. The
+    /// runtime counterpart of [`solid`](Self::solid): the next reconcile applies
+    /// it to the live element.
+    pub fn paint_solid(&mut self, name: impl Into<String>, target: BrushTarget, rgba: [f32; 4]) {
+        self.brushes
+            .insert((name.into(), target), BrushSpec::Solid(rgba));
+    }
+
+    /// Paint element `name`'s `target` with a linear gradient from `start` to
+    /// `end` through `stops`, from a system holding `&mut NoesisBrushes`. The
+    /// runtime counterpart of [`linear_gradient`](Self::linear_gradient).
+    pub fn paint_linear_gradient(
+        &mut self,
+        name: impl Into<String>,
+        target: BrushTarget,
+        start: [f32; 2],
+        end: [f32; 2],
+        stops: Vec<GradientStop>,
+    ) {
+        self.brushes.insert(
+            (name.into(), target),
+            BrushSpec::LinearGradient { start, end, stops },
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -212,7 +238,7 @@ pub(crate) fn sync_brushes_bridge(
         return;
     };
     for (entity, brushes) in &views {
-        if brushes.is_changed() {
+        if brushes.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_brushes_for(entity, &brushes.brushes);
         }
         for (name, target, readback) in state.poll_brush_reads_for(entity, &brushes.brushes) {

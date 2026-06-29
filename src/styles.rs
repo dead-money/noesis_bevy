@@ -291,6 +291,13 @@ impl NoesisStyles {
         self.styles.insert(name.into(), spec);
         self
     }
+
+    /// Style element `name` with `spec` from a system holding `&mut NoesisStyles`.
+    /// The runtime counterpart of [`apply`](Self::apply): the next reconcile builds
+    /// and assigns it to the live element.
+    pub fn restyle(&mut self, name: impl Into<String>, spec: StyleSpec) {
+        self.styles.insert(name.into(), spec);
+    }
 }
 
 /// Reconcile every view's [`NoesisStyles`]: build and apply the desired styles
@@ -305,7 +312,7 @@ pub(crate) fn sync_styles_bridge(
         return;
     };
     for (entity, styles) in &views {
-        if styles.is_changed() {
+        if styles.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_styles_for(entity, &styles.styles);
         }
     }

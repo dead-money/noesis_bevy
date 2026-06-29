@@ -236,6 +236,54 @@ impl NoesisDp {
         self
     }
 
+    /// Queue an `f32` write from a system holding `&mut NoesisDp`. The runtime
+    /// counterpart of [`set_f32`](Self::set_f32): the next reconcile applies it
+    /// to the live element.
+    pub fn write_f32(&mut self, name: impl Into<String>, property: impl Into<String>, value: f32) {
+        self.write(name, property, DpValue::F32(value));
+    }
+
+    /// Queue an `f64` (`Double`) write from a system holding `&mut NoesisDp`.
+    /// The runtime counterpart of [`set_f64`](Self::set_f64).
+    pub fn write_f64(&mut self, name: impl Into<String>, property: impl Into<String>, value: f64) {
+        self.write(name, property, DpValue::F64(value));
+    }
+
+    /// Queue an `i32` write from a system holding `&mut NoesisDp`. The runtime
+    /// counterpart of [`set_i32`](Self::set_i32).
+    pub fn write_i32(&mut self, name: impl Into<String>, property: impl Into<String>, value: i32) {
+        self.write(name, property, DpValue::I32(value));
+    }
+
+    /// Queue a `bool` write from a system holding `&mut NoesisDp` (plain
+    /// `Boolean` DPs; not `CheckBox.IsChecked`). The runtime counterpart of
+    /// [`set_bool`](Self::set_bool).
+    pub fn write_bool(
+        &mut self,
+        name: impl Into<String>,
+        property: impl Into<String>,
+        value: bool,
+    ) {
+        self.write(name, property, DpValue::Bool(value));
+    }
+
+    /// Queue a `String` write from a system holding `&mut NoesisDp`. The runtime
+    /// counterpart of [`set_string`](Self::set_string).
+    pub fn write_string(
+        &mut self,
+        name: impl Into<String>,
+        property: impl Into<String>,
+        value: impl Into<String>,
+    ) {
+        self.write(name, property, DpValue::Str(value.into()));
+    }
+
+    /// Observe `name`'s `property`, read as `kind`, from a system holding
+    /// `&mut NoesisDp`. The runtime counterpart of [`watch`](Self::watch).
+    pub fn observe(&mut self, name: impl Into<String>, property: impl Into<String>, kind: DpKind) {
+        self.watch.push(DpWatch::new(name, property, kind));
+    }
+
     fn insert(
         mut self,
         name: impl Into<String>,
@@ -244,6 +292,10 @@ impl NoesisDp {
     ) -> Self {
         self.set.insert((name.into(), property.into()), value);
         self
+    }
+
+    fn write(&mut self, name: impl Into<String>, property: impl Into<String>, value: DpValue) {
+        self.set.insert((name.into(), property.into()), value);
     }
 }
 
@@ -281,7 +333,7 @@ pub(crate) fn sync_dp_bridge(
         return;
     };
     for (entity, dp) in &views {
-        if dp.is_changed() {
+        if dp.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_dp_for(entity, &dp.set);
         }
         for (name, property, value) in state.poll_dp_reads_for(entity, &dp.watch) {

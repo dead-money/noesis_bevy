@@ -67,6 +67,13 @@ impl NoesisSvg {
         self.sources.insert(name.into(), svg.into());
         self
     }
+
+    /// Set element `name`'s SVG source from a system holding `&mut NoesisSvg`. The
+    /// runtime counterpart of [`path`](Self::path): the next reconcile parses it
+    /// and sizes the live element.
+    pub fn set_path(&mut self, name: impl Into<String>, svg: impl Into<String>) {
+        self.sources.insert(name.into(), svg.into());
+    }
 }
 
 /// Emitted when a named element's SVG source is parsed and applied. Carries the
@@ -97,7 +104,7 @@ pub(crate) fn sync_svg_bridge(
         return;
     };
     for (entity, svg) in &views {
-        if !svg.is_changed() {
+        if !svg.is_changed() && !state.scene_rebuilt_this_frame(entity) {
             continue;
         }
         for (name, bounds) in state.apply_svg_for(entity, &svg.sources) {

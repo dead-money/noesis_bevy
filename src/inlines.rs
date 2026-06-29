@@ -505,6 +505,27 @@ impl NoesisInlines {
         self.watch.extend(names.into_iter().map(Into::into));
         self
     }
+
+    /// Set element `name`'s inline content from a system holding
+    /// `&mut NoesisInlines`. The runtime counterpart of [`set`](Self::set): the
+    /// next reconcile clears the `TextBlock` and repopulates it from the spec.
+    pub fn write(
+        &mut self,
+        name: impl Into<String>,
+        inlines: impl IntoIterator<Item = InlineSpec>,
+    ) {
+        self.set.insert(name.into(), inlines.into_iter().collect());
+    }
+
+    /// Observe element `name`'s inline structure from a system holding
+    /// `&mut NoesisInlines`. No-op if already watched. The runtime counterpart of
+    /// [`watching`](Self::watching).
+    pub fn watch(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if !self.watch.contains(&name) {
+            self.watch.push(name);
+        }
+    }
 }
 
 /// Emitted when a watched `TextBlock`'s inline structure differs from the
@@ -536,7 +557,7 @@ pub(crate) fn sync_inlines_bridge(
         return;
     };
     for (entity, inlines) in &views {
-        if inlines.is_changed() {
+        if inlines.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_inlines_for(entity, &inlines.set);
         }
         for (name, value) in state.poll_inlines_reads_for(entity, &inlines.watch) {
