@@ -51,6 +51,7 @@ use noesis_runtime::events::{
     subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
+use noesis_runtime::transforms::CompositeTransform;
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
@@ -411,6 +412,17 @@ struct SceneInstance {
     /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
     /// scene so it resets on rebuild.
     dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
+    /// `CompositeTransform` handles assigned as elements' `RenderTransform` by
+    /// [`crate::transforms::NoesisTransform`], keyed by `x:Name`. Each is held at
+    /// +1 so it stays alive while it is the element's live transform; it is the
+    /// *same* object Noesis stores (assignment `AddRef`'s our pointer, it does not
+    /// clone), so reading it back reflects the element's true transform. Drops
+    /// with the scene; reassigning a name replaces (and releases) the old one.
+    transform_handles: HashMap<String, CompositeTransform>,
+    /// Last [`TransformSpec`](crate::transforms::TransformSpec) snapshot per
+    /// `x:Name`, to dedupe [`crate::transforms::NoesisTransformChanged`]
+    /// emissions. Resets on scene rebuild.
+    transform_snapshots: HashMap<String, crate::transforms::TransformSpec>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
     /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
@@ -1005,6 +1017,8 @@ impl NoesisRenderState {
                 event_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
+                transform_handles: HashMap::new(),
+                transform_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
             },
@@ -1716,6 +1730,100 @@ impl NoesisRenderState {
             }
             scene.dp_snapshots.insert(key, current.clone());
             changed.push((watch.name.clone(), watch.property.clone(), current));
+        }
+        changed
+    }
+
+    /// Assign view `entity`'s desired `RenderTransform`s (`x:Name → spec`). Each
+    /// spec becomes a `CompositeTransform` held at +1 in
+    /// [`Self::transform_handles`] (the same object Noesis stores), so the poll
+    /// can read it back. Missing names / non-`UIElement` targets warn.
+    pub(crate) fn apply_transforms_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::transforms::TransformSpec>,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        // Drop handles for names no longer requested; releasing each handle's +1
+        // (Noesis still holds its own ref until the DP is overwritten / cleared).
+        scene
+            .transform_handles
+            .retain(|k, _| desired.contains_key(k));
+        if desired.is_empty() {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTransform: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let transform = CompositeTransform::new(spec.to_fields());
+            if element.set_render_transform(&transform) {
+                scene.transform_handles.insert(name.clone(), transform);
+            } else {
+                warn!(
+                    "NoesisTransform: {name:?} has no RenderTransform (not a UIElement?) \
+                     in scene {:?}",
+                    scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Poll view `entity`'s named elements' live `RenderTransform`s, returning
+    /// `(name, spec)` for each that changed since last frame (deduped against the
+    /// per-scene snapshot). A name only reports while the element's current
+    /// `RenderTransform` is the exact object we assigned (pointer identity), so
+    /// the read-back is element-sourced proof the assignment took — not an echo
+    /// of the component. First poll after assignment always reports.
+    pub(crate) fn poll_transforms_for(
+        &mut self,
+        entity: Entity,
+        names: &[&str],
+    ) -> Vec<(String, crate::transforms::TransformSpec)> {
+        use crate::transforms::TransformSpec;
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .transform_snapshots
+            .retain(|name, _| names.contains(&name.as_str()));
+        if names.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for &name in names {
+            let Some(handle) = scene.transform_handles.get(name) else {
+                continue;
+            };
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            // Read the element's live RenderTransform; only trust it when it is
+            // the very object we assigned (Noesis stores our pointer, no clone).
+            let Some(live) = element.render_transform() else {
+                continue;
+            };
+            if live.raw() != handle.raw() {
+                continue;
+            }
+            let current = TransformSpec::from_fields(handle.get());
+            if scene.transform_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene.transform_snapshots.insert(name.to_string(), current);
+            changed.push((name.to_string(), current));
         }
         changed
     }
