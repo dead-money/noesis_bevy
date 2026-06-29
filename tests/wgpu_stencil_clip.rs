@@ -1,16 +1,16 @@
-//! Phase 4.A regression test: two batches in one submit, each reading its
-//! own `ps_uniforms0` value. Before the uniform-ring refactor, per-batch
-//! `queue.write_buffer` calls all landed before the encoder ran, so every
-//! draw in the submit saw the *last* uniform value written. The ring +
-//! dynamic-offset bind groups fix that — each draw reads from its own slot.
+//! Render-device stencil-clip regression test.
 //!
-//! Layout: 256×256 target, pre-cleared to dark blue.
+//! Drives the onscreen path the way Noesis builds a clip: a stencil-only
+//! `MASK` batch (`color_enable=0`, `StencilMode::EqualIncr`) raises the
+//! stencil to 1 over the left half, then a full-screen `PATH_SOLID` batch
+//! (`StencilMode::EqualKeep`, `stencil_ref=1`) paints red only where the
+//! stencil equals 1. The right half must keep its pre-clear blue.
 //!
-//! - Left half (x ∈ [0, 128)): `EFFECT_RGBA` with `values[0] = red`
-//! - Right half (x ∈ [128, 256)): `EFFECT_RGBA` with `values[0] = green`
-//!
-//! If the ring works, we see red / green split. If it doesn't, both halves
-//! collapse to the last written color (green).
+//! Before stencil was wired into the pipelines (`depth_stencil: None`,
+//! no attachment), the `EqualKeep` test couldn't gate anything and the
+//! content spilled past its clip — the themed-`ScrollViewer` blank/spill
+//! bug from TODO §1. This test fails (red everywhere) without the stencil
+//! attachment + pipeline state.
 
 use std::ffi::c_void;
 
@@ -22,13 +22,13 @@ use noesis_runtime::render_device::types::{
 
 const TARGET_W: u32 = 256;
 const TARGET_H: u32 = 256;
-const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const BYTES_PER_ROW: u32 = TARGET_W * 4;
 
-const CLEAR: [u8; 4] = [0, 0, 64, 255];
+const CLEAR: [u8; 4] = [0, 0, 255, 255]; // blue
+const RED: [u8; 4] = [255, 0, 0, 255];
 
 #[test]
-fn two_batches_read_distinct_ps_uniforms_in_one_submit() {
+fn stencil_clip_gates_content_to_masked_region() {
     if let (Ok(name), Ok(key)) = (
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
@@ -53,7 +53,7 @@ async fn run_test() {
         .expect("no wgpu adapter available");
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("noesis_runtime uniform-ring test device"),
+            label: Some("noesis_runtime stencil test device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::default(),
@@ -64,7 +64,7 @@ async fn run_test() {
         .expect("no wgpu device available");
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("uniform-ring target"),
+        label: Some("stencil test target"),
         size: wgpu::Extent3d {
             width: TARGET_W,
             height: TARGET_H,
@@ -73,27 +73,29 @@ async fn run_test() {
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: TARGET_FORMAT,
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Pre-clear to blue so unclipped pixels are distinguishable from red fill.
     {
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut clear_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("clear"),
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pre-clear"),
         });
-        clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("clear"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
+                view: &target_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: f64::from(CLEAR[0]) / 255.0,
-                        g: f64::from(CLEAR[1]) / 255.0,
-                        b: f64::from(CLEAR[2]) / 255.0,
-                        a: f64::from(CLEAR[3]) / 255.0,
+                        r: 0.0,
+                        g: 0.0,
+                        b: 1.0,
+                        a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -102,51 +104,12 @@ async fn run_test() {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        queue.submit(Some(clear_encoder.finish()));
+        queue.submit(Some(enc.finish()));
     }
 
     let device_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
-
-    // Two full-height triangle pairs covering the left and right halves in
-    // clip space. Vertex format `Pos` — 8 bytes per vertex.
-    //
-    // Left quad: x ∈ [-1, 0], y ∈ [-1, 1]  →  two triangles, 6 verts
-    // Right quad: x ∈ [0, 1],  y ∈ [-1, 1]  →  two triangles, 6 verts
-    let mut vb = Vec::with_capacity(96);
-    for v in [
-        [-1.0f32, -1.0],
-        [0.0, -1.0],
-        [-1.0, 1.0],
-        [-1.0, 1.0],
-        [0.0, -1.0],
-        [0.0, 1.0],
-    ] {
-        vb.extend_from_slice(&v[0].to_le_bytes());
-        vb.extend_from_slice(&v[1].to_le_bytes());
-    }
-    for v in [
-        [0.0f32, -1.0],
-        [1.0, -1.0],
-        [0.0, 1.0],
-        [0.0, 1.0],
-        [1.0, -1.0],
-        [1.0, 1.0],
-    ] {
-        vb.extend_from_slice(&v[0].to_le_bytes());
-        vb.extend_from_slice(&v[1].to_le_bytes());
-    }
-    assert_eq!(vb.len(), 96);
-
-    let mut ib = Vec::with_capacity(24);
-    for i in 0u16..6 {
-        ib.extend_from_slice(&i.to_le_bytes());
-    }
-    for i in 0u16..6 {
-        ib.extend_from_slice(&i.to_le_bytes());
-    }
-    assert_eq!(ib.len(), 24);
 
     let identity_mat: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, //
@@ -154,8 +117,47 @@ async fn run_test() {
         0.0, 0.0, 1.0, 0.0, //
         0.0, 0.0, 0.0, 1.0,
     ];
-    let red: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
-    let green: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+    // Vertex buffer: mask (Pos, 6 verts × 8B = 48B) then content (PosColor,
+    // 6 verts × 12B = 72B). Mask covers the left half (clip x ∈ [-1, 0]);
+    // content covers the full screen (x ∈ [-1, 1]).
+    let mut vb: Vec<u8> = Vec::new();
+    let mask_quad = [
+        [-1.0f32, -1.0],
+        [0.0, -1.0],
+        [-1.0, 1.0],
+        [-1.0, 1.0],
+        [0.0, -1.0],
+        [0.0, 1.0],
+    ];
+    for v in mask_quad {
+        vb.extend_from_slice(&v[0].to_le_bytes());
+        vb.extend_from_slice(&v[1].to_le_bytes());
+    }
+    let content_offset = vb.len() as u32;
+    let content_quad = [
+        [-1.0f32, -1.0],
+        [1.0, -1.0],
+        [-1.0, 1.0],
+        [-1.0, 1.0],
+        [1.0, -1.0],
+        [1.0, 1.0],
+    ];
+    for v in content_quad {
+        vb.extend_from_slice(&v[0].to_le_bytes());
+        vb.extend_from_slice(&v[1].to_le_bytes());
+        vb.extend_from_slice(&RED); // u8x4 color
+    }
+
+    // Index buffer: 0..6 for the mask, 0..6 for the content (relative to each
+    // batch's vertex slice; base_vertex is 0 in draw_batch).
+    let mut ib: Vec<u8> = Vec::new();
+    for i in 0u16..6 {
+        ib.extend_from_slice(&i.to_le_bytes());
+    }
+    for i in 0u16..6 {
+        ib.extend_from_slice(&i.to_le_bytes());
+    }
 
     rd.begin_onscreen_render();
     rd.map_vertices(vb.len() as u32).copy_from_slice(&vb);
@@ -163,11 +165,11 @@ async fn run_test() {
     rd.map_indices(ib.len() as u32).copy_from_slice(&ib);
     rd.unmap_indices();
 
-    let left = make_rgba_batch(0, 0, &identity_mat, &red);
-    let right = make_rgba_batch(48, 6, &identity_mat, &green);
+    // 1) Stencil-only mask: raise stencil to 1 over the left half.
+    rd.draw_batch(&mask_batch(&identity_mat));
+    // 2) Content gated to stencil == 1.
+    rd.draw_batch(&content_batch(content_offset, 6, &identity_mat));
 
-    rd.draw_batch(&left);
-    rd.draw_batch(&right);
     rd.end_onscreen_render();
 
     // Readback.
@@ -178,10 +180,10 @@ async fn run_test() {
         mapped_at_creation: false,
     });
     {
-        let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("readback copy"),
         });
-        copy_encoder.copy_texture_to_buffer(
+        enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target,
                 mip_level: 0,
@@ -202,67 +204,86 @@ async fn run_test() {
                 depth_or_array_layers: 1,
             },
         );
-        queue.submit(Some(copy_encoder.finish()));
+        queue.submit(Some(enc.finish()));
     }
 
     let slice = readback.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        sender.send(result).expect("readback channel send failed");
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        sender.send(r).expect("readback send");
     });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    receiver
-        .recv()
-        .expect("readback channel recv failed")
-        .expect("readback map failed");
+    receiver.recv().expect("readback recv").expect("map");
 
     let data = slice.get_mapped_range();
     let pixel = |x: u32, y: u32| -> [u8; 4] {
-        let offset = (y * BYTES_PER_ROW + x * 4) as usize;
-        [
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]
+        let o = (y * BYTES_PER_ROW + x * 4) as usize;
+        [data[o], data[o + 1], data[o + 2], data[o + 3]]
     };
 
-    // Left half should be red; right half green. If the ring is broken, both
-    // halves would take the last-written color (green) and the left assert
-    // fails.
+    // Left half is inside the stencil mask → red. Right half is outside →
+    // pre-clear blue survives.
     assert_eq!(
         pixel(64, 128),
-        [255, 0, 0, 255],
-        "left half should read red uniforms"
+        RED,
+        "left half (inside stencil mask) should be red, got {:?}",
+        pixel(64, 128),
     );
     assert_eq!(
         pixel(192, 128),
-        [0, 255, 0, 255],
-        "right half should read green uniforms"
+        CLEAR,
+        "right half (outside stencil mask) must keep clear blue, got {:?}",
+        pixel(192, 128),
     );
-    // Sanity: pre-clear color survives nowhere inside the two quads.
+    assert_eq!(pixel(10, 10), RED, "top-left inside mask should be red");
     assert_eq!(
-        pixel(0, 0),
-        [255, 0, 0, 255],
-        "top-left pixel covered by red quad"
-    );
-    assert_eq!(
-        pixel(255, 255),
-        [0, 255, 0, 255],
-        "bottom-right pixel covered by green quad"
+        pixel(245, 245),
+        CLEAR,
+        "bottom-right outside mask should be clear"
     );
 }
 
-fn make_rgba_batch(
-    vertex_offset: u32,
-    start_index: u32,
-    vs_uniforms: &[f32; 16],
-    ps_uniforms: &[f32; 4],
-) -> Batch {
+/// Stencil-only mask draw: `color_enable=0`, `EqualIncr` from ref 0 → writes
+/// stencil = 1 over the rasterized region.
+fn mask_batch(vs_uniforms: &[f32; 16]) -> Batch {
     Batch {
-        shader: Shader::RGBA,
-        render_state: RenderState::new(true, BlendMode::Src, StencilMode::Disabled, false),
+        shader: Shader::MASK,
+        render_state: RenderState::new(false, BlendMode::Src, StencilMode::EqualIncr, false),
         stencil_ref: 0,
+        single_pass_stereo: false,
+        vertex_offset: 0,
+        num_vertices: 6,
+        start_index: 0,
+        num_indices: 6,
+        pattern: std::ptr::null_mut(),
+        ramps: std::ptr::null_mut(),
+        image: std::ptr::null_mut(),
+        glyphs: std::ptr::null_mut(),
+        shadow: std::ptr::null_mut(),
+        pattern_sampler: SamplerState::default(),
+        ramps_sampler: SamplerState::default(),
+        image_sampler: SamplerState::default(),
+        glyphs_sampler: SamplerState::default(),
+        shadow_sampler: SamplerState::default(),
+        vertex_uniforms: [
+            UniformData {
+                values: vs_uniforms.as_ptr().cast::<c_void>(),
+                num_dwords: 16,
+                hash: 1,
+            },
+            UniformData::default(),
+        ],
+        pixel_uniforms: [UniformData::default(), UniformData::default()],
+        pixel_shader: std::ptr::null_mut(),
+    }
+}
+
+/// Content draw gated to `stencil == 1` via `EqualKeep` + `stencil_ref=1`.
+fn content_batch(vertex_offset: u32, start_index: u32, vs_uniforms: &[f32; 16]) -> Batch {
+    Batch {
+        shader: Shader::PATH_SOLID,
+        render_state: RenderState::new(true, BlendMode::Src, StencilMode::EqualKeep, false),
+        stencil_ref: 1,
         single_pass_stereo: false,
         vertex_offset,
         num_vertices: 6,
@@ -286,14 +307,7 @@ fn make_rgba_batch(
             },
             UniformData::default(),
         ],
-        pixel_uniforms: [
-            UniformData {
-                values: ps_uniforms.as_ptr().cast::<c_void>(),
-                num_dwords: 4,
-                hash: 2,
-            },
-            UniformData::default(),
-        ],
+        pixel_uniforms: [UniformData::default(), UniformData::default()],
         pixel_shader: std::ptr::null_mut(),
     }
 }

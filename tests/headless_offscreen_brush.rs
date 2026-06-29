@@ -484,7 +484,7 @@ async fn run_scenario(xaml: &[u8], ticks: u32) -> (Vec<Op>, [u8; 4], [u8; 4]) {
 
     let mut wgpu_device =
         dm_noesis_bevy::render_device::WgpuRenderDevice::new(device.clone(), queue.clone());
-    wgpu_device.set_onscreen_target(target_view);
+    wgpu_device.set_onscreen_target(target_view, RT_SIZE, RT_SIZE);
 
     let (recording, ops) = RecordingDevice::new(wgpu_device);
     let registered_device = noesis_runtime::render_device::register(recording);
