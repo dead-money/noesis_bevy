@@ -19,6 +19,8 @@ This crate links against the [Noesis Native SDK](https://www.noesisengine.com/),
 
 This release targets **Noesis Native SDK 3.2.13** and is compiled against that version's headers, so a different SDK version may not link. Match it unless you've verified a newer one.
 
+This initial release is **Linux only**. Windows support is planned but not done.
+
 Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Without them the UI runs for a while, then blanks the view with a "Trial expired" message.
 
 ## Quick start
@@ -26,15 +28,20 @@ Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Withou
 ```toml
 [dependencies]
 bevy = "0.18"
-noesis_bevy = { git = "https://github.com/dead-money/noesis_bevy" }
+noesis_bevy = "0.10"
 ```
 
-It's a git dependency, not a crates.io release, and it still links the Noesis SDK at build time. You need `NOESIS_SDK_DIR` set (see above) for it to compile.
+It links the Noesis SDK at build time, so you need `NOESIS_SDK_DIR` set (see above) to compile.
 
 ```rust
 use std::sync::Arc;
 use bevy::prelude::*;
 use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
+
+const MENU_XAML: &str = r#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+  <TextBlock Text="Hello, Noesis!" Foreground="White"
+             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+</Grid>"#;
 
 fn main() {
     App::new()
@@ -45,9 +52,9 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
-    // Register XAML by URI, or load it through the asset server as a
-    // `XamlAsset`; the loader feeds the same bytes into the registry.
-    xaml.insert("MainMenu.xaml", Arc::new(include_bytes!("MainMenu.xaml").to_vec()));
+    // Register XAML by URI. For real projects, load .xaml files through the
+    // asset server instead; the loader feeds the same registry.
+    xaml.insert("menu.xaml", Arc::new(MENU_XAML.as_bytes().to_vec()));
 
     // A view is a `NoesisView` component on a 2D camera tagged `NoesisCamera`.
     // Noesis renders the scene offscreen and composites it onto that camera.
@@ -55,7 +62,7 @@ fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
         Camera2d,
         NoesisCamera,
         NoesisView {
-            xaml_uri: "MainMenu.xaml".to_string(),
+            xaml_uri: "menu.xaml".to_string(),
             size: UVec2::new(1920, 1080),
             ..default()
         },
