@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/dead-money/noesis_bevy/actions/workflows/ci.yml/badge.svg)](https://github.com/dead-money/noesis_bevy/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/noesis_bevy.svg)](https://crates.io/crates/noesis_bevy)
-[![docs.rs](https://docs.rs/noesis_bevy/badge.svg)](https://docs.rs/noesis_bevy)
+[![docs.rs](https://img.shields.io/docsrs/noesis_bevy)](https://docs.rs/noesis_bevy)
 
 A Bevy 0.18 plugin that renders [Noesis GUI](https://www.noesisengine.com/) XAML-driven UI into your frame. Noesis draws the scene on Bevy's own GPU; the plugin composites the result onto a camera.
 
