@@ -46,11 +46,13 @@ use bevy_render::{
     view::ViewTarget,
 };
 use noesis_runtime::events::{
-    ClickSubscription, KeyDownSubscription, subscribe_click, subscribe_keydown,
+    ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, subscribe_click,
+    subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
+use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::ItemsBinding;
@@ -318,6 +320,13 @@ pub(crate) struct NoesisRenderState {
     /// swallow list has changed and re-bind the C++-side handler with
     /// the new closure (which captures `swallow` by value).
     last_keydown_swallow: HashMap<(Entity, String), Vec<Key>>,
+    /// Last `(mark_handled, handled_too)` flags installed per subscribed
+    /// `(view, x:Name, event name)`. The routed-event callback captures these
+    /// by value, so a flag change can't be patched in place — we detect it
+    /// here and drop + re-create the subscription. Mirrors
+    /// [`Self::last_keydown_swallow`]. Keyed across views; pruned per view at
+    /// sync time.
+    last_event_config: HashMap<(Entity, String, &'static str), (bool, bool)>,
     /// Reusable offscreen view for baking label panels (lazily built). Lives
     /// here so it shares the single registered device and its renderer is torn
     /// down before the device drops — see [`Drop`].
@@ -374,6 +383,14 @@ struct SceneInstance {
     /// [`NoesisRenderState::sync_keydown_subscriptions`]. Same lifetime
     /// rules as `click_subs`.
     keydown_subs: HashMap<String, KeyDownSubscription>,
+    /// Active generic `RoutedEvent` subscriptions keyed by `(x:Name, event
+    /// name)` — one element may be watched for several events. Synced each
+    /// frame against [`crate::routed_events::NoesisEventWatch`] by
+    /// [`NoesisRenderState::sync_event_subscriptions_for`]. Drops with the
+    /// scene; same orphan-safety rules as `click_subs` / `keydown_subs`. The
+    /// `&'static str` half is `RoutedEvent::as_str()` (the enum is not `Hash`,
+    /// its stable name is).
+    event_subs: HashMap<(String, &'static str), EventSubscription>,
     /// Last text snapshot per name in [`crate::text::NoesisTextReadWatch`].
     /// Used to dedupe `NoesisTextChanged` emissions — only push when the
     /// text actually differs from the previous frame's snapshot. Names
@@ -439,6 +456,7 @@ impl NoesisRenderState {
             loaded_app_resources_chain: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
+            last_event_config: HashMap::new(),
             bake_rig: None,
             view_models: HashMap::new(),
             items_sources: HashMap::new(),
@@ -882,6 +900,7 @@ impl NoesisRenderState {
                 applied_scale: config.scale,
                 click_subs: HashMap::new(),
                 keydown_subs: HashMap::new(),
+                event_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
             },
@@ -1064,6 +1083,98 @@ impl NoesisRenderState {
         // (leave other views' entries intact).
         self.last_keydown_swallow
             .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
+    }
+
+    /// Reconcile view `entity`'s generic `RoutedEvent` subscriptions against
+    /// `entries`. Mirrors [`Self::sync_keydown_subscriptions_for`] — adds /
+    /// drops subscriptions to match the desired watch list, and re-binds an
+    /// entry whose `(mark_handled, handled_too)` flags changed (the callback
+    /// captures them by value). Each callback snapshots the live args and pushes
+    /// `(entity, name, event, snapshot)` so the emitted [`NoesisRoutedEvent`]
+    /// carries the originating view.
+    pub(crate) fn sync_event_subscriptions_for(
+        &mut self,
+        entity: Entity,
+        entries: &[crate::routed_events::EventWatchEntry],
+        queue: &SharedRoutedEventQueue,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+
+        // Drop subscriptions that are no longer requested. `retain` runs each
+        // entry's drop in place, which fires the C++ unsubscribe.
+        scene.event_subs.retain(|(name, evname), _| {
+            entries
+                .iter()
+                .any(|e| e.name == *name && e.event.as_str() == *evname)
+        });
+
+        for entry in entries {
+            let evname = entry.event.as_str();
+            let key = (entry.name.clone(), evname);
+
+            // Leave an existing subscription alone iff its captured flags still
+            // match the requested ones (sibling map keyed by view + name + event).
+            if scene.event_subs.contains_key(&key)
+                && self
+                    .last_event_config
+                    .get(&(entity, entry.name.clone(), evname))
+                    .is_some_and(|prev| *prev == (entry.mark_handled, entry.handled_too))
+            {
+                continue;
+            }
+
+            // Pull the content tree per change. `find_name` is cheap but the FFI
+            // hop isn't free, so we only reach here on the frames the watch moved.
+            let Some(content) = scene.view.content() else {
+                return;
+            };
+            let Some(element) = content.find_name(&entry.name) else {
+                warn!(
+                    "NoesisEventWatch: x:Name {:?} not found in scene {:?}",
+                    entry.name, scene.built_for_uri,
+                );
+                continue;
+            };
+
+            let queue_handle = queue.clone();
+            let captured_name = entry.name.clone();
+            let captured_event = entry.event;
+            let mark_handled = entry.mark_handled;
+            let Some(sub) = subscribe_event(
+                &element,
+                entry.event,
+                entry.handled_too,
+                move |args: &EventArgs| {
+                    let snapshot = RoutedEventSnapshot::capture(args);
+                    queue_handle.push(entity, captured_name.clone(), captured_event, snapshot);
+                    mark_handled
+                },
+            ) else {
+                warn!(
+                    "NoesisEventWatch: element {:?} not a UIElement / event {:?} unknown; skipping",
+                    entry.name, evname,
+                );
+                continue;
+            };
+
+            // Replace any stale sub (flag change) — drop runs the C++ unsubscribe.
+            scene.event_subs.insert(key, sub);
+            self.last_event_config.insert(
+                (entity, entry.name.clone(), evname),
+                (entry.mark_handled, entry.handled_too),
+            );
+        }
+
+        // Prune this view's config snapshots whose (name, event) is no longer
+        // watched (leave other views' entries intact).
+        self.last_event_config.retain(|(ent, name, evname), _| {
+            *ent != entity
+                || entries
+                    .iter()
+                    .any(|e| &e.name == name && e.event.as_str() == *evname)
+        });
     }
 
     /// Write each `(x:Name → text)` desired by view `entity`'s [`NoesisText`]
