@@ -25,6 +25,7 @@ pub mod markup;
 pub mod plain_vm;
 pub mod render;
 pub mod render_device;
+pub mod routed_events;
 pub mod text;
 pub mod theme;
 pub mod viewmodel;
@@ -53,6 +54,10 @@ pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
+pub use routed_events::{
+    EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
+    RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
+};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use viewmodel::{
@@ -123,6 +128,7 @@ impl Plugin for NoesisPlugin {
             ),
             (
                 events::NoesisEventsPlugin,
+                routed_events::NoesisRoutedEventsPlugin,
                 classes::NoesisClassPlugin,
                 markup::NoesisMarkupExtensionPlugin,
                 visibility::NoesisVisibilityPlugin,
