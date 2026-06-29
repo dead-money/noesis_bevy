@@ -95,7 +95,7 @@ async fn run_test() {
 
     let mut render_device =
         dm_noesis_bevy::render_device::WgpuRenderDevice::new(device.clone(), queue.clone());
-    render_device.set_onscreen_target(target_view);
+    render_device.set_onscreen_target(target_view, RT_SIZE, RT_SIZE);
 
     // ── Register render device + XAML provider with Noesis ────────────────
     let registered_device = noesis_runtime::render_device::register(render_device);

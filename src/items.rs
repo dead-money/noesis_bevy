@@ -32,10 +32,23 @@
 //!
 //! [`select`](NoesisItems::select) drives a control's `SelectedIndex` (and its
 //! current item). Each frame the bridge emits a [`NoesisItemsCurrent`] message
-//! carrying the control's item `count`, its `selected_index`, and the
-//! *typed* `current` item read back out of Noesis (via an `ICollectionView`'s
-//! `CurrentItem` accessors) — proving the typed value made the round trip
-//! through the engine, not just the Rust copy.
+//! carrying the control's item `count`, its `selected_index`, the view's
+//! `current_position`, and the *typed* `current` item read back out of Noesis
+//! (via an `ICollectionView`'s `CurrentItem` accessors) — proving the typed
+//! value made the round trip through the engine, not just the Rust copy.
+//!
+//! # Collection-view navigation
+//!
+//! Every bound list also has a default `ICollectionView` over its source (the
+//! same shared view a `Selector` synchronizes against). [`navigate`](NoesisItems::navigate)
+//! drives that view's *current item* with a [`CollectionViewOp`]
+//! (`First`/`Last`/`Next`/`Previous`/`To(pos)`), mirroring
+//! `ICollectionView::MoveCurrentTo*`. The op is applied once each time the
+//! component changes; the resulting `current_position` / `current` item surface
+//! via [`NoesisItemsCurrent`]. Sorting, filtering and grouping are a genuine
+//! Noesis SDK limitation (no programmatic `SortDescription`/`Filter` is
+//! exposed), so they are intentionally absent — see
+//! [`noesis_runtime::collection_view`].
 //!
 //! # Lifetime & threading
 //!
@@ -143,6 +156,44 @@ fn current_item_value(item: &CurrentItem) -> Option<ItemValue> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Collection-view navigation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One `ICollectionView` current-item navigation op, mirroring
+/// `ICollectionView::MoveCurrentTo*`. Applied to a bound list's default view.
+///
+/// `First`/`Last`/`To` are absolute (idempotent); `Next`/`Previous` are relative
+/// and step from the current position each time they are applied. The bridge
+/// applies the op once per [`NoesisItems`] change (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionViewOp {
+    /// `MoveCurrentToFirst`.
+    First,
+    /// `MoveCurrentToLast`.
+    Last,
+    /// `MoveCurrentToNext` (lands *after the last* at the end).
+    Next,
+    /// `MoveCurrentToPrevious` (lands *before the first* at the start).
+    Previous,
+    /// `MoveCurrentToPosition(pos)` (`-1` = before first, `count` = after last).
+    To(i32),
+}
+
+impl CollectionViewOp {
+    /// Apply this op to `view`, returning the raw `bool` Noesis reports (its
+    /// boundary meaning is an SDK detail — query the resulting position instead).
+    fn apply(self, view: &CollectionView) -> bool {
+        match self {
+            Self::First => view.move_current_to_first(),
+            Self::Last => view.move_current_to_last(),
+            Self::Next => view.move_current_to_next(),
+            Self::Previous => view.move_current_to_previous(),
+            Self::To(pos) => view.move_current_to_position(pos),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -159,6 +210,10 @@ pub struct NoesisItems {
     /// when the component changes; the resulting selection surfaces via
     /// [`NoesisItemsCurrent`].
     pub select: HashMap<String, i32>,
+    /// Desired collection-view navigation op per `x:Name`. Applied to the
+    /// control's default `ICollectionView` once each time the component changes;
+    /// the resulting current item surfaces via [`NoesisItemsCurrent`].
+    pub navigate: HashMap<String, CollectionViewOp>,
 }
 
 impl NoesisItems {
@@ -195,6 +250,14 @@ impl NoesisItems {
         self.select.insert(name.into(), index);
         self
     }
+
+    /// Builder: drive element `name`'s default `ICollectionView` current item
+    /// with a [`CollectionViewOp`]. Applied once per component change.
+    #[must_use]
+    pub fn navigate(mut self, name: impl Into<String>, op: CollectionViewOp) -> Self {
+        self.navigate.insert(name.into(), op);
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,9 +288,16 @@ pub struct ItemsBinding {
     /// Last index actually pushed onto the control / view, so selection is
     /// driven once per change rather than every frame.
     applied_select: Option<i32>,
-    /// Last `(count, selected_index, current)` reported, to emit a message only
-    /// on change. Mirrors the DP bridge's snapshot.
-    last_readback: Option<(usize, i32, Option<ItemValue>)>,
+    /// Desired collection-view navigation op from [`NoesisItems::navigate`]
+    /// (`None` = leave the view's current item alone).
+    desired_nav: Option<CollectionViewOp>,
+    /// Set when [`Self::set_desired_nav`] records an op on a component change;
+    /// cleared once [`Self::drive_navigation`] applies it. Relative ops
+    /// (`Next`/`Previous`) re-fire on each change rather than only on op change.
+    nav_pending: bool,
+    /// Last `(count, selected_index, current_position, current)` reported, to
+    /// emit a message only on change. Mirrors the DP bridge's snapshot.
+    last_readback: Option<(usize, i32, i32, Option<ItemValue>)>,
 }
 
 impl Default for ItemsBinding {
@@ -251,6 +321,8 @@ impl ItemsBinding {
             bound_for_uri: None,
             desired_select: None,
             applied_select: None,
+            desired_nav: None,
+            nav_pending: false,
             last_readback: None,
         }
     }
@@ -313,6 +385,16 @@ impl ItemsBinding {
         }
     }
 
+    /// Set the desired collection-view navigation op (`None` = leave the current
+    /// item alone). Called once per component change, so relative ops re-arm on
+    /// each change even when the op value is unchanged.
+    pub(crate) fn set_desired_nav(&mut self, op: Option<CollectionViewOp>) {
+        self.desired_nav = op;
+        if op.is_some() {
+            self.nav_pending = true;
+        }
+    }
+
     pub(crate) fn needs_bind(&self, uri: &str) -> bool {
         self.bound_for_uri.as_deref() != Some(uri)
     }
@@ -359,21 +441,61 @@ impl ItemsBinding {
         }
     }
 
-    /// Read `(count, selected_index, current-typed-value)` for `element`,
-    /// returning it only when it differs from the last report. `count` is the
-    /// control's item count; `selected_index` its `SelectedIndex`; `current` the
-    /// view's current item unboxed to its [`ItemValue`].
+    /// Apply the pending collection-view navigation op (set via
+    /// [`Self::set_desired_nav`]) to the view's current item, once per change.
+    /// No-op when no op is pending or the view is unavailable.
+    pub(crate) fn drive_navigation(&mut self) {
+        if !self.nav_pending {
+            return;
+        }
+        let Some(op) = self.desired_nav else {
+            self.nav_pending = false;
+            return;
+        };
+        if let Some(view) = self.view() {
+            op.apply(view);
+            self.nav_pending = false;
+        }
+    }
+
+    /// Apply a collection-view navigation op directly and report whether the
+    /// view accepted the move. Imperative counterpart of the declarative
+    /// [`NoesisItems::navigate`] path; query [`Self::current_position`] /
+    /// [`Self::current_item_value`] for the resulting state.
+    pub fn navigate(&mut self, op: CollectionViewOp) -> bool {
+        self.view().is_some_and(|view| op.apply(view))
+    }
+
+    /// The view's current ordinal position (`-1` before first, `count` after
+    /// last), or `-1` when no view exists yet.
+    #[must_use]
+    pub fn current_position(&mut self) -> i32 {
+        self.view().map_or(-1, CollectionView::current_position)
+    }
+
+    /// The view's current item unboxed to its typed [`ItemValue`], or `None`
+    /// when the cursor is off the ends (or the item is not a boxed primitive).
+    #[must_use]
+    pub fn current_item_value(&mut self) -> Option<ItemValue> {
+        self.view()
+            .and_then(CollectionView::current_item)
+            .and_then(|item| current_item_value(&item))
+    }
+
+    /// Read `(count, selected_index, current_position, current-typed-value)` for
+    /// `element`, returning it only when it differs from the last report.
+    /// `count` is the control's item count; `selected_index` its `SelectedIndex`;
+    /// `current_position` the view's `CurrentPosition`; `current` the view's
+    /// current item unboxed to its [`ItemValue`].
     pub(crate) fn read_changed(
         &mut self,
         element: &FrameworkElement,
-    ) -> Option<(usize, i32, Option<ItemValue>)> {
+    ) -> Option<(usize, i32, i32, Option<ItemValue>)> {
         let count = element.items_count().unwrap_or(0);
         let selected_index = element.selected_index().unwrap_or(-1);
-        let current = self
-            .view()
-            .and_then(CollectionView::current_item)
-            .and_then(|item| current_item_value(&item));
-        let snap = (count, selected_index, current);
+        let current_position = self.current_position();
+        let current = self.current_item_value();
+        let snap = (count, selected_index, current_position, current);
         if self.last_readback.as_ref() == Some(&snap) {
             return None;
         }
@@ -398,6 +520,9 @@ pub struct NoesisItemsCurrent {
     pub count: usize,
     /// The control's `SelectedIndex` (`-1` when nothing is selected).
     pub selected_index: i32,
+    /// The default `ICollectionView`'s `CurrentPosition` (`-1` before first,
+    /// `count` after last).
+    pub current_position: i32,
     /// The view's current item unboxed to its typed value, or `None` when the
     /// cursor is off the ends (or the item is not a boxed primitive).
     pub current: Option<ItemValue>,
@@ -420,13 +545,20 @@ pub(crate) fn sync_items_bridge(
         return;
     };
     for (entity, items) in &views {
-        state.apply_items_for(entity, &items.sources, &items.select, items.is_changed());
-        for (name, count, selected_index, value) in state.poll_items_for(entity) {
+        state.apply_items_for(
+            entity,
+            &items.sources,
+            &items.select,
+            &items.navigate,
+            items.is_changed(),
+        );
+        for (name, count, selected_index, current_position, value) in state.poll_items_for(entity) {
             current.write(NoesisItemsCurrent {
                 view: entity,
                 name,
                 count,
                 selected_index,
+                current_position,
                 current: value,
             });
         }
@@ -453,7 +585,8 @@ mod tests {
             .with("Combo", ["a", "b"])
             .with("List", vec!["x".to_string()])
             .with("Ports", [80, 443])
-            .select("Combo", 1);
+            .select("Combo", 1)
+            .navigate("Combo", CollectionViewOp::Next);
         assert_eq!(
             i.sources["Combo"],
             vec![ItemValue::Str("a".into()), ItemValue::Str("b".into())],
@@ -464,6 +597,7 @@ mod tests {
             vec![ItemValue::I32(80), ItemValue::I32(443)],
         );
         assert_eq!(i.select["Combo"], 1);
+        assert_eq!(i.navigate["Combo"], CollectionViewOp::Next);
     }
 
     #[test]

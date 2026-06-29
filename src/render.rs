@@ -52,7 +52,7 @@ use noesis_runtime::events::{
     subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
-use noesis_runtime::transforms::CompositeTransform;
+use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D};
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::binding::{BindingEntry, BuiltBinding};
@@ -60,7 +60,7 @@ use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
-use crate::items::{ItemValue, ItemsBinding};
+use crate::items::{CollectionViewOp, ItemValue, ItemsBinding};
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
@@ -441,6 +441,16 @@ struct SceneInstance {
     /// `x:Name`, to dedupe [`crate::transforms::NoesisTransformChanged`]
     /// emissions. Resets on scene rebuild.
     transform_snapshots: HashMap<String, crate::transforms::TransformSpec>,
+    /// `CompositeTransform3D` handles assigned as elements' `Transform3D` by
+    /// [`crate::transforms3d::NoesisTransform3D`], keyed by `x:Name`. Held at +1
+    /// (the same object Noesis stores) so the poll can read it back; same
+    /// lifetime/identity rules as [`Self::transform_handles`].
+    transform3d_handles: HashMap<String, CompositeTransform3D>,
+    /// Last [`Transform3DSpec`](crate::transforms3d::Transform3DSpec) snapshot
+    /// per `x:Name`, to dedupe
+    /// [`crate::transforms3d::NoesisTransform3DChanged`] emissions. Resets on
+    /// scene rebuild.
+    transform3d_snapshots: HashMap<String, crate::transforms3d::Transform3DSpec>,
     /// Last brush read back per `(x:Name, property)` painted by
     /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
     /// emissions; resets on scene rebuild.
@@ -465,6 +475,14 @@ struct SceneInstance {
     /// [`crate::imaging::NoesisImaging`]. Dedupes
     /// [`crate::imaging::NoesisImageChanged`] emissions; resets on scene rebuild.
     image_snapshots: HashMap<String, crate::imaging::ImageReadback>,
+    /// Live inline handle trees built by [`crate::inlines::NoesisInlines`], keyed
+    /// by `x:Name`. Held so the read-back can re-read live `Run` text / `Hyperlink`
+    /// URIs; the `TextBlock`'s collection also owns these (`AddRef`'d on add), so
+    /// they stay valid while it keeps them. Drops with the scene.
+    inline_handles: HashMap<String, Vec<crate::inlines::BuiltInline>>,
+    /// Last inline read-back per `x:Name` watched by `NoesisInlines`. Dedupes
+    /// [`crate::inlines::NoesisInlinesChanged`] emissions; resets on scene rebuild.
+    inlines_snapshots: HashMap<String, crate::inlines::InlinesReadback>,
 }
 
 /// One installed `KeyBinding`. Holds the `Command` *and* the `KeyBinding` at +1
@@ -711,12 +729,14 @@ impl NoesisRenderState {
     /// desired selection (creating a collection per `(entity, name)` on first
     /// use, pruning names no longer present). Every frame, bind any unbound
     /// collection to its element's `ItemsSource` — handles first resolution and
-    /// re-binding after a rebuild — then drive any pending selection.
+    /// re-binding after a rebuild — then drive any pending selection and
+    /// collection-view navigation.
     pub(crate) fn apply_items_for(
         &mut self,
         entity: Entity,
         sources: &HashMap<String, Vec<ItemValue>>,
         select: &HashMap<String, i32>,
+        navigate: &HashMap<String, CollectionViewOp>,
         changed: bool,
     ) {
         if changed {
@@ -730,6 +750,7 @@ impl NoesisRenderState {
                     .or_default();
                 binding.set_typed(items);
                 binding.set_desired_select(select.get(name).copied());
+                binding.set_desired_nav(navigate.get(name).copied());
             }
         }
 
@@ -762,17 +783,20 @@ impl NoesisRenderState {
                 }
             }
             binding.drive_selection(&mut element);
+            // Navigation runs last so it wins when both select and navigate are
+            // set for the same control (both move the shared current item).
+            binding.drive_navigation();
         }
     }
 
     /// Poll each of view `entity`'s bound list controls, returning
-    /// `(x:Name, count, selected_index, current-typed-value)` for every control
-    /// whose snapshot changed since the last poll. Drives the
+    /// `(x:Name, count, selected_index, current_position, current-typed-value)`
+    /// for every control whose snapshot changed since the last poll. Drives the
     /// [`NoesisItemsCurrent`](crate::items::NoesisItemsCurrent) read-back.
     pub(crate) fn poll_items_for(
         &mut self,
         entity: Entity,
-    ) -> Vec<(String, usize, i32, Option<ItemValue>)> {
+    ) -> Vec<(String, usize, i32, i32, Option<ItemValue>)> {
         let mut out = Vec::new();
         let Some(scene) = self.scenes.get(&entity) else {
             return out;
@@ -787,8 +811,16 @@ impl NoesisRenderState {
             let Some(element) = content.find_name(name) else {
                 continue;
             };
-            if let Some((count, selected_index, current)) = binding.read_changed(&element) {
-                out.push((name.clone(), count, selected_index, current));
+            if let Some((count, selected_index, current_position, current)) =
+                binding.read_changed(&element)
+            {
+                out.push((
+                    name.clone(),
+                    count,
+                    selected_index,
+                    current_position,
+                    current,
+                ));
             }
         }
         out
@@ -1150,11 +1182,15 @@ impl NoesisRenderState {
                 dp_snapshots: HashMap::new(),
                 transform_handles: HashMap::new(),
                 transform_snapshots: HashMap::new(),
+                transform3d_handles: HashMap::new(),
+                transform3d_snapshots: HashMap::new(),
                 brush_snapshots: HashMap::new(),
                 typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
                 image_snapshots: HashMap::new(),
+                inline_handles: HashMap::new(),
+                inlines_snapshots: HashMap::new(),
             },
         );
     }
@@ -1670,6 +1706,100 @@ impl NoesisRenderState {
         changed
     }
 
+    /// Populate each named `TextBlock`'s `Inlines` with the desired inline tree
+    /// from view `entity`'s [`crate::inlines::NoesisInlines`] component. Builds
+    /// the live Noesis inlines and stores their handles in the scene for the
+    /// read-back. Only a `TextBlock` whose `Inlines` is currently *empty* is
+    /// populated — the runtime 0.10 FFI exposes no `InlineCollection::Clear`, so a
+    /// later, different spec for a name that already has content is refused with a
+    /// warning (rebuild the scene to change it). No-op until the scene exists.
+    pub(crate) fn apply_inlines_for(
+        &mut self,
+        entity: Entity,
+        set: &HashMap<String, Vec<crate::inlines::InlineSpec>>,
+    ) {
+        if set.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, specs) in set {
+            if specs.is_empty() {
+                continue;
+            }
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisInlines: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let Some(mut collection) = noesis_runtime::text_inlines::text_block_inlines(&element)
+            else {
+                warn!("NoesisInlines: element {name:?} is not a TextBlock; skipped");
+                continue;
+            };
+            if collection.count() != 0 {
+                warn!(
+                    "NoesisInlines: {name:?} already has inline content; clear-and-replace is \
+                     unavailable in runtime 0.10 (rebuild the scene to change it)",
+                );
+                continue;
+            }
+            let built = crate::inlines::build_into(&mut collection, specs);
+            scene.inline_handles.insert(name.clone(), built);
+        }
+    }
+
+    /// Poll view `entity`'s watched `TextBlock`s, returning `(x:Name, readback)`
+    /// for each whose live inline structure changed since last frame (deduped
+    /// against the per-scene snapshot). The read re-reads the *live* collection
+    /// count and pointer identity, plus the live `Run` text / `Hyperlink` URIs of
+    /// the handles the bridge built. First poll after a watch is added reports.
+    pub(crate) fn poll_inlines_reads_for(
+        &mut self,
+        entity: Entity,
+        watched: &[String],
+    ) -> Vec<(String, crate::inlines::InlinesReadback)> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .inlines_snapshots
+            .retain(|name, _| watched.iter().any(|w| w == name));
+        if watched.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for name in watched {
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            let Some(collection) = noesis_runtime::text_inlines::text_block_inlines(&element)
+            else {
+                continue;
+            };
+            let empty = Vec::new();
+            let tree = scene.inline_handles.get(name).unwrap_or(&empty);
+            let current = crate::inlines::readback(tree, &collection);
+            if scene.inlines_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene
+                .inlines_snapshots
+                .insert(name.clone(), current.clone());
+            changed.push((name.clone(), current));
+        }
+        changed
+    }
+
     /// Apply pending geometry writes from
     /// [`crate::geometry::NoesisGeometryRequests`]. Mirrors
     /// [`Self::apply_text_writes`]: drains the queue, looks up each named
@@ -2150,6 +2280,105 @@ impl NoesisRenderState {
         }
     }
 
+    /// Assign view `entity`'s desired `Transform3D`s (`x:Name → spec`). Each
+    /// spec becomes a `CompositeTransform3D` held at +1 in
+    /// [`Self::transform3d_handles`] (the same object Noesis stores), so the
+    /// poll can read it back. Missing names / non-`UIElement` targets warn.
+    /// Mirror of [`Self::apply_transforms_for`], but for `UIElement::Transform3D`
+    /// rather than `RenderTransform`.
+    pub(crate) fn apply_transforms3d_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::transforms3d::Transform3DSpec>,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        // Drop handles for names no longer requested; releasing each handle's +1
+        // (Noesis still holds its own ref until the DP is overwritten / cleared).
+        scene
+            .transform3d_handles
+            .retain(|k, _| desired.contains_key(k));
+        if desired.is_empty() {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTransform3D: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let transform = CompositeTransform3D::new(spec.to_fields());
+            if element.set_transform3d(&transform) {
+                scene.transform3d_handles.insert(name.clone(), transform);
+            } else {
+                warn!(
+                    "NoesisTransform3D: {name:?} has no Transform3D (not a UIElement?) \
+                     in scene {:?}",
+                    scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Poll view `entity`'s named elements' live `Transform3D`s, returning
+    /// `(name, spec)` for each that changed since last frame (deduped against the
+    /// per-scene snapshot). A name only reports while the element's current
+    /// `Transform3D` is the exact object we assigned (pointer identity), so the
+    /// read-back is element-sourced proof the assignment took — not an echo of
+    /// the component. First poll after assignment always reports. Mirror of
+    /// [`Self::poll_transforms_for`].
+    pub(crate) fn poll_transforms3d_for(
+        &mut self,
+        entity: Entity,
+        names: &[&str],
+    ) -> Vec<(String, crate::transforms3d::Transform3DSpec)> {
+        use crate::transforms3d::Transform3DSpec;
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .transform3d_snapshots
+            .retain(|name, _| names.contains(&name.as_str()));
+        if names.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for &name in names {
+            let Some(handle) = scene.transform3d_handles.get(name) else {
+                continue;
+            };
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            // Read the element's live Transform3D; only trust it when it is the
+            // very object we assigned (Noesis stores our pointer, no clone).
+            let Some(live) = element.transform3d() else {
+                continue;
+            };
+            if live.raw() != handle.raw() {
+                continue;
+            }
+            let current = Transform3DSpec::from_fields(handle.get());
+            if scene.transform3d_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene
+                .transform3d_snapshots
+                .insert(name.to_string(), current);
+            changed.push((name.to_string(), current));
+        }
+        changed
+    }
+
     /// Paint view `entity`'s elements with the desired code-built brushes
     /// (`(x:Name, target) → spec`). Each spec is built into a fresh Noesis brush
     /// and assigned through the element's typed brush sugar; Noesis takes its own
@@ -2624,7 +2853,11 @@ impl NoesisRenderState {
             // not currently blitting). `publish_intermediates` flips the index.
             registered_device
                 .device_mut::<WgpuRenderDevice>()
-                .set_onscreen_target(scene.intermediates[scene.write_index].view.clone());
+                .set_onscreen_target(
+                    scene.intermediates[scene.write_index].view.clone(),
+                    scene.size.x,
+                    scene.size.y,
+                );
 
             let _changed = scene.view.update(time_secs);
             let mut renderer = scene.view.renderer();
@@ -2735,7 +2968,7 @@ impl NoesisRenderState {
 
         registered_device
             .device_mut::<WgpuRenderDevice>()
-            .set_onscreen_target(target.clone());
+            .set_onscreen_target(target.clone(), size.x, size.y);
 
         let _ = rig.view.update(time_secs);
         let mut renderer = rig.view.renderer();
