@@ -106,3 +106,7 @@ path = "examples/bevy_wgpu_bridge.rs"
 [[example]]
 name = "xaml_viewer"
 path = "examples/xaml_viewer.rs"
+
+[[example]]
+name = "databinding"
+path = "examples/databinding.rs"
