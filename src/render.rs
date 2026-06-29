@@ -3109,9 +3109,20 @@ pub(crate) struct BlitPipeline {
 }
 
 /// Premultiplied-alpha "over": `result = src.rgb + dst.rgb * (1 - src.a)`. Used
-/// by the Core3d overlay node to composite the UI *directly* onto the camera's
-/// finished scene — transparent intermediate texels (a == 0) leave the scene
-/// intact, anti-aliased edges (premultiplied by Noesis) blend correctly.
+/// by *both* compositing nodes to composite the UI directly onto the camera's
+/// cleared/finished `ViewTarget` (`LoadOp::Load`) — transparent intermediate
+/// texels (a == 0) leave the target intact, fully-opaque texels (a == 1)
+/// overwrite it, and the fractional-alpha edges Noesis emits with
+/// `RenderFlag::Ppaa` enabled blend correctly.
+///
+/// Noesis writes *premultiplied* alpha into the intermediate (its own
+/// `BlendMode::SrcOver` is `One, OneMinusSrcAlpha`). The previous Core2d path
+/// overwrote the target 1:1 (`blend = None`), discarding the camera's clear
+/// colour and leaving premultiplied bytes for a downstream straight-alpha step
+/// to re-multiply — which let the clear colour bleed through PPAA edges.
+/// Compositing premultiplied here makes the `ViewTarget` already-correct and
+/// independent of the clear colour, while staying identical to the old overwrite
+/// whenever the target was cleared transparent (dst == 0 ⇒ result == src).
 const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
     color: wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
@@ -3126,14 +3137,10 @@ const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
 };
 
 impl BlitPipeline {
-    /// `blend = None` overwrites the target 1:1 (Core2d path, where Bevy's own
-    /// multi-camera step alpha-composites the result); `Some(PREMULTIPLIED_OVER)`
-    /// composites onto an existing image (Core3d overlay path).
-    fn new(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-        blend: Option<wgpu::BlendState>,
-    ) -> Self {
+    /// Build the compositing pipeline for `target_format`. Both render-graph
+    /// nodes use the same [`PREMULTIPLIED_OVER`] blend so the UI composites
+    /// correctly over whatever the camera left in its `ViewTarget`.
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("noesis blit shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLIT_WGSL)),
@@ -3192,12 +3199,7 @@ impl BlitPipeline {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    // Overwrite (None) for the Core2d path — Noesis paints the
-                    // whole intermediate and Bevy's multi-camera composite folds
-                    // it over the 3D camera using the alpha channel. The Core3d
-                    // overlay path passes `Some(PREMULTIPLIED_OVER)` to composite
-                    // straight onto the scene instead.
-                    blend,
+                    blend: Some(PREMULTIPLIED_OVER),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -3256,30 +3258,56 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// Test-only: run the production compositing blit (same [`BlitPipeline`] +
+/// [`PREMULTIPLIED_OVER`] blend + `LoadOp::Load` the render-graph nodes use) of
+/// `src` onto `target`. Lets integration tests exercise the real premultiplied
+/// composite without standing up a render world. Not part of the public API.
+#[doc(hidden)]
+pub fn blit_composite_for_test(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    src: &wgpu::TextureView,
+    target: &wgpu::TextureView,
+    target_format: wgpu::TextureFormat,
+) {
+    let blit = BlitPipeline::new(device, target_format);
+    let bg = blit.bind_group(device, src);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("blit_composite_for_test"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&blit.pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.draw(0..3, 0..1);
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct BlitPipelineCache {
-    /// 1:1 overwrite — the Core2d (separate UI camera) path.
-    overwrite: HashMap<wgpu::TextureFormat, BlitPipeline>,
-    /// Premultiplied-alpha "over" — the Core3d (overlay-on-scene) path.
+    /// Premultiplied-alpha "over" pipeline, one per encountered target format.
+    /// Both the Core2d and Core3d nodes share it (see [`PREMULTIPLIED_OVER`]).
     over: HashMap<wgpu::TextureFormat, BlitPipeline>,
 }
 
 impl BlitPipelineCache {
-    fn get_overwrite(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
-        self.overwrite.get(&format)
-    }
-
-    fn get_over(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
+    fn get(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
         self.over.get(&format)
     }
 
     fn ensure(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        self.overwrite
-            .entry(format)
-            .or_insert_with(|| BlitPipeline::new(device, format, None));
         self.over
             .entry(format)
-            .or_insert_with(|| BlitPipeline::new(device, format, Some(PREMULTIPLIED_OVER)));
+            .or_insert_with(|| BlitPipeline::new(device, format));
     }
 }
 
@@ -3462,27 +3490,23 @@ pub enum NoesisSet {
     Drive,
 }
 
-/// Shared blit body for both nodes. `overlay = false` overwrites the target 1:1
-/// (Core2d, separate UI camera — Bevy composites it afterwards); `overlay = true`
-/// premultiplied-alpha composites the UI straight onto the camera's finished
-/// scene (Core3d, single-camera).
+/// Shared blit body for both nodes. Premultiplied-alpha composites the UI over
+/// whatever the camera left in its `ViewTarget` (`LoadOp::Load`): the Core2d
+/// node runs on every 2D view, the Core3d node only on views tagged
+/// [`NoesisCamera`]. Both use the same [`PREMULTIPLIED_OVER`] blend so PPAA's
+/// fractional-alpha edges composite correctly instead of overwriting the clear
+/// colour (see [`PREMULTIPLIED_OVER`]).
 fn blit_noesis_ui(
     render_context: &mut RenderContext<'_>,
     intermediate: &NoesisIntermediate,
     view_target: &ViewTarget,
     world: &World,
-    overlay: bool,
 ) -> Result<(), NodeRunError> {
     let Some(cache) = world.get_resource::<BlitPipelineCache>() else {
         return Ok(());
     };
     let target_format = view_target.main_texture_format();
-    let blit = if overlay {
-        cache.get_over(target_format)
-    } else {
-        cache.get_overwrite(target_format)
-    };
-    let Some(blit) = blit else {
+    let Some(blit) = cache.get(target_format) else {
         // prepare_noesis_blit should have created it; if it hasn't by
         // now we'd draw garbage so skip cleanly.
         return Ok(());
@@ -3533,9 +3557,11 @@ fn blit_noesis_ui(
     Ok(())
 }
 
-/// Core2d compositing node — runs on **every** Core2d view (unchanged, classic
-/// behaviour). A 2D UI camera layered over the scene relies on Bevy's own
-/// multi-camera step to fold this overwrite blit over the lower camera.
+/// Core2d compositing node — runs on **every** Core2d view. Premultiplied-alpha
+/// composites the UI over the view's `ViewTarget`; when that target was cleared
+/// transparent (a UI camera layered over a lower camera) the result is identical
+/// to the old 1:1 overwrite, and Bevy's multi-camera step folds it over the
+/// lower camera as before.
 #[derive(Default)]
 pub struct NoesisNode;
 
@@ -3549,7 +3575,7 @@ impl ViewNode for NoesisNode {
         (view_target, intermediate): (&'w ViewTarget, &'w NoesisIntermediate),
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, intermediate, view_target, world, false)
+        blit_noesis_ui(render_context, intermediate, view_target, world)
     }
 }
 
@@ -3580,7 +3606,7 @@ impl ViewNode for NoesisOverlayNode {
         ),
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, intermediate, view_target, world, true)
+        blit_noesis_ui(render_context, intermediate, view_target, world)
     }
 }
 
@@ -3636,8 +3662,8 @@ impl Plugin for NoesisRenderPlugin {
         render_app
             .init_resource::<BlitPipelineCache>()
             .add_systems(Render, prepare_noesis_blit.in_set(RenderSystems::Prepare))
-            // Core2d: overwrite blit on any 2D view that has published an
-            // intermediate (the `ViewQuery` gates on `NoesisIntermediate`).
+            // Core2d: premultiplied composite on any 2D view that has published
+            // an intermediate (the `ViewQuery` gates on `NoesisIntermediate`).
             .add_render_graph_node::<ViewNodeRunner<NoesisNode>>(Core2d, NoesisNodeLabel)
             .add_render_graph_edges(
                 Core2d,
