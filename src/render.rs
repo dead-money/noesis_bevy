@@ -2656,7 +2656,11 @@ impl NoesisRenderState {
             // not currently blitting). `publish_intermediates` flips the index.
             registered_device
                 .device_mut::<WgpuRenderDevice>()
-                .set_onscreen_target(scene.intermediates[scene.write_index].view.clone());
+                .set_onscreen_target(
+                    scene.intermediates[scene.write_index].view.clone(),
+                    scene.size.x,
+                    scene.size.y,
+                );
 
             let _changed = scene.view.update(time_secs);
             let mut renderer = scene.view.renderer();
@@ -2767,7 +2771,7 @@ impl NoesisRenderState {
 
         registered_device
             .device_mut::<WgpuRenderDevice>()
-            .set_onscreen_target(target.clone());
+            .set_onscreen_target(target.clone(), size.x, size.y);
 
         let _ = rig.view.update(time_secs);
         let mut renderer = rig.view.renderer();
