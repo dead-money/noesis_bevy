@@ -138,15 +138,6 @@ Mutating the resource updates the bound controls (Bevy change detection drives `
 
 For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view model built one property at a time), `NoesisItems` (fill a list or dropdown from a Rust collection), and `NoesisDp` (get, set, or watch any property on a named element directly, no binding required).
 
-## How it works
-
-- **The bridge pattern.** Each feature is a component on the view's camera entity. A reconcile system pushes that component's state into the live scene every frame and surfaces anything the UI reports back as a message tagged with the view it came from. `NoesisVm`, `NoesisItems`, `NoesisText`, and the rest share this shape, so adding a feature means copying an existing bridge.
-- **Noesis runs on the main thread.** It's single-threaded and `!Send`, so the view, renderer, and device live in a main-world non-send resource, and the bridges run there. Only the finished composite crosses to the render thread, which keeps Bevy's multi-threaded rendering intact.
-- **One texture, then a blit.** Each frame Noesis paints the UI into an offscreen texture sized to the scene, and a render-graph node blits that onto the camera's output with the right color handling.
-- **No unsafe here.** This crate is `forbid(unsafe_code)`; all `unsafe` lives in `noesis_runtime` behind safe wrappers.
-- **Premultiplied alpha at load.** PNG and JPEG images are premultiplied once when they load, so transparent edges stay clean instead of fringing.
-- **Fonts load before the view.** Noesis caches a font folder the first time it reads it, so fonts that aren't loaded yet render blank forever. List the folder in `NoesisView::wait_for_fonts` and the view waits for them before it builds.
-
 ## Setup
 
 ```sh
