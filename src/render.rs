@@ -1752,10 +1752,10 @@ impl NoesisRenderState {
     /// Populate each named `TextBlock`'s `Inlines` with the desired inline tree
     /// from view `entity`'s [`crate::inlines::NoesisInlines`] component. Builds
     /// the live Noesis inlines and stores their handles in the scene for the
-    /// read-back. Only a `TextBlock` whose `Inlines` is currently *empty* is
-    /// populated — the runtime 0.10 FFI exposes no `InlineCollection::Clear`, so a
-    /// later, different spec for a name that already has content is refused with a
-    /// warning (rebuild the scene to change it). No-op until the scene exists.
+    /// read-back. Re-apply is full replacement: any existing `Inlines` content
+    /// (from an earlier apply or authored in XAML) is cleared
+    /// (`InlineCollection::clear`) and rebuilt from the spec. No-op until the
+    /// scene exists.
     pub(crate) fn apply_inlines_for(
         &mut self,
         entity: Entity,
@@ -1786,13 +1786,13 @@ impl NoesisRenderState {
                 warn!("NoesisInlines: element {name:?} is not a TextBlock; skipped");
                 continue;
             };
+            // Clear any existing content, then drop our previously-built handles
+            // (releasing their refs) before building the replacement so the live
+            // collection holds only the new inlines.
             if collection.count() != 0 {
-                warn!(
-                    "NoesisInlines: {name:?} already has inline content; clear-and-replace is \
-                     unavailable in runtime 0.10 (rebuild the scene to change it)",
-                );
-                continue;
+                collection.clear();
             }
+            scene.inline_handles.remove(name);
             let built = crate::inlines::build_into(&mut collection, specs);
             scene.inline_handles.insert(name.clone(), built);
         }

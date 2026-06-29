@@ -85,6 +85,7 @@ pub use imaging::{
 };
 pub use inlines::{
     InlineSpec, InlinesReadback, NoesisInlines, NoesisInlinesChanged, NoesisInlinesPlugin,
+    TextDecorations,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use integration::{
