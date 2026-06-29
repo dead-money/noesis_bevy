@@ -109,7 +109,7 @@ async fn run_test() {
 
     let device_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
-    rd.set_onscreen_target(device_view);
+    rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
     // ── Pack all vertex data into one buffer ───────────────────────────────
     // Layout:
