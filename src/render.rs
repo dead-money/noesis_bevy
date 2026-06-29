@@ -1995,6 +1995,95 @@ impl NoesisRenderState {
         }
     }
 
+    /// Build view `entity`'s desired code-built shapes (`x:Name → spec`) and
+    /// assign each to its named container element. Each spec becomes a fresh
+    /// Noesis `Rectangle`/`Ellipse`/`Line` (size, corner radii, optional solid
+    /// fill/stroke + thickness); the container adopts it as its `Content`
+    /// (`ContentControl`) or, failing that, its decorator `Child`
+    /// (`Border`/`Decorator`). Noesis takes its own reference, so the Rust shape
+    /// handle drops right after. Missing names — and containers that accept
+    /// neither — warn. Called when the view's `NoesisShapes` component changes.
+    pub(crate) fn apply_shapes_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::shapes::ShapeSpec>,
+    ) {
+        use crate::shapes::ShapeKind;
+        use noesis_runtime::brushes::SolidColorBrush;
+        use noesis_runtime::shapes::{Ellipse, Line, Rectangle, Shape};
+
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+
+        // Apply the shared fill/stroke/thickness paint of `spec` to any built
+        // `Shape`, then return it as an owning element handle ready for the tree.
+        fn finish<S: Shape>(
+            mut shape: S,
+            spec: &crate::shapes::ShapeSpec,
+        ) -> noesis_runtime::view::FrameworkElement {
+            if let Some(rgba) = spec.fill {
+                shape.set_fill(&SolidColorBrush::new(rgba));
+            }
+            if let Some(rgba) = spec.stroke {
+                shape.set_stroke(&SolidColorBrush::new(rgba));
+            }
+            if let Some(t) = spec.stroke_thickness {
+                shape.set_stroke_thickness(t);
+            }
+            shape.as_element()
+        }
+
+        for (name, spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisShapes: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let shape_el = match spec.kind {
+                ShapeKind::Rectangle {
+                    width,
+                    height,
+                    radius_x,
+                    radius_y,
+                } => {
+                    let mut r = Rectangle::new();
+                    r.set_width(width);
+                    r.set_height(height);
+                    r.set_radius_x(radius_x);
+                    r.set_radius_y(radius_y);
+                    finish(r, spec)
+                }
+                ShapeKind::Ellipse { width, height } => {
+                    let mut e = Ellipse::new();
+                    e.set_width(width);
+                    e.set_height(height);
+                    finish(e, spec)
+                }
+                ShapeKind::Line { x1, y1, x2, y2 } => {
+                    let mut l = Line::new();
+                    l.set_points(x1, y1, x2, y2);
+                    finish(l, spec)
+                }
+            };
+            // ContentControl `Content` first; fall back to a Decorator/Border
+            // `Child`. Either takes its own reference to the shape.
+            if !element.set_content(&shape_el) && !element.set_decorator_child(&shape_el) {
+                warn!(
+                    "NoesisShapes: container {name:?} accepts neither Content nor a decorator Child; skipped",
+                );
+            }
+        }
+    }
+
     /// Parse view `entity`'s [`NoesisSvg`](crate::svg::NoesisSvg) sources and
     /// size each named element to the parsed outline's measured bounds. Returns
     /// `(name, bounds)` (`bounds` = `[x, y, width, height]`) for every source

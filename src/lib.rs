@@ -35,6 +35,7 @@ pub mod plain_vm;
 pub mod render;
 pub mod render_device;
 pub mod routed_events;
+pub mod shapes;
 pub mod styles;
 pub mod svg;
 pub mod text;
@@ -103,6 +104,7 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
+pub use shapes::{NoesisShapes, NoesisShapesPlugin, ShapeKind, ShapeSpec};
 pub use styles::{
     DataTriggerSpec, MultiTriggerSpec, NoesisStyles, NoesisStylesPlugin, PropertyTrigger, StyleSpec,
 };
@@ -221,6 +223,6 @@ impl Plugin for NoesisPlugin {
             diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
         // Bridge group C — appended past group B's 15-element `Plugins` limit.
-        app.add_plugins((styles::NoesisStylesPlugin,));
+        app.add_plugins((styles::NoesisStylesPlugin, shapes::NoesisShapesPlugin));
     }
 }
