@@ -31,9 +31,10 @@ The few things that genuinely need runtime/FFI work first are called out in §5.
 
 ## 2. Compositing & perf
 
-- **PPAA premultiplied blit.** `RenderFlag::Ppaa` produces fractional-alpha edges; the blit's
-  straight-alpha blend lets the camera clear color bleed through. Toggleable via `NoesisView.ppaa`
-  (viewer `P` key), off by default. Fix the blit to composite premultiplied (or opaque-with-pre-clear).
+- ~~**PPAA premultiplied blit.**~~ Done. Both compositing nodes now use a single premultiplied-alpha
+  "over" blend (`PREMULTIPLIED_OVER`) with `LoadOp::Load`, so `RenderFlag::Ppaa`'s fractional-alpha
+  edges composite correctly over the camera's clear colour instead of overwriting it (the old Core2d
+  1:1 overwrite let the clear colour bleed through). Verified by `tests/wgpu_ppaa_blit.rs`.
 
 ## 3. Bevy integration — capability bridges (runtime-ready; pure Bevy glue)
 
