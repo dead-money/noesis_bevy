@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 
+pub mod animation;
 pub mod bake;
 pub mod brushes;
 pub mod classes;
@@ -37,6 +38,7 @@ pub mod visibility;
 pub mod visual_state;
 pub mod xaml;
 
+pub use animation::{AnimationSpec, NoesisAnimation, NoesisAnimationPlugin};
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use brushes::{
     BrushReadback, BrushSpec, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes,
@@ -167,6 +169,7 @@ impl Plugin for NoesisPlugin {
             dp::NoesisDpPlugin,
             transforms::NoesisTransformPlugin,
             brushes::NoesisBrushesPlugin,
+            animation::NoesisAnimationPlugin,
         ));
     }
 }
