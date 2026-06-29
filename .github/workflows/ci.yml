@@ -59,6 +59,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Bevy's transitive build scripts (wayland-sys, alsa-sys, libudev-sys) run
+      # pkg-config even under DOCS_RS, so the hosted runner needs these. The
+      # self-hosted runner has them provisioned.
+      - name: Install Bevy Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
       - name: cargo doc
         working-directory: noesis_bevy
         run: cargo doc --no-deps
