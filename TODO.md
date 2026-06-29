@@ -48,8 +48,11 @@ state from the batch's stencil mode, and `draw_batch` clears + accumulates the c
 
 ## 3. Bevy integration
 
-- **XAML hot-reload.** Rebuild the `View` on Bevy asset-reload events so editing a `.xaml`
-  refreshes live. Pairs with the runtime's `ParseXaml` / `LoadComponent` work.
+- ~~**XAML hot-reload.** Rebuild the `View` on Bevy asset-reload events so editing a `.xaml`
+  refreshes live.~~ Done: `ensure_scene` stamps each scene with the `Arc<Vec<u8>>` it parsed
+  and rebuilds (reusing the teardown/re-attach machinery, so bound view-models / items /
+  bindings survive) when an asset `Modified` (or direct `XamlRegistry::insert`) replaces those
+  bytes. Covered by `tests/headless_app_hot_reload.rs`.
 - **Remaining capability bridges.** The interaction core, visual richness (brushes, transforms,
   animation, imaging, svg), data/text (typed items, binding/converters, typography), and
   system surface (diagnostics, integration) are bridged. Still un-bridged, in the established

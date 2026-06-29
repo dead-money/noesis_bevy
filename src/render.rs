@@ -32,6 +32,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
@@ -395,6 +396,13 @@ struct SceneInstance {
     write_index: usize,
     size: UVec2,
     built_for_uri: String,
+    /// The exact XAML bytes this scene was parsed from. Held so
+    /// [`NoesisRenderState::ensure_scene`] can detect a hot-reload: when the
+    /// shared map's `Arc<Vec<u8>>` for [`Self::built_for_uri`] no longer points
+    /// at these bytes (an asset `Modified` event or a direct
+    /// [`XamlRegistry::insert`] both allocate a fresh `Arc`), the markup
+    /// changed and the scene is rebuilt against the new bytes.
+    built_bytes: Arc<Vec<u8>>,
     /// Last render flags written to the view via `View::set_flags`.
     /// Re-applied only when [`NoesisView`] changes; avoids the FFI call
     /// on every frame.
@@ -1028,11 +1036,33 @@ impl NoesisRenderState {
             return;
         }
 
-        // Same URI, different size — resize in place without tearing down
-        // the View. Rebuild just the intermediate texture; `View::set_size`
+        // Current bytes for this URI in the shared map (`None` until the XAML
+        // first lands). Cloning the `Arc` is cheap and lets us both detect a
+        // hot-reload (by pointer identity) and stamp the rebuilt scene.
+        let current_bytes = {
+            let guard = self.shared_map.0.lock().expect("SharedXamlMap poisoned");
+            guard.get(&config.xaml_uri).cloned()
+        };
+
+        // Hot-reload: the URI is unchanged but its bytes were replaced. Both
+        // `update_xaml_registry` (asset `Modified`) and `XamlRegistry::insert`
+        // allocate a fresh `Arc` for replaced bytes, so an `Arc::ptr_eq`
+        // mismatch means the markup changed — force a full rebuild (not a
+        // resize) against the new bytes. The bridges (view-models, items,
+        // bindings, commands) re-attach after the rebuild via `teardown_scene`.
+        let bytes_changed = matches!(
+            (self.scenes.get(&entity), &current_bytes),
+            (Some(scene), Some(bytes))
+                if scene.built_for_uri == config.xaml_uri
+                    && !Arc::ptr_eq(&scene.built_bytes, bytes)
+        );
+
+        // Same URI + bytes, different size — resize in place without tearing
+        // down the View. Rebuild just the intermediate texture; `View::set_size`
         // informs Noesis without invalidating the renderer. Important for
         // desktop window drags, which fire `WindowResized` at every pixel.
-        if let Some(scene) = self.scenes.get_mut(&entity)
+        if !bytes_changed
+            && let Some(scene) = self.scenes.get_mut(&entity)
             && scene.built_for_uri == config.xaml_uri
             && scene.size != config.size
         {
@@ -1045,10 +1075,11 @@ impl NoesisRenderState {
             return;
         }
 
-        let up_to_date = self
-            .scenes
-            .get(&entity)
-            .is_some_and(|s| s.built_for_uri == config.xaml_uri && s.size == config.size);
+        let up_to_date = !bytes_changed
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| s.built_for_uri == config.xaml_uri && s.size == config.size);
         if up_to_date {
             return;
         }
@@ -1056,12 +1087,9 @@ impl NoesisRenderState {
         self.teardown_scene(entity);
 
         // Confirm the XAML is currently present; skip if not.
-        {
-            let guard = self.shared_map.0.lock().expect("SharedXamlMap poisoned");
-            if !guard.contains_key(&config.xaml_uri) {
-                return;
-            }
-        }
+        let Some(current_bytes) = current_bytes else {
+            return;
+        };
         // Defer scene creation until `wait_for_fonts` is satisfied (or
         // never set). Noesis's `CachedFontProvider` caches the result of
         // `ScanFolder` the first time it's called — if we build the View
@@ -1173,6 +1201,7 @@ impl NoesisRenderState {
                 write_index: 0,
                 size: config.size,
                 built_for_uri: config.xaml_uri.clone(),
+                built_bytes: current_bytes,
                 applied_flags: initial_flags,
                 applied_scale: config.scale,
                 click_subs: HashMap::new(),
