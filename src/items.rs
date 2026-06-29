@@ -309,8 +309,13 @@ impl NoesisItems {
     /// Builder: set element `name`'s items from an explicit (possibly mixed)
     /// [`ItemValue`] list.
     #[must_use]
-    pub fn with_items(mut self, name: impl Into<String>, items: Vec<ItemValue>) -> Self {
-        self.sources.insert(name.into(), items);
+    pub fn with_items(
+        mut self,
+        name: impl Into<String>,
+        items: impl IntoIterator<Item = ItemValue>,
+    ) -> Self {
+        self.sources
+            .insert(name.into(), items.into_iter().collect());
         self
     }
 
@@ -364,8 +369,13 @@ impl NoesisItems {
 
     /// Set element `name`'s items from an explicit (possibly mixed) [`ItemValue`]
     /// list. The runtime counterpart of [`with_items`](Self::with_items).
-    pub fn set_items(&mut self, name: impl Into<String>, items: Vec<ItemValue>) {
-        self.sources.insert(name.into(), items);
+    pub fn set_items(
+        &mut self,
+        name: impl Into<String>,
+        items: impl IntoIterator<Item = ItemValue>,
+    ) {
+        self.sources
+            .insert(name.into(), items.into_iter().collect());
     }
 
     /// Drive element `name`'s `SelectedIndex` to `index` (`-1` clears) from a

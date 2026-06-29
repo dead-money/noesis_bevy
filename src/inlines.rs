@@ -519,8 +519,9 @@ impl NoesisInlines {
 
     /// Observe element `name`'s inline structure from a system holding
     /// `&mut NoesisInlines`. No-op if already watched. The runtime counterpart of
-    /// [`watching`](Self::watching).
-    pub fn watch(&mut self, name: impl Into<String>) {
+    /// [`watching`](Self::watching). Named `observe` (not `watch`) to avoid
+    /// colliding with the [`watch`](Self::watch) field.
+    pub fn observe(&mut self, name: impl Into<String>) {
         let name = name.into();
         if !self.watch.contains(&name) {
             self.watch.push(name);

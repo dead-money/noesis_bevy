@@ -139,6 +139,8 @@ fn main() {
             wait_for_images: Vec::new(),
             ppaa: true,
             application_resources,
+            // The viewer ships Bitter in assets/Fonts; use it as the fallback.
+            font_fallbacks: vec!["Fonts/#Bitter".into()],
             ..default()
         }))
         .insert_resource(StagedTheme(theme_files))
