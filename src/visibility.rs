@@ -67,6 +67,27 @@ impl NoesisVisibility {
         self.set.insert(name.into(), visible);
         self
     }
+
+    /// Reveal element `name` from a system holding `&mut NoesisVisibility`. The
+    /// runtime counterpart of [`show`](Self::show): the next reconcile sets it
+    /// to `Visible` on the live element.
+    pub fn reveal(&mut self, name: impl Into<String>) {
+        self.set.insert(name.into(), true);
+    }
+
+    /// Collapse element `name` from a system holding `&mut NoesisVisibility`. The
+    /// runtime counterpart of [`hide`](Self::hide): the next reconcile sets it
+    /// to `Collapsed` on the live element.
+    pub fn collapse(&mut self, name: impl Into<String>) {
+        self.set.insert(name.into(), false);
+    }
+
+    /// Set element `name`'s visibility from a system holding
+    /// `&mut NoesisVisibility`. `visible = true` → `Visible`; `false` →
+    /// `Collapsed`. The runtime counterpart of [`set`](Self::set).
+    pub fn write(&mut self, name: impl Into<String>, visible: bool) {
+        self.set.insert(name.into(), visible);
+    }
 }
 
 /// Reconcile every view's [`NoesisVisibility`]: apply desired visibility writes
@@ -80,7 +101,7 @@ pub(crate) fn sync_visibility_bridge(
         return;
     };
     for (entity, vis) in &views {
-        if vis.is_changed() {
+        if vis.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_visibility_for(entity, &vis.set);
         }
     }

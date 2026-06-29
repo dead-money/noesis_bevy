@@ -167,6 +167,43 @@ impl NoesisTransform {
         self
     }
 
+    /// Replace `name`'s entire spec from a system holding `&mut NoesisTransform`.
+    /// The runtime counterpart of [`set`](Self::set): the next reconcile assigns
+    /// it to the live element.
+    pub fn write(&mut self, name: impl Into<String>, spec: TransformSpec) {
+        self.transforms.insert(name.into(), spec);
+    }
+
+    /// Set `name`'s translation in place, keeping any other queued fields. The
+    /// runtime counterpart of [`translate`](Self::translate).
+    pub fn set_translate(&mut self, name: impl Into<String>, x: f32, y: f32) {
+        self.entry(name).translate = [x, y];
+    }
+
+    /// Set `name`'s scale factors in place, keeping any other queued fields. The
+    /// runtime counterpart of [`scale`](Self::scale).
+    pub fn set_scale(&mut self, name: impl Into<String>, x: f32, y: f32) {
+        self.entry(name).scale = [x, y];
+    }
+
+    /// Set `name`'s rotation (degrees, clockwise) in place, keeping other fields.
+    /// The runtime counterpart of [`rotate`](Self::rotate).
+    pub fn set_rotation(&mut self, name: impl Into<String>, degrees: f32) {
+        self.entry(name).rotation = degrees;
+    }
+
+    /// Set `name`'s pivot `(CenterX, CenterY)` in place, keeping other fields.
+    /// The runtime counterpart of [`center`](Self::center).
+    pub fn set_center(&mut self, name: impl Into<String>, x: f32, y: f32) {
+        self.entry(name).center = [x, y];
+    }
+
+    /// Set `name`'s skew angles (degrees) in place, keeping other fields. The
+    /// runtime counterpart of [`skew`](Self::skew).
+    pub fn set_skew(&mut self, name: impl Into<String>, x: f32, y: f32) {
+        self.entry(name).skew = [x, y];
+    }
+
     fn entry(&mut self, name: impl Into<String>) -> &mut TransformSpec {
         self.transforms.entry(name.into()).or_default()
     }
@@ -199,7 +236,7 @@ pub(crate) fn sync_transform_bridge(
         return;
     };
     for (entity, transform) in &views {
-        if transform.is_changed() {
+        if transform.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_transforms_for(entity, &transform.transforms);
         }
         let names: Vec<&str> = transform.transforms.keys().map(String::as_str).collect();

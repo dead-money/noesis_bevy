@@ -74,6 +74,21 @@ impl NoesisVisualState {
             .insert(name.into(), (state.into(), use_transitions));
         self
     }
+
+    /// Transition control `name` to visual state `state` from a system holding
+    /// `&mut NoesisVisualState`. The runtime counterpart of [`state`](Self::state):
+    /// the next reconcile drives it into the live control. Pass
+    /// `use_transitions = true` to run the state's `VisualTransition` (animated),
+    /// or `false` to snap straight to it.
+    pub fn go_to(
+        &mut self,
+        name: impl Into<String>,
+        state: impl Into<String>,
+        use_transitions: bool,
+    ) {
+        self.states
+            .insert(name.into(), (state.into(), use_transitions));
+    }
 }
 
 /// Reconcile every view's [`NoesisVisualState`]: apply desired state transitions
@@ -87,7 +102,7 @@ pub(crate) fn sync_visual_state_bridge(
         return;
     };
     for (entity, visual_state) in &views {
-        if visual_state.is_changed() {
+        if visual_state.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_visual_state_for(entity, &visual_state.states);
         }
     }

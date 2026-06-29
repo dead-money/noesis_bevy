@@ -57,6 +57,13 @@ impl NoesisLayout {
         self.margins.insert(name.into(), margin);
         self
     }
+
+    /// Set element `name`'s `Margin` from a system holding `&mut NoesisLayout`.
+    /// The runtime counterpart of [`margin`](Self::margin): the next reconcile
+    /// applies it to the live element.
+    pub fn write(&mut self, name: impl Into<String>, margin: Margin) {
+        self.margins.insert(name.into(), margin);
+    }
 }
 
 /// Reconcile every view's [`NoesisLayout`]: apply desired margin writes when the
@@ -70,7 +77,7 @@ pub(crate) fn sync_layout_bridge(
         return;
     };
     for (entity, layout) in &views {
-        if layout.is_changed() {
+        if layout.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_layout_for(entity, &layout.margins);
         }
     }

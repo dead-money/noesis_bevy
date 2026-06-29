@@ -417,6 +417,12 @@ pub(crate) struct NoesisRenderState {
     /// [`Self::ensure_scene`]; the blit node looks each one up by its view
     /// entity. Empty until the first `NoesisView`'s XAML resolves.
     scenes: HashMap<Entity, SceneInstance>,
+    /// Entities whose scene was (re)built during this frame's Ensure pass. The
+    /// Apply-set bridges read it so a write applies even when the component last
+    /// changed before its scene existed: a freshly-built scene re-runs every
+    /// bridge's apply against the current component state. Cleared at the top of
+    /// each Ensure pass.
+    scenes_built_this_frame: HashSet<Entity>,
     /// One-time flag for `SetFontFallbacks`/`SetFontDefaultProperties`;
     /// must fire AFTER Bevy has loaded at least one font into
     /// `SharedFontMap`, because Noesis's `SetFontFallbacks` eagerly runs
@@ -683,6 +689,7 @@ impl NoesisRenderState {
             registered_fonts: Some(registered_fonts),
             registered_textures: Some(registered_textures),
             scenes: HashMap::new(),
+            scenes_built_this_frame: HashSet::new(),
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
             loaded_app_resources_chain: None,
@@ -1356,6 +1363,15 @@ impl NoesisRenderState {
                 inlines_snapshots: HashMap::new(),
             },
         );
+        self.scenes_built_this_frame.insert(entity);
+    }
+
+    /// Whether `entity`'s scene was (re)built this frame. Apply-set bridges OR
+    /// this with their own change detection so a write that was set before the
+    /// scene existed still lands once it does, and so a hot-reload re-seeds the
+    /// current component state. See [`Self::scenes_built_this_frame`].
+    pub(crate) fn scene_rebuilt_this_frame(&self, entity: Entity) -> bool {
+        self.scenes_built_this_frame.contains(&entity)
     }
 
     /// Apply view `entity`'s desired element visibility (`x:Name → visible`).
@@ -3711,6 +3727,9 @@ fn ensure_noesis_scene(
     let Some(mut state) = state else {
         return;
     };
+    // Reset the per-frame rebuild set before this pass repopulates it; the
+    // Apply systems that follow read it within the same frame.
+    state.scenes_built_this_frame.clear();
     for (entity, config) in &views {
         state.ensure_scene(entity, config);
     }

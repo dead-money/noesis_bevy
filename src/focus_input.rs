@@ -238,6 +238,74 @@ impl NoesisFocusControl {
         });
         self
     }
+
+    /// Queue a directional / tab [`FocusMove`] from a system holding
+    /// `&mut NoesisFocusControl`. The runtime counterpart of
+    /// [`move_focus`](Self::move_focus): the next reconcile applies it once to
+    /// the live scene.
+    pub fn request_move(
+        &mut self,
+        from: impl Into<String>,
+        direction: FocusNavigationDirection,
+        wrapped: bool,
+    ) {
+        self.moves.push(FocusMove {
+            from: from.into(),
+            direction,
+            wrapped,
+        });
+    }
+
+    /// Queue a [`FocusEngage`] on `name` from a system holding
+    /// `&mut NoesisFocusControl`. The runtime counterpart of
+    /// [`engage`](Self::engage): the next reconcile applies it once.
+    pub fn request_engage(&mut self, name: impl Into<String>, engage: bool) {
+        self.engages.push(FocusEngage {
+            name: name.into(),
+            engage,
+        });
+    }
+
+    /// Install a [`KeyBindingSpec`] (chord to command) on `name` from a system
+    /// holding `&mut NoesisFocusControl`. The runtime counterpart of
+    /// [`key_binding`](Self::key_binding): reconciled into the live scene next
+    /// frame and kept thereafter.
+    pub fn add_key_binding(&mut self, name: impl Into<String>, key: Key, modifiers: ModifierKeys) {
+        self.bindings.push(KeyBindingSpec {
+            name: name.into(),
+            key,
+            modifiers,
+        });
+    }
+
+    /// Watch focus prediction from `from` in `direction` from a system holding
+    /// `&mut NoesisFocusControl` (no expected target, so the message only reports
+    /// whether a candidate exists). The runtime counterpart of
+    /// [`predict`](Self::predict).
+    pub fn watch_predict(&mut self, from: impl Into<String>, direction: FocusNavigationDirection) {
+        self.predicts.push(FocusPredict {
+            from: from.into(),
+            direction,
+            expect: None,
+        });
+    }
+
+    /// Watch focus prediction from `from` in `direction` from a system holding
+    /// `&mut NoesisFocusControl`, additionally reporting whether the predicted
+    /// element is the one named `expect`. The runtime counterpart of
+    /// [`predict_to`](Self::predict_to).
+    pub fn watch_predict_to(
+        &mut self,
+        from: impl Into<String>,
+        direction: FocusNavigationDirection,
+        expect: impl Into<String>,
+    ) {
+        self.predicts.push(FocusPredict {
+            from: from.into(),
+            direction,
+            expect: Some(expect.into()),
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,7 +390,7 @@ pub(crate) fn sync_focus_control(
         return;
     };
     for (entity, ctl) in &views {
-        if ctl.is_changed() {
+        if ctl.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_focus_moves_for(entity, &ctl.moves);
             state.apply_focus_engages_for(entity, &ctl.engages);
         }

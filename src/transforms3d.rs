@@ -292,6 +292,69 @@ impl NoesisTransform3D {
     pub fn matrix_rows(self, name: impl Into<String>, rows: [f32; 12]) -> Self {
         self.matrix(name, Matrix3DSpec::from_rows(rows))
     }
+
+    /// Replace `name`'s entire spec from a system holding `&mut NoesisTransform3D`.
+    /// The runtime counterpart of [`set`](Self::set): the next reconcile assigns
+    /// it to the live element.
+    pub fn write(&mut self, name: impl Into<String>, spec: Transform3DSpec) {
+        self.transforms.insert(name.into(), spec);
+    }
+
+    /// Set `name`'s translation `(x, y, z)` in place, keeping its other fields.
+    /// The runtime counterpart of [`translate`](Self::translate).
+    pub fn set_translate(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
+        self.entry(name).translate = [x, y, z];
+    }
+
+    /// Set `name`'s scale factors `(x, y, z)` in place, keeping its other fields.
+    /// The runtime counterpart of [`scale`](Self::scale).
+    pub fn set_scale(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
+        self.entry(name).scale = [x, y, z];
+    }
+
+    /// Set `name`'s pivot center `(x, y, z)` in place, keeping its other fields.
+    /// The runtime counterpart of [`center`](Self::center).
+    pub fn set_center(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
+        self.entry(name).center = [x, y, z];
+    }
+
+    /// Set all three of `name`'s rotation angles `(x, y, z)` in degrees in place,
+    /// keeping its other fields. The runtime counterpart of [`rotate`](Self::rotate).
+    pub fn set_rotation(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
+        self.entry(name).rotation = [x, y, z];
+    }
+
+    /// Set `name`'s rotation about the X axis (degrees) in place, keeping the
+    /// other angles and fields. The runtime counterpart of [`rotate_x`](Self::rotate_x).
+    pub fn set_rotation_x(&mut self, name: impl Into<String>, degrees: f32) {
+        self.entry(name).rotation[0] = degrees;
+    }
+
+    /// Set `name`'s rotation about the Y axis (degrees) in place, keeping the
+    /// other angles and fields. The runtime counterpart of [`rotate_y`](Self::rotate_y).
+    pub fn set_rotation_y(&mut self, name: impl Into<String>, degrees: f32) {
+        self.entry(name).rotation[1] = degrees;
+    }
+
+    /// Set `name`'s rotation about the Z axis (degrees) in place, keeping the
+    /// other angles and fields. The runtime counterpart of [`rotate_z`](Self::rotate_z).
+    pub fn set_rotation_z(&mut self, name: impl Into<String>, degrees: f32) {
+        self.entry(name).rotation[2] = degrees;
+    }
+
+    /// Assign `name` a raw matrix [`Transform3D`](Matrix3DSpec) in place,
+    /// replacing any matrix previously queued for it. The runtime counterpart of
+    /// [`matrix`](Self::matrix).
+    pub fn write_matrix(&mut self, name: impl Into<String>, spec: Matrix3DSpec) {
+        self.matrices.insert(name.into(), spec);
+    }
+
+    /// Assign `name` a raw matrix from the runtime's 12-float `Transform3` form in
+    /// place. The runtime counterpart of [`matrix_rows`](Self::matrix_rows).
+    pub fn write_matrix_rows(&mut self, name: impl Into<String>, rows: [f32; 12]) {
+        self.matrices
+            .insert(name.into(), Matrix3DSpec::from_rows(rows));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,7 +408,7 @@ pub(crate) fn sync_transform3d_bridge(
         return;
     };
     for (entity, transform) in &views {
-        if transform.is_changed() {
+        if transform.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_transforms3d_for(entity, &transform.transforms);
             let matrices: HashMap<String, [f32; 12]> = transform
                 .matrices

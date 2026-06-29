@@ -198,6 +198,64 @@ impl NoesisShapes {
     pub fn line(self, name: impl Into<String>, x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
         self.insert(name, ShapeSpec::new(ShapeKind::Line { x1, y1, x2, y2 }))
     }
+
+    /// Assign a fully-specified [`ShapeSpec`] to container `name` from a system
+    /// holding `&mut NoesisShapes`. The runtime counterpart of
+    /// [`insert`](Self::insert): the next reconcile builds and assigns it to the
+    /// live element.
+    pub fn set(&mut self, name: impl Into<String>, spec: ShapeSpec) {
+        self.shapes.insert(name.into(), spec);
+    }
+
+    /// Assign a plain `width` × `height` rectangle to container `name` from a
+    /// system holding `&mut NoesisShapes`. The runtime counterpart of
+    /// [`rectangle`](Self::rectangle).
+    pub fn set_rectangle(&mut self, name: impl Into<String>, width: f32, height: f32) {
+        self.set(
+            name,
+            ShapeSpec::new(ShapeKind::Rectangle {
+                width,
+                height,
+                radius_x: 0.0,
+                radius_y: 0.0,
+            }),
+        );
+    }
+
+    /// Assign a rounded `width` × `height` rectangle (corner radii `radius_x` /
+    /// `radius_y`) to container `name` from a system holding `&mut NoesisShapes`.
+    /// The runtime counterpart of [`rounded_rectangle`](Self::rounded_rectangle).
+    pub fn set_rounded_rectangle(
+        &mut self,
+        name: impl Into<String>,
+        width: f32,
+        height: f32,
+        radius_x: f32,
+        radius_y: f32,
+    ) {
+        self.set(
+            name,
+            ShapeSpec::new(ShapeKind::Rectangle {
+                width,
+                height,
+                radius_x,
+                radius_y,
+            }),
+        );
+    }
+
+    /// Assign a `width` × `height` ellipse to container `name` from a system
+    /// holding `&mut NoesisShapes`. The runtime counterpart of
+    /// [`ellipse`](Self::ellipse).
+    pub fn set_ellipse(&mut self, name: impl Into<String>, width: f32, height: f32) {
+        self.set(name, ShapeSpec::new(ShapeKind::Ellipse { width, height }));
+    }
+
+    /// Assign a `(x1, y1)`-`(x2, y2)` line to container `name` from a system
+    /// holding `&mut NoesisShapes`. The runtime counterpart of [`line`](Self::line).
+    pub fn set_line(&mut self, name: impl Into<String>, x1: f32, y1: f32, x2: f32, y2: f32) {
+        self.set(name, ShapeSpec::new(ShapeKind::Line { x1, y1, x2, y2 }));
+    }
 }
 
 /// Reconcile every view's [`NoesisShapes`]: build and assign the desired shapes
@@ -211,7 +269,7 @@ pub(crate) fn sync_shapes_bridge(
         return;
     };
     for (entity, shapes) in &views {
-        if shapes.is_changed() {
+        if shapes.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_shapes_for(entity, &shapes.shapes);
         }
     }

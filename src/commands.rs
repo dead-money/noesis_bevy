@@ -166,6 +166,21 @@ impl NoesisCommands {
         self.pending_enables.push((name.into(), enabled));
     }
 
+    /// Enable command `name` from a system holding `&mut NoesisCommands`, so a
+    /// bound control becomes interactive again. Shorthand for
+    /// [`set_enabled(name, true)`](Self::set_enabled).
+    pub fn enable(&mut self, name: impl Into<String>) {
+        self.set_enabled(name, true);
+    }
+
+    /// Disable command `name` from a system holding `&mut NoesisCommands`. Its
+    /// `CanExecute` then reports `false`, so a bound `Button` greys out and
+    /// stops invoking it. Shorthand for
+    /// [`set_enabled(name, false)`](Self::set_enabled).
+    pub fn disable(&mut self, name: impl Into<String>) {
+        self.set_enabled(name, false);
+    }
+
     pub(crate) fn def(&self) -> &CommandsDef {
         &self.def
     }

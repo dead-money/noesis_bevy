@@ -53,6 +53,14 @@ impl NoesisGeometry {
         self.paths.insert(name.into(), points);
         self
     }
+
+    /// Set element `name`'s `Path` geometry from a system holding
+    /// `&mut NoesisGeometry`. The runtime counterpart of [`path`](Self::path):
+    /// the next reconcile draws the new polyline through `points` on the live
+    /// element.
+    pub fn draw(&mut self, name: impl Into<String>, points: Vec<[f32; 2]>) {
+        self.paths.insert(name.into(), points);
+    }
 }
 
 /// Reconcile every view's [`NoesisGeometry`]: apply the desired geometry writes
@@ -66,7 +74,7 @@ pub(crate) fn sync_geometry_bridge(
         return;
     };
     for (entity, geometry) in &views {
-        if geometry.is_changed() {
+        if geometry.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_geometry_for(entity, &geometry.paths);
         }
     }

@@ -210,6 +210,57 @@ impl NoesisTypography {
         self
     }
 
+    /// Set element `name`'s `FontSize` from a system holding `&mut NoesisTypography`.
+    /// The runtime counterpart of [`font_size`](Self::font_size): the next reconcile
+    /// applies it to the live element.
+    pub fn set_font_size(&mut self, name: impl Into<String>, size: f32) {
+        self.entry(name).font_size = Some(size);
+    }
+
+    /// Set element `name`'s `FontFamily` from a source string, holding
+    /// `&mut NoesisTypography`. The runtime counterpart of
+    /// [`font_family`](Self::font_family).
+    pub fn set_font_family(&mut self, name: impl Into<String>, source: impl Into<String>) {
+        self.entry(name).font_family = Some(source.into());
+    }
+
+    /// Set element `name`'s `FontWeight` from a system holding `&mut NoesisTypography`.
+    /// The runtime counterpart of [`font_weight`](Self::font_weight).
+    pub fn set_font_weight(&mut self, name: impl Into<String>, weight: FontWeight) {
+        self.entry(name).font_weight = Some(weight);
+    }
+
+    /// Set element `name`'s `FontStyle` from a system holding `&mut NoesisTypography`.
+    /// The runtime counterpart of [`font_style`](Self::font_style).
+    pub fn set_font_style(&mut self, name: impl Into<String>, style: FontStyle) {
+        self.entry(name).font_style = Some(style);
+    }
+
+    /// Set element `name`'s `FontStretch` from a system holding `&mut NoesisTypography`.
+    /// The runtime counterpart of [`font_stretch`](Self::font_stretch).
+    pub fn set_font_stretch(&mut self, name: impl Into<String>, stretch: FontStretch) {
+        self.entry(name).font_stretch = Some(stretch);
+    }
+
+    /// Replace element `name`'s full [`FontStyling`] block from a system holding
+    /// `&mut NoesisTypography`. The runtime counterpart of [`styling`](Self::styling).
+    pub fn set_styling(&mut self, name: impl Into<String>, styling: FontStyling) {
+        self.set.insert(name.into(), styling);
+    }
+
+    /// Observe element `name`'s typed `field` from a system holding
+    /// `&mut NoesisTypography`. No-op if that exact `(name, field)` pair is already
+    /// watched. The runtime counterpart of [`watch`](Self::watch).
+    pub fn observe(&mut self, name: impl Into<String>, field: TypographyField) {
+        let watch = TypographyWatch {
+            name: name.into(),
+            field,
+        };
+        if !self.watch.contains(&watch) {
+            self.watch.push(watch);
+        }
+    }
+
     fn entry(&mut self, name: impl Into<String>) -> &mut FontStyling {
         self.set.entry(name.into()).or_default()
     }
@@ -228,7 +279,7 @@ pub(crate) fn sync_typography_bridge(
         return;
     };
     for (entity, typography) in &views {
-        if typography.is_changed() {
+        if typography.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_typography_for(entity, &typography.set);
         }
         for (name, value) in state.poll_typography_reads_for(entity, &typography.watch) {
