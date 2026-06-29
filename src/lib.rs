@@ -24,6 +24,7 @@ pub mod focus_input;
 pub mod font;
 pub mod geometry;
 pub mod image;
+pub mod imaging;
 pub mod input;
 pub mod items;
 pub mod layout;
@@ -32,6 +33,7 @@ pub mod plain_vm;
 pub mod render;
 pub mod render_device;
 pub mod routed_events;
+pub mod svg;
 pub mod text;
 pub mod theme;
 pub mod transforms;
@@ -74,6 +76,9 @@ pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
 pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
 };
+pub use imaging::{
+    ImageBitmap, ImageReadback, NoesisImageChanged, NoesisImaging, NoesisImagingPlugin,
+};
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use items::{ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin};
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
@@ -84,6 +89,7 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
+pub use svg::{NoesisSvg, NoesisSvgChanged, NoesisSvgPlugin};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use transforms::{
@@ -184,6 +190,8 @@ impl Plugin for NoesisPlugin {
             animation::NoesisAnimationPlugin,
             typography::NoesisTypographyPlugin,
             binding::NoesisBindingPlugin,
+            imaging::NoesisImagingPlugin,
+            svg::NoesisSvgPlugin,
             diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
     }
