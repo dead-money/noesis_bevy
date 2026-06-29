@@ -61,7 +61,7 @@ use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
-use crate::items::{CollectionViewOp, ItemValue, ItemsBinding};
+use crate::items::{CollectionViewOp, ItemValue, ItemsBinding, ObjectSource};
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
@@ -874,20 +874,31 @@ impl NoesisRenderState {
         &mut self,
         entity: Entity,
         sources: &HashMap<String, Vec<ItemValue>>,
+        objects: &HashMap<String, ObjectSource>,
         select: &HashMap<String, i32>,
         navigate: &HashMap<String, CollectionViewOp>,
         changed: bool,
     ) {
         if changed {
             // Prune this view's collections whose name was removed.
-            self.items_sources
-                .retain(|(ent, name), _| *ent != entity || sources.contains_key(name));
+            self.items_sources.retain(|(ent, name), _| {
+                *ent != entity || sources.contains_key(name) || objects.contains_key(name)
+            });
             for (name, items) in sources {
                 let binding = self
                     .items_sources
                     .entry((entity, name.clone()))
                     .or_default();
                 binding.set_typed(items);
+                binding.set_desired_select(select.get(name).copied());
+                binding.set_desired_nav(navigate.get(name).copied());
+            }
+            for (name, source) in objects {
+                let binding = self
+                    .items_sources
+                    .entry((entity, name.clone()))
+                    .or_default();
+                binding.set_objects(source);
                 binding.set_desired_select(select.get(name).copied());
                 binding.set_desired_nav(navigate.get(name).copied());
             }
