@@ -69,7 +69,7 @@ use bevy::prelude::*;
 use noesis_runtime::classes::{
     ClassBuilder, ClassInstance, ClassRegistration, Instance, PropertyChangeHandler, PropertyValue,
 };
-use noesis_runtime::commands::{Command, CommandHandler, CommandParameter};
+use noesis_runtime::commands::{Command, CommandHandler, CommandParameterValue};
 use noesis_runtime::ffi::{ClassBase, PropType};
 
 use crate::render::{NoesisRenderState, NoesisSet};
@@ -224,7 +224,7 @@ pub struct NoesisCommandInvoked {
     ///
     /// Currently always `None`: the runtime hands the parameter to the Rust
     /// handler as an opaque borrowed `BaseComponent*`
-    /// ([`CommandParameter`](noesis_runtime::commands::CommandParameter)), and
+    /// ([`CommandParameterValue`](noesis_runtime::commands::CommandParameterValue)), and
     /// the `unsafe`-free Bevy crate has no safe way to unbox it (the runtime's
     /// `ConvertArg::new` is `pub(crate)`). Decoding it is a small
     /// `noesis_runtime` addition — see `NOTES.md` "OPEN RISKS".
@@ -265,11 +265,11 @@ impl CommandForwarder {
 }
 
 impl CommandHandler for CommandForwarder {
-    fn can_execute(&self, _param: CommandParameter) -> bool {
+    fn can_execute(&self, _param: CommandParameterValue) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    fn execute(&self, _param: CommandParameter) {
+    fn execute(&self, _param: CommandParameterValue) {
         // The parameter is an opaque borrowed `BaseComponent*` we can't safely
         // unbox from this crate; surface `None` for now (see `NoesisCommandInvoked`).
         self.queue.push(self.view, self.name.clone(), None);
