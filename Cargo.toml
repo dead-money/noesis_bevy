@@ -96,14 +96,6 @@ unimplemented = "warn"
 wildcard_dependencies = "warn"
 
 [[example]]
-name = "phase4_visual"
-path = "examples/phase4_visual.rs"
-
-[[example]]
-name = "bevy_wgpu_bridge"
-path = "examples/bevy_wgpu_bridge.rs"
-
-[[example]]
 name = "xaml_viewer"
 path = "examples/xaml_viewer.rs"
 
