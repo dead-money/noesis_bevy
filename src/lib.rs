@@ -33,6 +33,7 @@ pub mod routed_events;
 pub mod text;
 pub mod theme;
 pub mod transforms;
+pub mod typography;
 pub mod viewmodel;
 pub mod visibility;
 pub mod visual_state;
@@ -80,6 +81,10 @@ pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use transforms::{
     NoesisTransform, NoesisTransformChanged, NoesisTransformPlugin, TransformSpec,
+};
+pub use typography::{
+    FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
+    NoesisTypographyPlugin, TypographyField, TypographyValue, TypographyWatch,
 };
 pub use viewmodel::{
     NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,
@@ -170,6 +175,7 @@ impl Plugin for NoesisPlugin {
             transforms::NoesisTransformPlugin,
             brushes::NoesisBrushesPlugin,
             animation::NoesisAnimationPlugin,
+            typography::NoesisTypographyPlugin,
         ));
     }
 }

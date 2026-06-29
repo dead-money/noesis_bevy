@@ -428,6 +428,12 @@ struct SceneInstance {
     /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
     /// emissions; resets on scene rebuild.
     brush_snapshots: HashMap<(String, String), crate::brushes::BrushReadback>,
+    /// Last typed font value per `(x:Name, field)` watched by
+    /// [`crate::typography::NoesisTypography`]. Dedupes `NoesisTypographyChanged`
+    /// emissions; resets on scene rebuild. Distinct from [`Self::dp_snapshots`]
+    /// because enum font DPs need the typed getters, not the generic `i32` read.
+    typo_snapshots:
+        HashMap<(String, crate::typography::TypographyField), crate::typography::TypographyValue>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
     /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
@@ -1025,6 +1031,7 @@ impl NoesisRenderState {
                 transform_handles: HashMap::new(),
                 transform_snapshots: HashMap::new(),
                 brush_snapshots: HashMap::new(),
+                typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
             },
@@ -1419,6 +1426,127 @@ impl NoesisRenderState {
             // NoesisTextChanged for a write we just made ourselves.
             scene.text_snapshots.insert(name.clone(), text.clone());
         }
+    }
+
+    /// Apply each `(x:Name → FontStyling)` desired by view `entity`'s
+    /// [`NoesisTypography`](crate::typography::NoesisTypography) component onto
+    /// that view's `TextElement`s. Each block's `Some` fields are written; `None`
+    /// fields are skipped. Missing names log a warning; a field a target doesn't
+    /// expose is logged at debug. No-op until the view's scene exists.
+    pub(crate) fn apply_typography_for(
+        &mut self,
+        entity: Entity,
+        set: &HashMap<String, crate::typography::FontStyling>,
+    ) {
+        if set.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, styling) in set {
+            if styling.is_empty() {
+                continue;
+            }
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTypography: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if let Some(size) = styling.font_size
+                && !noesis_runtime::typography::set_font_size(&element, size)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontSize");
+            }
+            if let Some(source) = &styling.font_family {
+                // A fresh FontFamily holds one +1 ref; set_font_family AddRefs on
+                // the Noesis side, so the handle can drop at scope end.
+                let family = noesis_runtime::typography::FontFamily::new(source);
+                if !noesis_runtime::typography::set_font_family(&element, &family) {
+                    debug!("NoesisTypography: {name:?} did not accept FontFamily");
+                }
+            }
+            if let Some(weight) = styling.font_weight
+                && !noesis_runtime::typography::set_font_weight(&element, weight)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontWeight");
+            }
+            if let Some(style) = styling.font_style
+                && !noesis_runtime::typography::set_font_style(&element, style)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontStyle");
+            }
+            if let Some(stretch) = styling.font_stretch
+                && !noesis_runtime::typography::set_font_stretch(&element, stretch)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontStretch");
+            }
+        }
+    }
+
+    /// Poll view `entity`'s watched typed font properties, returning
+    /// `(x:Name, value)` for each that changed since last frame (deduped against
+    /// the per-scene snapshot). First poll after a watch is added always reports.
+    ///
+    /// Uses the runtime's *typed* font getters rather than the generic DP read
+    /// path: `FontWeight`/`FontStyle`/`FontStretch` are enum DPs and don't
+    /// round-trip through `get_i32`.
+    pub(crate) fn poll_typography_reads_for(
+        &mut self,
+        entity: Entity,
+        watched: &[crate::typography::TypographyWatch],
+    ) -> Vec<(String, crate::typography::TypographyValue)> {
+        use crate::typography::{TypographyField, TypographyValue};
+        use noesis_runtime::typography as ty;
+
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene.typo_snapshots.retain(|(name, field), _| {
+            watched.iter().any(|w| &w.name == name && w.field == *field)
+        });
+        if watched.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for watch in watched {
+            let Some(element) = content.find_name(&watch.name) else {
+                continue;
+            };
+            let current = match watch.field {
+                TypographyField::FontSize => ty::font_size(&element).map(TypographyValue::FontSize),
+                TypographyField::FontFamily => {
+                    ty::get_font_family(&element).map(|f| TypographyValue::FontFamily(f.source()))
+                }
+                TypographyField::FontWeight => {
+                    ty::font_weight(&element).map(TypographyValue::FontWeight)
+                }
+                TypographyField::FontStyle => {
+                    ty::font_style(&element).map(TypographyValue::FontStyle)
+                }
+                TypographyField::FontStretch => {
+                    ty::font_stretch(&element).map(TypographyValue::FontStretch)
+                }
+            };
+            let Some(current) = current else {
+                continue;
+            };
+            let key = (watch.name.clone(), watch.field);
+            if scene.typo_snapshots.get(&key) == Some(&current) {
+                continue;
+            }
+            scene.typo_snapshots.insert(key, current.clone());
+            changed.push((watch.name.clone(), current));
+        }
+        changed
     }
 
     /// Apply pending geometry writes from
