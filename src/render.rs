@@ -60,7 +60,7 @@ use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
-use crate::items::ItemsBinding;
+use crate::items::{ItemValue, ItemsBinding};
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
@@ -682,21 +682,17 @@ impl NoesisRenderState {
         }
     }
 
-    /// Drain pending [`NoesisItemsSources`] edits, apply them to per-element
-    /// [`ObservableCollection`](noesis_runtime::binding::ObservableCollection)s
-    /// (creating one per `x:Name` on first use), then bind any unbound
-    /// collection to its element's `ItemsSource`. The apply step is independent
-    /// of the scene (the collection holds the data regardless); binding waits
-    /// until the named element exists and re-binds after a scene rebuild.
     /// Reconcile view `entity`'s [`NoesisItems`] component. When `changed`, set
-    /// each named element's collection to the desired item list (creating a
-    /// collection per `(entity, name)` on first use, pruning names no longer
-    /// present). Every frame, bind any unbound collection to its element's
-    /// `ItemsSource` — handles first resolution and re-binding after a rebuild.
+    /// each named element's collection to the desired typed item list and its
+    /// desired selection (creating a collection per `(entity, name)` on first
+    /// use, pruning names no longer present). Every frame, bind any unbound
+    /// collection to its element's `ItemsSource` — handles first resolution and
+    /// re-binding after a rebuild — then drive any pending selection.
     pub(crate) fn apply_items_for(
         &mut self,
         entity: Entity,
-        sources: &HashMap<String, Vec<String>>,
+        sources: &HashMap<String, Vec<ItemValue>>,
+        select: &HashMap<String, i32>,
         changed: bool,
     ) {
         if changed {
@@ -704,10 +700,12 @@ impl NoesisRenderState {
             self.items_sources
                 .retain(|(ent, name), _| *ent != entity || sources.contains_key(name));
             for (name, items) in sources {
-                self.items_sources
+                let binding = self
+                    .items_sources
                     .entry((entity, name.clone()))
-                    .or_default()
-                    .set(items);
+                    .or_default();
+                binding.set_typed(items);
+                binding.set_desired_select(select.get(name).copied());
             }
         }
 
@@ -719,22 +717,57 @@ impl NoesisRenderState {
         };
         let uri = scene.built_for_uri.clone();
         for ((ent, name), binding) in &mut self.items_sources {
-            if *ent != entity || !binding.needs_bind(&uri) {
+            if *ent != entity {
                 continue;
             }
             let Some(mut element) = content.find_name(name) else {
-                warn!(
-                    "NoesisItems: x:Name {:?} not found in scene {:?}",
-                    name, scene.built_for_uri,
-                );
+                if binding.needs_bind(&uri) {
+                    warn!(
+                        "NoesisItems: x:Name {:?} not found in scene {:?}",
+                        name, scene.built_for_uri,
+                    );
+                }
                 continue;
             };
-            if element.set_items_source(binding.collection()) {
-                binding.mark_bound(&uri);
-            } else {
-                warn!("NoesisItems: element {name:?} is not an ItemsControl; skipped");
+            if binding.needs_bind(&uri) {
+                if element.set_items_source(binding.collection()) {
+                    binding.mark_bound(&uri);
+                } else {
+                    warn!("NoesisItems: element {name:?} is not an ItemsControl; skipped");
+                    continue;
+                }
+            }
+            binding.drive_selection(&mut element);
+        }
+    }
+
+    /// Poll each of view `entity`'s bound list controls, returning
+    /// `(x:Name, count, selected_index, current-typed-value)` for every control
+    /// whose snapshot changed since the last poll. Drives the
+    /// [`NoesisItemsCurrent`](crate::items::NoesisItemsCurrent) read-back.
+    pub(crate) fn poll_items_for(
+        &mut self,
+        entity: Entity,
+    ) -> Vec<(String, usize, i32, Option<ItemValue>)> {
+        let mut out = Vec::new();
+        let Some(scene) = self.scenes.get(&entity) else {
+            return out;
+        };
+        let Some(content) = scene.view.content() else {
+            return out;
+        };
+        for ((ent, name), binding) in &mut self.items_sources {
+            if *ent != entity {
+                continue;
+            }
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            if let Some((count, selected_index, current)) = binding.read_changed(&element) {
+                out.push((name.clone(), count, selected_index, current));
             }
         }
+        out
     }
 
     /// Whether view `entity` already has a built binding for `(element,

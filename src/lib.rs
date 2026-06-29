@@ -73,7 +73,7 @@ pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
-pub use items::{ItemsBinding, NoesisItems, NoesisItemsPlugin};
+pub use items::{ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin};
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
