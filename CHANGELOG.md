@@ -6,6 +6,21 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Scope-qualified element names.** Every bridge that targets an element by
+  `x:Name` (text, dependency properties, visibility, geometry, transforms,
+  brushes, styles, classes, focus, items, command/view-model `DataContext`
+  attach, binding targets and `ElementName` sources, …) now accepts a
+  `/`-separated path such as `"MainMenu/PlayButton"`. Each segment but the last
+  names a composed control to descend into; the final segment resolves inside
+  that control's own namescope. This lifts the long-standing limitation that a
+  root-level `FindName` cannot see the names declared inside a composed
+  `UserControl` (each such control owns a private namescope). Plain, unqualified
+  names are unchanged and resolve exactly as before. Read-backs echo the original
+  qualified string you supplied, so two controls that each contain an
+  `"OkButton"` stay distinguishable.
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into

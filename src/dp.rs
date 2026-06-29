@@ -36,6 +36,11 @@
 //! }
 //! ```
 //!
+//! Each `x:Name` may be **scope-qualified** with `/` (e.g.
+//! `"Settings/VolumeSlider"`) to reach a property on an element inside a composed
+//! control, whose private namescope a root-level lookup can't see. Plain names
+//! are unchanged.
+//!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component, applies writes + polls the
 //! watch list against that view's live scene, and emits messages directly, with
