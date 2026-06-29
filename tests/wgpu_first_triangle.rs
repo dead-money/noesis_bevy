@@ -12,7 +12,9 @@ use std::ffi::c_void;
 
 use dm_noesis_bevy::render_device::WgpuRenderDevice;
 use noesis_runtime::render_device::RenderDevice;
-use noesis_runtime::render_device::types::{Batch, RenderState, SamplerState, Shader, UniformData};
+use noesis_runtime::render_device::types::{
+    Batch, BlendMode, RenderState, SamplerState, Shader, StencilMode, UniformData,
+};
 
 const TARGET_W: u32 = 256;
 const TARGET_H: u32 = 256;
@@ -24,10 +26,6 @@ const CLEAR_G: u8 = 0;
 const CLEAR_B: u8 = 255;
 const CLEAR_A: u8 = 255;
 
-// Deferred: the device's onscreen path currently renders nothing when driven
-// manually (offscreen-path device tests all pass). Tracked in TODO.md §1
-// ("Onscreen-path draw renders nothing"); un-ignore when that's fixed.
-#[ignore = "onscreen-path draw renders nothing — see TODO.md §1"]
 #[test]
 fn path_solid_first_triangle_fills_expected_pixels() {
     if let (Ok(name), Ok(key)) = (
@@ -115,7 +113,7 @@ async fn run_test() {
     // Construct WgpuRenderDevice with a fresh view of the target.
     let device_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
-    rd.set_onscreen_target(device_view);
+    rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
     // ── Build vertex / index / uniform data ────────────────────────────────
     // Triangle in clip space:
@@ -252,7 +250,11 @@ fn build_pos_color_vertices(verts: &[([f32; 2], [u8; 4])]) -> [u8; 36] {
 fn make_path_solid_batch(uniforms: &[f32; 16]) -> Batch {
     Batch {
         shader: Shader::PATH_SOLID,
-        render_state: RenderState::default(),
+        // color_enable must be true: RenderState::default() is `RenderState(0)`,
+        // whose bit-0 colorEnable is *false*, so build_pipeline sets an empty
+        // color-write mask and the triangle renders zero pixels. Noesis only
+        // emits color_enable=false for stencil-only MASK draws.
+        render_state: RenderState::new(true, BlendMode::Src, StencilMode::Disabled, false),
         stencil_ref: 0,
         single_pass_stereo: false,
         vertex_offset: 0,

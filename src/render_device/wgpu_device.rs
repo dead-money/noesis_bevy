@@ -43,7 +43,7 @@ use noesis_runtime::render_device::{
     TextureDesc, TextureHandle, TextureRect,
 };
 
-use crate::render_device::pipeline::{PipelineCache, PipelineKey};
+use crate::render_device::pipeline::{PipelineCache, PipelineKey, STENCIL_FORMAT};
 
 const DYNAMIC_VB_SIZE: u64 = 512 * 1024;
 const DYNAMIC_IB_SIZE: u64 = 128 * 1024;
@@ -72,10 +72,10 @@ const UNIFORM_RING_SLOTS: u32 = 1024;
 /// directly.
 const RT_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Stencil attachment format for render targets created with `needs_stencil`.
-/// wgpu's `Stencil8` is the tightest option that also covers depth-less
-/// clears; we pick it instead of D24S8 to save a byte per pixel.
-const RT_STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
+/// Stencil attachment format for render targets created with `needs_stencil`
+/// and the onscreen stencil. Shared with the pipeline cache so the pipeline's
+/// `depth_stencil` format matches the attachment.
+const RT_STENCIL_FORMAT: wgpu::TextureFormat = STENCIL_FORMAT;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum FramePhase {
@@ -139,6 +139,19 @@ pub struct WgpuRenderDevice {
     // [`WgpuRenderDevice::set_onscreen_target`] before the first onscreen
     // frame; its format must be [`RT_COLOR_FORMAT`].
     target_view: Option<wgpu::TextureView>,
+    // Stencil buffer for the onscreen target. The Noesis main (onscreen) render
+    // clips with the stencil buffer (e.g. ScrollViewer content viewport), so
+    // the intermediate needs one too. (Re)allocated by `set_onscreen_target`
+    // to match the target size.
+    onscreen_stencil: Option<GpuStencil>,
+    /// Whether the onscreen stencil has been cleared since the current frame's
+    /// `begin_onscreen_render`. Stencil starts undefined; Noesis assumes 0, so
+    /// the first onscreen draw clears it (mirrors the GL FBO's 0-init stencil).
+    onscreen_stencil_cleared: bool,
+    /// As above, for the offscreen RT bound by the latest `set_render_target`.
+    /// Reset on each `set_render_target` (which the protocol says discards the
+    /// surface's existing content).
+    current_rt_stencil_cleared: bool,
 
     phase: FramePhase,
     encoder: Option<wgpu::CommandEncoder>,
@@ -151,6 +164,12 @@ pub struct WgpuRenderDevice {
     /// the pattern pipeline without fabricating a Noesis-owned `Texture*`.
     /// Always `None` on the Noesis-driven path.
     forced_pattern: Option<(TextureHandle, SamplerState)>,
+
+    /// Test-only override for the group(3) image texture, mirroring
+    /// [`Self::forced_pattern`]. Lets standalone-wgpu tests exercise the
+    /// OPACITY / UPSAMPLE image path without a Noesis-owned `Texture*`.
+    /// Always `None` on the Noesis-driven path.
+    forced_image: Option<(TextureHandle, SamplerState)>,
 
     next_handle: u64,
 }
@@ -169,21 +188,30 @@ struct GpuTexture {
     num_levels: u32,
 }
 
+/// A stencil attachment owned by the device (onscreen target's stencil). The
+/// `texture` is kept alive for the lifetime of `view`; rendering binds `view`.
+struct GpuStencil {
+    #[allow(dead_code)] // keeps the allocation alive behind `view`
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
 /// A render target owned by the render device, reachable from a
 /// [`RenderTargetHandle`]. The associated resolve texture lives in the
 /// parent [`WgpuRenderDevice::textures`] map under `resolve_handle`.
 ///
-/// `resolve_handle` and `stencil` aren't read yet — the resolve texture is
-/// fetched directly via [`WgpuRenderDevice::texture`], and stencil attachment
-/// wiring lands with the stencil pipeline state in Phase 6. Kept so the
-/// resource is alive for its lifetime and so later phases don't have to
-/// restructure the map.
-#[allow(dead_code)] // resolve_handle + stencil read by Phase 6 + plugin cleanup
+/// `resolve_handle` isn't read after construction — the resolve texture is
+/// fetched directly via [`WgpuRenderDevice::texture`] — but it's kept so the
+/// resource stays alive for its lifetime. `stencil` (color/stencil texture +
+/// view) is read by `draw_batch` to attach the stencil for clip/mask draws.
 struct GpuRenderTarget {
     /// View rendered into by `draw_batch`. Same underlying texture as the
     /// resolve texture at `sample_count == 1`; Phase 4.B rejects greater
     /// counts so this always aliases the resolve.
     color_view: wgpu::TextureView,
+    #[allow(dead_code)] // kept to own the resolve texture's lifetime
     resolve_handle: TextureHandle,
     stencil: Option<(wgpu::Texture, wgpu::TextureView)>,
     width: u32,
@@ -447,11 +475,15 @@ impl WgpuRenderDevice {
             textures: HashMap::new(),
             render_targets: HashMap::new(),
             target_view: None,
+            onscreen_stencil: None,
+            onscreen_stencil_cleared: false,
+            current_rt_stencil_cleared: false,
             phase: FramePhase::Idle,
             encoder: None,
             current_rt: None,
             current_tile: None,
             forced_pattern: None,
+            forced_image: None,
             next_handle: 1,
         }
     }
@@ -462,6 +494,12 @@ impl WgpuRenderDevice {
     /// Production code never calls this.
     pub fn test_set_forced_pattern(&mut self, forced: Option<(TextureHandle, SamplerState)>) {
         self.forced_pattern = forced;
+    }
+
+    /// Test-only sibling of [`Self::test_set_forced_pattern`] for the group(3)
+    /// image texture. Production code never calls this.
+    pub fn test_set_forced_image(&mut self, forced: Option<(TextureHandle, SamplerState)>) {
+        self.forced_image = forced;
     }
 
     /// Build or fetch the cached pattern bind group for `(texture, state)`.
@@ -556,16 +594,48 @@ impl WgpuRenderDevice {
     /// Call every frame before driving a frame, or once at setup for
     /// fixed-target tests — either pattern is fine.
     ///
+    /// `width`/`height` are the target's pixel dimensions; the device keeps a
+    /// matching `Stencil8` buffer so the Noesis onscreen render can clip with
+    /// the stencil (`ScrollViewer` content viewport, `ClipToBounds`, opacity
+    /// masks). The stencil is reallocated only when the size changes.
+    ///
     /// # Panics
     ///
     /// Panics if called while a frame phase (offscreen or onscreen) is
     /// active — swap only between `end_*_render` and the next `begin_*_render`.
-    pub fn set_onscreen_target(&mut self, view: wgpu::TextureView) {
+    pub fn set_onscreen_target(&mut self, view: wgpu::TextureView, width: u32, height: u32) {
         assert_eq!(
             self.phase,
             FramePhase::Idle,
             "set_onscreen_target called while a frame phase is active",
         );
+        let need_alloc = self
+            .onscreen_stencil
+            .as_ref()
+            .is_none_or(|s| s.width != width || s.height != height);
+        if need_alloc {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("noesis_runtime onscreen stencil"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: RT_STENCIL_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.onscreen_stencil = Some(GpuStencil {
+                texture,
+                view,
+                width,
+                height,
+            });
+        }
         self.target_view = Some(view);
     }
 
@@ -773,9 +843,12 @@ const fn shader_uses_paint_texture(shader: u8) -> bool {
         || shader == Shader::OPACITY_PATTERN_MIRROR_U.0
         || shader == Shader::OPACITY_PATTERN_MIRROR_V.0
         || shader == Shader::OPACITY_PATTERN_MIRROR.0
+        // DOWNSAMPLE/UPSAMPLE read the source image at group(2) `pattern`.
+        || shader == Shader::DOWNSAMPLE.0
+        || shader == Shader::UPSAMPLE.0
     // OPACITY_SOLID has paint = vertex color (no texture). SDF_LINEAR /
-    // SDF_RADIAL / SDF_PATTERN_* / SHADOW_* / BLUR_* / UPSAMPLE_* land
-    // with their shader_defines entries.
+    // SDF_RADIAL / SDF_PATTERN_* / SHADOW / BLUR land with their
+    // shader_defines entries.
 }
 
 /// Resolve which (texture, sampler) to bind at group(2) for `batch` based
@@ -814,6 +887,10 @@ fn batch_paint_texture(batch: &Batch) -> Option<(TextureHandle, SamplerState)> {
             batch.ramps_handle().map(|h| (h, batch.ramps_sampler))
         }
         s if s == Shader::SDF_SOLID.0 => batch.glyphs_handle().map(|h| (h, batch.glyphs_sampler)),
+        // DOWNSAMPLE/UPSAMPLE source the (to-be-)blurred layer at group(2).
+        s if s == Shader::DOWNSAMPLE.0 || s == Shader::UPSAMPLE.0 => {
+            batch.pattern_handle().map(|h| (h, batch.pattern_sampler))
+        }
         _ => None,
     }
 }
@@ -830,7 +907,10 @@ const fn shader_uses_image_texture(shader: u8) -> bool {
         || shader == Shader::OPACITY_PATTERN_MIRROR_U.0
         || shader == Shader::OPACITY_PATTERN_MIRROR_V.0
         || shader == Shader::OPACITY_PATTERN_MIRROR.0
-    // SHADOW_*, BLUR_*, UPSAMPLE_* land with their shader_defines arms.
+        // UPSAMPLE blends the lower-res `image` (group 3) with `pattern`.
+        || shader == Shader::UPSAMPLE.0
+    // SHADOW / BLUR also read `image` but additionally need the `shadow`
+    // texture co-bound; they land when group(3) carries image+shadow.
 }
 
 fn wgpu_wrap_mode(wrap_raw: u8) -> wgpu::AddressMode {
@@ -1058,11 +1138,10 @@ impl RenderDevice for WgpuRenderDevice {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let resolve_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Stencil attachment. Phase 4.B allocates the texture but does NOT
-        // attach it to render passes yet — every ported pipeline still has
-        // `depth_stencil: None` so wgpu would error on a mismatch. Stencil
-        // write/test wiring lands with the MASK stencil pipeline upgrade in
-        // Phase 6. Allocating now keeps the memory accounting honest.
+        // Stencil attachment. `draw_batch` attaches this view when the RT has
+        // it, clears it once per frame, and builds pipelines with a matching
+        // `depth_stencil` state driven by the batch's stencil mode (see
+        // `PipelineKey::has_stencil` / `pipeline::depth_stencil_for`).
         let stencil = desc.needs_stencil.then(|| {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("{} stencil", desc.label)),
@@ -1192,6 +1271,7 @@ impl RenderDevice for WgpuRenderDevice {
                 }),
         );
         self.phase = FramePhase::Onscreen;
+        self.onscreen_stencil_cleared = false;
     }
 
     fn end_onscreen_render(&mut self) {
@@ -1217,6 +1297,10 @@ impl RenderDevice for WgpuRenderDevice {
         );
         self.current_rt = Some(handle);
         self.current_tile = None;
+        // SetRenderTarget discards the surface's existing content (per the
+        // RenderDevice protocol), so the next draw into this RT clears its
+        // stencil before Noesis builds clip masks on top.
+        self.current_rt_stencil_cleared = false;
     }
 
     fn begin_tile(&mut self, handle: RenderTargetHandle, tile: Tile) {
@@ -1279,7 +1363,36 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn draw_batch(&mut self, batch: &Batch) {
-        let key = PipelineKey::from_batch(batch);
+        // Resolve whether the active target carries a stencil attachment, and
+        // whether this is the first draw into it this frame (so we clear the
+        // stencil to 0 once — Noesis assumes a 0-initialized stencil and then
+        // manages it via Clear/Incr/Decr ops). Done before the pipeline key so
+        // `has_stencil` can drive the pipeline's depth_stencil declaration.
+        let (has_stencil, clear_stencil) = match self.phase {
+            FramePhase::Onscreen => {
+                let has = self.onscreen_stencil.is_some();
+                let clear = has && !self.onscreen_stencil_cleared;
+                self.onscreen_stencil_cleared = true;
+                (has, clear)
+            }
+            FramePhase::Offscreen => {
+                let rt_handle = self
+                    .current_rt
+                    .expect("draw_batch during offscreen phase without set_render_target");
+                let has = self
+                    .render_targets
+                    .get(&rt_handle)
+                    .expect("current_rt dangles")
+                    .stencil
+                    .is_some();
+                let clear = has && !self.current_rt_stencil_cleared;
+                self.current_rt_stencil_cleared = true;
+                (has, clear)
+            }
+            FramePhase::Idle => panic!("draw_batch outside begin/end_*_render"),
+        };
+
+        let key = PipelineKey::from_batch(batch, has_stencil);
 
         let (vs_offset, ps_offset) = self.upload_uniforms(batch);
         self.pipelines.ensure(key);
@@ -1300,12 +1413,14 @@ impl RenderDevice for WgpuRenderDevice {
 
         // Same shape for the group(3) image bind group used by EFFECT_OPACITY.
         let image_slot = if shader_uses_image_texture(batch.shader.0) {
-            let handle = batch.image_handle().expect(
-                "OPACITY-class batch with null image handle — Noesis should populate batch.image",
-            );
-            let state = batch.image_sampler;
-            let _ = self.image_bind_group_for(handle, state);
-            Some((handle, state))
+            let slot = self.forced_image.unwrap_or_else(|| {
+                let handle = batch.image_handle().expect(
+                    "OPACITY/UPSAMPLE batch with null image handle — Noesis should populate batch.image",
+                );
+                (handle, batch.image_sampler)
+            });
+            let _ = self.image_bind_group_for(slot.0, slot.1);
+            Some(slot)
         } else {
             None
         };
@@ -1320,13 +1435,14 @@ impl RenderDevice for WgpuRenderDevice {
         // active frame phase. Offscreen renders target the current RT's
         // color view and clip to `current_tile`; onscreen renders target
         // `target_view` with no scissor.
-        let (target_view, scissor) = match self.phase {
+        let (target_view, scissor, stencil_view) = match self.phase {
             FramePhase::Onscreen => {
                 let view = self
                     .target_view
                     .as_ref()
                     .expect("onscreen draw without set_onscreen_target");
-                (view, None)
+                let stencil = self.onscreen_stencil.as_ref().map(|s| &s.view);
+                (view, None, stencil)
             }
             FramePhase::Offscreen => {
                 let rt_handle = self
@@ -1342,10 +1458,16 @@ impl RenderDevice for WgpuRenderDevice {
                     let y_top = rt.height.saturating_sub(t.y + t.height);
                     (t.x, y_top, t.width, t.height)
                 });
-                (&rt.color_view, scissor)
+                let stencil = rt.stencil.as_ref().map(|(_, view)| view);
+                (&rt.color_view, scissor, stencil)
             }
             FramePhase::Idle => panic!("draw_batch outside begin/end_*_render"),
         };
+        debug_assert_eq!(
+            has_stencil,
+            stencil_view.is_some(),
+            "has_stencil must agree with the resolved stencil view",
+        );
 
         let pipeline = self.pipelines.get(key);
         let vertex_buffer = &self.vertex_buffer;
@@ -1371,6 +1493,23 @@ impl RenderDevice for WgpuRenderDevice {
             .as_mut()
             .expect("draw_batch outside begin/end_*_render");
 
+        // Attach the stencil iff the target has one. The first draw into a
+        // target this frame clears the stencil to 0; later draws load it so
+        // Noesis's clip stack (Incr/Decr/Equal) accumulates across batches.
+        let depth_stencil_attachment =
+            stencil_view.map(|view| wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: None,
+                stencil_ops: Some(wgpu::Operations {
+                    load: if clear_stencil {
+                        wgpu::LoadOp::Clear(0)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                }),
+            });
+
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("noesis_runtime draw_batch"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1382,11 +1521,14 @@ impl RenderDevice for WgpuRenderDevice {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
         });
         rpass.set_pipeline(pipeline);
+        if has_stencil {
+            rpass.set_stencil_reference(u32::from(batch.stencil_ref));
+        }
         rpass.set_bind_group(0, vs_bg, &[vs_offset]);
         rpass.set_bind_group(1, ps_bg, &[ps_offset]);
         rpass.set_bind_group(2, pattern_bg, &[]);

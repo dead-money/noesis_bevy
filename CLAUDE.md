@@ -43,7 +43,7 @@ Deviating from these is a design change — raise it before implementing.
 
 The actionable work list lives in [`TODO.md`](./TODO.md) (render device, compositing, Bevy integration). Feature-exposure gaps in the FFI surface live in [`../dm_noesis_runtime/TODO.md`](https://github.com/dead-money/dm_noesis_runtime). Two constraints worth knowing while working:
 
-- **Effects shaders are the largest gap.** Opacity / Shadow / Blur / Downsample / Upsample are unimplemented, so scenes needing them (`Transform3D.xaml`, `Effects.xaml`) panic on `Shader(49)=DOWNSAMPLE`.
+- **Effects shaders are the largest gap.** Opacity / Downsample / Upsample are implemented; `Shadow` / `Blur` (and the custom `ShaderEffect`) are not, so scenes needing drop-shadow or blur (`Transform3D.xaml`, `Effects.xaml`) still panic on `Shader(50)=SHADOW` / `Shader(51)=BLUR`. See [`TODO.md`](./TODO.md) §1 for the remaining bind-group/uniform plumbing.
 - **`DrawingBrush` is unimplemented by Noesis itself** — the SDK has only `SolidColorBrush`, `ImageBrush`, `VisualBrush`, `LinearGradientBrush`, `RadialGradientBrush`. XAML using `<DrawingBrush>` silently drops the fill, and `VisualBrush` only paints when its `Visual` is in the logical tree. The real path for tiled visuals is `ImageBrush`. This is not ours to fix.
 
 ## Commands

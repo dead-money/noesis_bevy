@@ -111,6 +111,12 @@ struct VsOut {
     // fragment uses dFdx(st1) to size the AA window per fragment.
     @location(3) st1: vec2<f32>,
 #endif
+#ifdef DOWNSAMPLE
+    // EFFECT_DOWNSAMPLE box-filters four taps; the vertex shader spreads
+    // attr_uv0 ± attr_uv1 into uv0..uv3 (GL Shader.140.vert DOWNSAMPLE block).
+    @location(8) uv2: vec2<f32>,
+    @location(9) uv3: vec2<f32>,
+#endif
 }
 
 // ─── Vertex shader ─────────────────────────────────────────────────────────
@@ -126,11 +132,22 @@ fn vs_main(in: VsIn) -> VsOut {
 #ifdef HAS_COLOR
     out.color = in.color;
 #endif
+#ifdef DOWNSAMPLE
+    // 4-tap box filter offsets (GL Shader.140.vert DOWNSAMPLE): uv0 is the
+    // tap centre, uv1 carries the ±offset. Overrides the plain HAS_UV0/UV1
+    // pass-through below (guarded by #ifndef DOWNSAMPLE).
+    out.uv0 = in.uv0 + vec2<f32>(in.uv1.x, in.uv1.y);
+    out.uv1 = in.uv0 + vec2<f32>(in.uv1.x, -in.uv1.y);
+    out.uv2 = in.uv0 + vec2<f32>(-in.uv1.x, in.uv1.y);
+    out.uv3 = in.uv0 + vec2<f32>(-in.uv1.x, -in.uv1.y);
+#endif
+#ifndef DOWNSAMPLE
 #ifdef HAS_UV0
     out.uv0 = in.uv0;
 #endif
 #ifdef HAS_UV1
     out.uv1 = in.uv1;
+#endif
 #endif
 #ifdef HAS_COVERAGE
     out.coverage = in.coverage;
@@ -313,6 +330,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // opacity from `(opacity * paint.a)`.
     return textureSample(image_texture, image_sampler, in.uv1)
         * (opacity * paint.a);
+#endif
+
+#ifdef EFFECT_DOWNSAMPLE
+    // GL ref Shader.140.frag EFFECT_DOWNSAMPLE: average four taps of the
+    // source (`pattern`, group 2) at the offset UVs computed in the VS. Halves
+    // resolution per pass; the blur/effect resolve chain ping-pongs this.
+    return (textureSample(paint_texture, paint_sampler, in.uv0)
+        + textureSample(paint_texture, paint_sampler, in.uv1)
+        + textureSample(paint_texture, paint_sampler, in.uv2)
+        + textureSample(paint_texture, paint_sampler, in.uv3))
+        * 0.25;
+#endif
+
+#ifdef EFFECT_UPSAMPLE
+    // GL ref Shader.140.frag EFFECT_UPSAMPLE:
+    //   mix(texture(image, uv1), texture(pattern, uv0), color.a)
+    // `image` (group 3) is the lower-resolution accumulated pass; `pattern`
+    // (group 2) is the matching-resolution source; color.a is the blend weight.
+    return mix(
+        textureSample(image_texture, image_sampler, in.uv1),
+        textureSample(paint_texture, paint_sampler, in.uv0),
+        in.color.a,
+    );
 #endif
 
 #ifdef EFFECT_SDF

@@ -17,28 +17,23 @@ this side is then mechanical glue once the runtime exposes the primitive. So thi
 The render device is entirely ours, so every shader gap is this crate's work. This is the
 largest open area.
 
-- **Effects pipeline.** Opacity / Shadow / Blur / Downsample / Upsample are unimplemented;
-  scenes that need them (`Transform3D.xaml`, `Effects.xaml`) panic on
-  `Shader(49)=DOWNSAMPLE`. This also covers the offscreen render-target effect path (blur,
-  shadow, opacity groups, custom `ShaderEffect` via `Batch.pixelShader`).
+- **Effects pipeline (partial).** Opacity / Downsample / Upsample are implemented; the
+  separable-blur resolve halves (`DOWNSAMPLE` 49, `UPSAMPLE` 48) and opacity groups render
+  over the offscreen RT path (`tests/wgpu_effects.rs`). **Still open:** `SHADOW` (50) and
+  `BLUR` (51) need the `shadow` texture co-bound with `image` — blocked by the 4-bind-group
+  `downlevel_defaults` limit (groups 0–3 are full), so `shadow` must share group(3) with
+  `image` (texture+sampler at bindings 2/3), plus a second pixel uniform for `cbuffer1_ps`
+  (group(1) binding(1)). `CUSTOM_EFFECT` (52) needs user pixel-shader compilation via
+  `Batch.pixelShader`. Scenes using drop-shadow/blur still panic until SHADOW/BLUR land.
 - **`SDF_LCD_SOLID`.** Subpixel text needs dual-source blending (`@blend_src(1)` fragment
   output). Separate kickoff from `SDF_SOLID`.
-- **Onscreen-path draw renders nothing (`tests/wgpu_first_triangle.rs`, `#[ignore]`d).** Driving
-  the device's *onscreen* path manually — `set_onscreen_target` → `begin_onscreen_render` →
-  `draw_batch(PATH_SOLID)` → `end_onscreen_render` — with a hand-built identity-projection
-  triangle produces **zero** non-clear pixels (`cull_mode: None`, so not culling). Every
-  *offscreen*-path device test passes (`wgpu_{offscreen_rt,pattern,radial,uniform_ring,
-  multi_shader}`), so the regression is specific to the onscreen entry the test exercises.
-  The onscreen path also backs `bake` and the live intermediate, so this is worth a real
-  look. First step: confirm whether the vs projection uniform reaches the draw (a zeroed
-  cbuffer collapses the triangle to the origin → nothing rasterised). Un-ignore the test when fixed.
-- **Stencil not attached.** `create_render_target` allocates a stencil texture but no
-  pipeline declares `depth_stencil`. Suspected cause of the **ScrollViewer content-viewport
-  blank under theme** bug (`03_scroll.xaml` + `NOESIS_VIEWER_THEME=DarkBlue`: scrollbar
-  chrome renders but the content interior is flat white and spills its clip). Next step: log
-  `draw_batch` for one frame and diff against the `scrollviewer-no-theme` baseline in
-  `tests/headless_offscreen_brush.rs`. Other suspect: `LoadOp::Load` on a fresh RT reading
-  uninitialised memory.
+
+(Resolved: the onscreen-path draw bug — the manual `wgpu_first_triangle` path was driven with
+`RenderState::default()`, whose colorEnable bit is 0, so the pipeline used an empty color-write
+mask; the test now passes with a proper render state. Stencil is now attached: render targets
+and the onscreen intermediate carry a `Stencil8` buffer, pipelines declare a `depth_stencil`
+state from the batch's stencil mode, and `draw_batch` clears + accumulates the clip stack —
+`tests/wgpu_stencil_clip.rs`.)
 
 ## 2. Compositing & perf
 

@@ -314,9 +314,34 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_OPACITY");
         }
 
+        // ─── EFFECT_DOWNSAMPLE / EFFECT_UPSAMPLE (blur/effect resolve) ─────
+        // GL ref FSHADER(DOWNSAMPLE) / FSHADER(UPSAMPLE) — no PAINT. These
+        // form the separable-blur resolve chain Noesis runs in the offscreen
+        // phase. DOWNSAMPLE box-filters four taps of `pattern` (group 2) at
+        // VS-computed UVs (vertex shader sets the DOWNSAMPLE flag to spread
+        // uv0 ± uv1 into uv0..uv3). UPSAMPLE blends the lower-res `image`
+        // (group 3) with the same-res `pattern` (group 2) by `color.a`.
+        n if n == Shader::DOWNSAMPLE.0 => {
+            d.insert("HAS_UV0");
+            d.insert("HAS_UV1");
+            d.insert("DOWNSAMPLE");
+            d.insert("HAS_PAINT_TEXTURE");
+            d.insert("EFFECT_DOWNSAMPLE");
+        }
+        n if n == Shader::UPSAMPLE.0 => {
+            d.insert("HAS_COLOR");
+            d.insert("HAS_UV0");
+            d.insert("HAS_UV1");
+            d.insert("HAS_PAINT_TEXTURE");
+            d.insert("HAS_IMAGE_TEXTURE");
+            d.insert("EFFECT_UPSAMPLE");
+        }
+
         other => panic!(
             "Shader({other}) not yet ported to noesis.wgsl. \
-             Phase 3 is rolling out variants incrementally — extend \
+             SHADOW (50) / BLUR (51) need a `shadow` texture co-bound with \
+             `image` plus the cbuffer1_ps uniform; CUSTOM_EFFECT (52) needs \
+             user pixel-shader compilation. Extend \
              shader_defines::defines_for_shader and noesis.wgsl together."
         ),
     }

@@ -29,18 +29,76 @@ pub struct PipelineKey {
     pub shader: u8,
     pub render_state: u8,
     pub vertex_format: u8,
+    /// Whether the render pass this pipeline draws into has a stencil
+    /// attachment. wgpu requires the pipeline's `depth_stencil` presence to
+    /// match the pass's `depth_stencil_attachment`, and the same
+    /// `(shader, render_state, vertex_format)` can be drawn both into a
+    /// stenciled offscreen RT (and the onscreen intermediate) and into a
+    /// stencil-less RT — so it has to be part of the key.
+    pub has_stencil: bool,
 }
 
 impl PipelineKey {
     #[must_use]
-    pub fn from_batch(batch: &Batch) -> Self {
+    pub fn from_batch(batch: &Batch, has_stencil: bool) -> Self {
         let vshader = VERTEX_FOR_SHADER[batch.shader.0 as usize];
         let vfmt = FORMAT_FOR_VERTEX[vshader as usize];
         Self {
             shader: batch.shader.0,
             render_state: batch.render_state.0,
             vertex_format: vfmt,
+            has_stencil,
         }
+    }
+}
+
+/// Stencil attachment format used by render targets and the onscreen stencil.
+/// `Stencil8` is the tightest format that covers Noesis's clip/mask stencil
+/// ops; we don't allocate depth because the device exposes no depth-buffered
+/// caps (the `*_ZTest` stencil modes degrade to their non-depth twins).
+pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
+
+/// Build the `wgpu::DepthStencilState` for a `RenderState`'s stencil mode.
+///
+/// Ports `GLRenderDevice::SetRenderState`'s `StencilMode` dispatch
+/// (`glStencilFunc` / `glStencilOp`). The stencil *reference* is dynamic and
+/// applied per draw via `set_stencil_reference`, not baked here. Depth is
+/// always `Always` / no-write: `Stencil8` carries no depth aspect, and the
+/// `Disabled_ZTest` / `Equal_Keep_ZTest` modes (which need a depth buffer for
+/// 3D-transformed UI) degrade to their non-depth equivalents.
+fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
+    use wgpu::{CompareFunction, StencilOperation};
+
+    let (compare, pass_op) = match render_state.stencil_mode_raw() {
+        // Disabled / Disabled_ZTest — stencil test off (always pass, no write).
+        0 | 5 => (CompareFunction::Always, StencilOperation::Keep),
+        // Equal_Keep / Equal_Keep_ZTest — pass where stencil == ref; keep.
+        1 | 6 => (CompareFunction::Equal, StencilOperation::Keep),
+        // Equal_Incr — pass where == ref; increment (wrap) on pass.
+        2 => (CompareFunction::Equal, StencilOperation::IncrementWrap),
+        // Equal_Decr — pass where == ref; decrement (wrap) on pass.
+        3 => (CompareFunction::Equal, StencilOperation::DecrementWrap),
+        // Clear — always pass; zero the stencil (GL: ALWAYS + ZERO/ZERO/ZERO).
+        4 => (CompareFunction::Always, StencilOperation::Zero),
+        other => panic!("unknown StencilMode raw value: {other}"),
+    };
+    let face = wgpu::StencilFaceState {
+        compare,
+        fail_op: StencilOperation::Keep,
+        depth_fail_op: StencilOperation::Keep,
+        pass_op,
+    };
+    wgpu::DepthStencilState {
+        format: STENCIL_FORMAT,
+        depth_write_enabled: false,
+        depth_compare: CompareFunction::Always,
+        stencil: wgpu::StencilState {
+            front: face,
+            back: face,
+            read_mask: 0xff,
+            write_mask: 0xff,
+        },
+        bias: wgpu::DepthBiasState::default(),
     }
 }
 
@@ -186,6 +244,10 @@ fn build_pipeline(
     } else {
         wgpu::ColorWrites::empty()
     };
+    // The pipeline must declare a depth_stencil state iff the render pass it's
+    // used in has a stencil attachment (see `PipelineKey::has_stencil`). The
+    // stencil op/compare comes from the render state's stencil mode.
+    let depth_stencil = key.has_stencil.then(|| depth_stencil_for(render_state));
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(&format!(
@@ -208,7 +270,7 @@ fn build_pipeline(
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
         },
-        depth_stencil: None,
+        depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &module,

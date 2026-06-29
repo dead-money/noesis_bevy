@@ -25,6 +25,7 @@ pub mod font;
 pub mod geometry;
 pub mod image;
 pub mod imaging;
+pub mod inlines;
 pub mod input;
 pub mod integration;
 pub mod items;
@@ -34,10 +35,12 @@ pub mod plain_vm;
 pub mod render;
 pub mod render_device;
 pub mod routed_events;
+pub mod styles;
 pub mod svg;
 pub mod text;
 pub mod theme;
 pub mod transforms;
+pub mod transforms3d;
 pub mod typography;
 pub mod viewmodel;
 pub mod visibility;
@@ -80,12 +83,17 @@ pub use image::{
 pub use imaging::{
     ImageBitmap, ImageReadback, NoesisImageChanged, NoesisImaging, NoesisImagingPlugin,
 };
+pub use inlines::{
+    InlineSpec, InlinesReadback, NoesisInlines, NoesisInlinesChanged, NoesisInlinesPlugin,
+};
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use integration::{
     CursorType, NoesisCursorRequested, NoesisIntegrationPlugin, NoesisOpenUrl, NoesisPlayAudio,
     get_culture, open_url, play_audio, set_culture,
 };
-pub use items::{ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin};
+pub use items::{
+    CollectionViewOp, ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin,
+};
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
@@ -94,11 +102,15 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
+pub use styles::{NoesisStyles, NoesisStylesPlugin, PropertyTrigger, StyleSpec};
 pub use svg::{NoesisSvg, NoesisSvgChanged, NoesisSvgPlugin};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use transforms::{
     NoesisTransform, NoesisTransformChanged, NoesisTransformPlugin, TransformSpec,
+};
+pub use transforms3d::{
+    NoesisTransform3D, NoesisTransform3DChanged, NoesisTransform3DPlugin, Transform3DSpec,
 };
 pub use typography::{
     FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
@@ -180,6 +192,7 @@ impl Plugin for NoesisPlugin {
             visibility::NoesisVisibilityPlugin,
             layout::NoesisLayoutPlugin,
             text::NoesisTextPlugin,
+            inlines::NoesisInlinesPlugin,
             geometry::NoesisGeometryPlugin,
         ));
         // Bridge group B — interaction + data bridges. New bridges append here.
@@ -191,7 +204,10 @@ impl Plugin for NoesisPlugin {
             commands::NoesisCommandsPlugin,
             items::NoesisItemsPlugin,
             dp::NoesisDpPlugin,
-            transforms::NoesisTransformPlugin,
+            (
+                transforms::NoesisTransformPlugin,
+                transforms3d::NoesisTransform3DPlugin,
+            ),
             brushes::NoesisBrushesPlugin,
             animation::NoesisAnimationPlugin,
             typography::NoesisTypographyPlugin,
@@ -200,5 +216,7 @@ impl Plugin for NoesisPlugin {
             svg::NoesisSvgPlugin,
             diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
+        // Bridge group C — appended past group B's 15-element `Plugins` limit.
+        app.add_plugins((styles::NoesisStylesPlugin,));
     }
 }
