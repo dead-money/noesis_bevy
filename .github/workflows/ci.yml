@@ -8,17 +8,19 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Opt in to Node 24 for any JS-based actions. Node 20 is deprecated
-  # and will be forced off by GitHub in June 2026; this flips the
-  # switch early so we're running on the same Node they'll default to.
+  # Opt in to Node 24 for any JS-based actions. Node 20 is deprecated and will be
+  # forced off by GitHub in June 2026; this flips the switch early so we run on
+  # the same Node they'll default to.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
-# fmt is the only build-step we can run on a hosted runner: cargo
-# build / clippy / test all transitively pull in dm_noesis_runtime,
-# whose build.rs requires the Noesis Native SDK (see
-# ../dm_noesis_runtime/README.md "Setup"). The SDK is closed-source
-# and not available on GitHub-hosted runners.
+# This crate depends on noesis_runtime. Until runtime 0.10 is on crates.io, the
+# manifest patches it to the sibling checkout (see Cargo.toml [patch.crates-io]),
+# so the jobs that resolve dependencies check out noesis_runtime alongside this
+# repo. Both repos must be public for the token-free sibling checkout; once
+# runtime 0.10 is published you can drop the patch and the sibling checkout (see
+# RELEASING.md).
 jobs:
+  # Runs everywhere, including fork PRs. No SDK and no dependency resolution.
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -33,3 +35,60 @@ jobs:
 
       - name: cargo fmt
         run: cargo fmt --all --check
+
+  # Catches broken intra-doc links before they reach docs.rs. DOCS_RS makes both
+  # build scripts skip the native compile, so this needs no SDK and runs on hosted.
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    env:
+      DOCS_RS: "1"
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - name: Checkout noesis_bevy
+        uses: actions/checkout@v6
+        with:
+          path: noesis_bevy
+
+      - name: Checkout noesis_runtime (sibling for the patched dependency)
+        uses: actions/checkout@v6
+        with:
+          repository: dead-money/noesis_runtime
+          path: noesis_runtime
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo doc
+        working-directory: noesis_bevy
+        run: cargo doc --no-deps
+
+  # build / clippy / test need the closed-source Noesis SDK, which only lives on
+  # our self-hosted runner. Never run untrusted fork-PR code there: skip any PR
+  # whose head is a fork. Same-repo branch PRs and pushes to main/tags are fine.
+  build-test:
+    name: build • clippy • test
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, noesis-sdk]
+    steps:
+      - name: Checkout noesis_bevy
+        uses: actions/checkout@v6
+        with:
+          path: noesis_bevy
+          # Keep target/ between runs for fast incremental builds.
+          clean: false
+
+      - name: Checkout noesis_runtime (sibling for the patched dependency)
+        uses: actions/checkout@v6
+        with:
+          repository: dead-money/noesis_runtime
+          path: noesis_runtime
+          clean: false
+
+      - name: cargo clippy
+        working-directory: noesis_bevy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: noesis_bevy
+        run: cargo test --all-features
