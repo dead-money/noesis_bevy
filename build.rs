@@ -10,6 +10,13 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=DEP_NOESIS_LIB_DIR");
 
+    // docs.rs (and the `doc` CI job) build with no Noesis SDK. noesis_runtime's
+    // build.rs short-circuits on DOCS_RS before it emits DEP_NOESIS_LIB_DIR, so
+    // there's no rpath to re-emit and nothing links. Skip.
+    if std::env::var_os("DOCS_RS").is_some() {
+        return;
+    }
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         // Windows: Noesis.dll must sit next to the .exe, not via rpath.
         return;

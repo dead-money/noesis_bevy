@@ -3380,7 +3380,7 @@ dependencies = [
 
 [[package]]
 name = "noesis_bevy"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "bevy",
  "bevy_render",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "noesis_bevy_derive"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "proc-macro2",
  "quote",

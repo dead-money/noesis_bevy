@@ -1,9 +1,16 @@
 [package]
 name = "noesis_bevy_derive"
-version = "0.1.0"
+version = "0.10.0"
 edition = "2024"
-description = "#[derive(NoesisViewModel)] for noesis_bevy — bind a plain Rust struct to XAML by field name."
+rust-version = "1.87"
+authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
+description = "derive(NoesisViewModel) for noesis_bevy: bind a plain Rust struct to XAML by field name."
+repository = "https://github.com/dead-money/noesis_bevy"
 license = "MIT"
+keywords = ["bevy", "noesis", "xaml", "derive", "macro"]
+categories = ["gui", "game-development"]
+# Not published yet. Published just before noesis_bevy (which depends on it); see
+# the parent RELEASING.md. Remove as the deliberate go-live step.
 publish = false
 
 [lib]
