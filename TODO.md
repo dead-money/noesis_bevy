@@ -28,8 +28,9 @@ runtime/FFI work first are in §4.
 
 ## 3. Platform
 
-- **Windows.** `build.rs` is Linux-only. Needs MSVC `Noesis.lib` import-library handling and DLL
-  discovery/copy. Shared concern with the runtime crate's `build.rs`; coordinate the two.
+- **Windows CI.** Windows builds are handled (the runtime crate links MSVC `Noesis.lib`; this crate's
+  `build.rs` stages `Noesis.dll` next to the test and example binaries), but not exercised in CI.
+  Verify with `cargo test` on a Windows box with the SDK, and add a Windows runner if we want it gated.
 
 ## 4. Runtime
 

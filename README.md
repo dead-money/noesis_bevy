@@ -1,6 +1,8 @@
 # noesis_bevy
 
 [![CI](https://github.com/dead-money/noesis_bevy/actions/workflows/ci.yml/badge.svg)](https://github.com/dead-money/noesis_bevy/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/noesis_bevy.svg)](https://crates.io/crates/noesis_bevy)
+[![docs.rs](https://docs.rs/noesis_bevy/badge.svg)](https://docs.rs/noesis_bevy)
 
 A Bevy 0.18 plugin that renders [Noesis GUI](https://www.noesisengine.com/) XAML-driven UI into your frame. Noesis draws the scene on Bevy's own GPU; the plugin composites the result onto a camera.
 
@@ -19,7 +21,7 @@ This crate links against the [Noesis Native SDK](https://www.noesisengine.com/),
 
 This release targets **Noesis Native SDK 3.2.13** and is compiled against that version's headers, so a different SDK version may not link. Match it unless you've verified a newer one.
 
-This initial release is **Linux only**. Windows support is planned but not done.
+Supported targets are **Linux** (`x86_64`, `aarch64`) and **Windows** (`x86_64-pc-windows-msvc`). Linux is the primary target; Windows support is newer.
 
 Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Without them the UI runs for a while, then blanks the view with a "Trial expired" message.
 
