@@ -371,6 +371,15 @@ pub(crate) struct NoesisRenderState {
     /// pass after a scene rebuild); released in [`Drop`] before the registered
     /// device. See [`crate::binding`].
     binding_entries: HashMap<(Entity, String, String), BindingEntry>,
+    /// Process-global integration callback guards (cursor / open-URL /
+    /// play-audio) registered once by [`crate::integration::NoesisIntegrationPlugin`].
+    /// Owned here — rather than in that plugin's own resource — so their `Drop`
+    /// (which unregisters via FFI) is guaranteed to run BEFORE `shutdown()`:
+    /// Bevy gives no drop order between two main-world resources, and
+    /// unregistering after `shutdown()` dereferences torn-down engine state.
+    /// Type-erased so `render` needn't name the per-hook guard types. See
+    /// [`Self::own_integration_guards`].
+    integration_guards: Vec<Box<dyn std::any::Any + Send>>,
 }
 
 struct SceneInstance {
@@ -529,7 +538,16 @@ impl NoesisRenderState {
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
             binding_entries: HashMap::new(),
+            integration_guards: Vec::new(),
         }
+    }
+
+    /// Take ownership of the process-global integration callback guards so they
+    /// drop before `shutdown()` (see [`Self::integration_guards`]). The caller
+    /// registers exactly once; guards already present are replaced. Main-thread
+    /// only.
+    pub(crate) fn own_integration_guards(&mut self, guards: Vec<Box<dyn std::any::Any + Send>>) {
+        self.integration_guards = guards;
     }
 
     // Migration scaffolding (Phase 1a step ii): the name-keyed bridges
@@ -2732,6 +2750,9 @@ impl Drop for NoesisRenderState {
         drop(self.registered_provider.take());
         drop(self.registered_fonts.take());
         drop(self.registered_textures.take());
+        // Process-global integration callbacks: unregister (their `Drop`) while
+        // the engine is still up — after `shutdown()` it would crash.
+        self.integration_guards.clear();
         noesis_runtime::shutdown();
     }
 }

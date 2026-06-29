@@ -26,6 +26,7 @@ pub mod geometry;
 pub mod image;
 pub mod imaging;
 pub mod input;
+pub mod integration;
 pub mod items;
 pub mod layout;
 pub mod markup;
@@ -80,6 +81,10 @@ pub use imaging::{
     ImageBitmap, ImageReadback, NoesisImageChanged, NoesisImaging, NoesisImagingPlugin,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
+pub use integration::{
+    CursorType, NoesisCursorRequested, NoesisIntegrationPlugin, NoesisOpenUrl, NoesisPlayAudio,
+    get_culture, open_url, play_audio, set_culture,
+};
 pub use items::{ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin};
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
@@ -164,6 +169,7 @@ impl Plugin for NoesisPlugin {
             image::ImageAssetPlugin,
             render::NoesisRenderPlugin,
             input::NoesisInputPlugin,
+            integration::NoesisIntegrationPlugin,
         ));
         // Bridge group A — the foundational per-element bridges.
         app.add_plugins((
