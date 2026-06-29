@@ -12,6 +12,7 @@ use bevy::prelude::*;
 
 pub mod bake;
 pub mod classes;
+pub mod commands;
 pub mod dp;
 pub mod events;
 pub mod focus;
@@ -33,6 +34,10 @@ pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
+pub use commands::{
+    CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
+    SharedCommandQueue,
+};
 /// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
 pub use dm_noesis_bevy_derive::NoesisViewModel;
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
@@ -129,6 +134,7 @@ impl Plugin for NoesisPlugin {
                 geometry::NoesisGeometryPlugin,
                 focus::NoesisFocusPlugin,
                 viewmodel::NoesisViewModelPlugin,
+                commands::NoesisCommandsPlugin,
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,
             ),

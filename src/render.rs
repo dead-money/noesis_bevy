@@ -52,6 +52,7 @@ use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
+use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::ItemsBinding;
 use crate::plain_vm::PlainVmEntry;
@@ -342,6 +343,13 @@ pub(crate) struct NoesisRenderState {
     /// [`Self::view_models`]; released in [`Drop`] before the registered device.
     /// See [`crate::plain_vm`].
     plain_vms: HashMap<(Entity, std::any::TypeId), PlainVmEntry>,
+    /// Live Rust-owned command hosts (`ICommand` bridge). Each owns a
+    /// `ClassInstance` + `ClassRegistration` + the per-command `Command`
+    /// objects, bound as a scene element's `DataContext`. Outlives scene
+    /// rebuilds (re-bound by the attach pass) and is released in `Drop`
+    /// before the registered device. Keyed by view entity. See
+    /// [`crate::commands`].
+    command_hosts: HashMap<Entity, CommandEntry>,
 }
 
 struct SceneInstance {
@@ -443,6 +451,7 @@ impl NoesisRenderState {
             view_models: HashMap::new(),
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
+            command_hosts: HashMap::new(),
         }
     }
 
@@ -526,6 +535,78 @@ impl NoesisRenderState {
                 entry.mark_attached(uri);
             } else {
                 warn!("NoesisViewModel: set_data_context returned false for view {entity:?}");
+            }
+        }
+    }
+
+    /// Build view `entity`'s [`CommandEntry`] on first sight (register the Noesis
+    /// command-host class, instantiate, build a `Command` per declared name tagged
+    /// with `entity` and pushing to `queue`). No-op if it already exists.
+    /// Main-thread only.
+    pub(crate) fn ensure_commands(
+        &mut self,
+        entity: Entity,
+        def: &CommandsDef,
+        queue: &SharedCommandQueue,
+    ) {
+        if self.command_hosts.contains_key(&entity) {
+            return;
+        }
+        match CommandEntry::build(entity, def, queue) {
+            Some(entry) => {
+                self.command_hosts.insert(entity, entry);
+            }
+            None => warn!(
+                "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
+                def.class_name(),
+            ),
+        }
+    }
+
+    /// Apply queued enabled-state edits to view `entity`'s command host. Unknown
+    /// command names log a warning. No-op when the host isn't built yet.
+    pub(crate) fn apply_command_enables_for(&mut self, entity: Entity, enables: &[(String, bool)]) {
+        let Some(entry) = self.command_hosts.get(&entity) else {
+            return;
+        };
+        for (name, value) in enables {
+            if !entry.set_enabled(name, *value) {
+                warn!("NoesisCommands: view {entity:?} has no command {name:?}");
+            }
+        }
+    }
+
+    /// Attach any not-yet-attached command host as its target's `DataContext` in
+    /// its own view's scene. No-op until that view (and any named target) exists;
+    /// retries each frame, and re-attaches after a scene rebuild. Mirrors
+    /// [`Self::attach_view_models`].
+    pub(crate) fn attach_commands(&mut self) {
+        for (&entity, entry) in &mut self.command_hosts {
+            let Some(scene) = self.scenes.get(&entity) else {
+                continue;
+            };
+            let Some(content) = scene.view.content() else {
+                continue;
+            };
+            let uri = &scene.built_for_uri;
+            if !entry.needs_attach(uri) {
+                continue;
+            }
+            let target = match entry.target() {
+                AttachTarget::Root => scene.view.content(),
+                AttachTarget::Named(name) => content.find_name(name),
+            };
+            let Some(mut element) = target else {
+                warn!(
+                    "NoesisCommands: attach target for view {:?} not found in scene {:?}",
+                    entity, scene.built_for_uri,
+                );
+                continue;
+            };
+            if element.set_data_context(entry.instance()) {
+                entry.mark_attached(uri);
+            } else {
+                warn!("NoesisCommands: set_data_context returned false for view {entity:?}");
             }
         }
     }
@@ -1593,6 +1674,9 @@ impl NoesisRenderState {
                 entry.reset_attach();
             }
         }
+        if let Some(entry) = self.command_hosts.get_mut(&entity) {
+            entry.reset_attach();
+        }
         let Some(mut scene) = self.scenes.remove(&entity) else {
             return;
         };
@@ -1631,6 +1715,7 @@ impl Drop for NoesisRenderState {
         self.view_models.clear();
         self.items_sources.clear();
         self.plain_vms.clear();
+        self.command_hosts.clear();
         self.teardown_bake_rig();
         drop(self.registered_device.take());
         drop(self.registered_provider.take());
