@@ -29,6 +29,7 @@ pub mod text;
 pub mod theme;
 pub mod viewmodel;
 pub mod visibility;
+pub mod visual_state;
 pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
@@ -59,6 +60,7 @@ pub use viewmodel::{
     ViewModelChangeForwarder, ViewModelDef, VmValue,
 };
 pub use visibility::{NoesisVisibility, NoesisVisibilityPlugin};
+pub use visual_state::{NoesisVisualState, NoesisVisualStatePlugin, StateRequest};
 pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, XamlRegistry};
 
 /// Per-developer Indie license credentials.
@@ -128,6 +130,7 @@ impl Plugin for NoesisPlugin {
                 text::NoesisTextPlugin,
                 geometry::NoesisGeometryPlugin,
                 focus::NoesisFocusPlugin,
+                visual_state::NoesisVisualStatePlugin,
                 viewmodel::NoesisViewModelPlugin,
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,

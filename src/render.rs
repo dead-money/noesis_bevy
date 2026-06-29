@@ -944,6 +944,43 @@ impl NoesisRenderState {
         }
     }
 
+    /// Apply view `entity`'s desired visual-state transitions
+    /// (`x:Name → (state, use_transitions)`) via `VisualStateManager::GoToState`.
+    /// No-op until the scene exists; missing names warn, and a failed transition
+    /// (non-templated element, or unknown state) warns too.
+    pub(crate) fn apply_visual_state_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, (String, bool)>,
+    ) {
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, (state, use_transitions)) in desired {
+            // `go_to_state` takes `&self`, so no `mut` binding needed.
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisVisualState: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if !element.go_to_state(state, *use_transitions) {
+                warn!(
+                    "NoesisVisualState: GoToState({state:?}) failed for {name:?} \
+                     in scene {:?} (not a templated control, or unknown state)",
+                    scene.built_for_uri,
+                );
+            }
+        }
+    }
+
     /// Reconcile view `entity`'s `BaseButton::Click` subscriptions against its
     /// [`NoesisClickWatch`] component's names. Each callback pushes
     /// `(entity, name)` so the emitted [`NoesisClicked`] carries the view.
