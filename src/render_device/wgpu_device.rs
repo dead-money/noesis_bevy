@@ -61,6 +61,12 @@ const VS_GLYPH_SIZE_OFFSET: usize = 64;
 // bytes), exposed in WGSL as `array<vec4<f32>, 2>`.
 const PS_UNIFORM0_SIZE: u64 = 32;
 
+// Pixel-shader uniform buffer 1: Noesis cbuffer1_ps. Declared float[128] in the
+// GL reference but only EFFECT_SHADOW (7 floats) / EFFECT_BLUR (1 float) read
+// it, so we bind the first 8 floats (32 bytes) as `array<vec4<f32>, 2>`. Bound
+// at group(1) binding(1); see the `HAS_CBUFFER1_PS` block in `noesis.wgsl`.
+const PS_UNIFORM1_SIZE: u64 = 32;
+
 // Upper bound on `draw_batch` calls per frame. Noesis.xaml is well under 100
 // batches; 1024 gives comfortable headroom. Raise if real scenes hit the cap.
 const UNIFORM_RING_SLOTS: u32 = 1024;
@@ -105,8 +111,12 @@ pub struct WgpuRenderDevice {
     // reads its own slice instead of racing on a single slot.
     vs_ring: UniformRing,
     vs_uniform_bind_group: wgpu::BindGroup,
+    // group(1): cbuffer0_ps at binding(0) (`ps_ring`) + cbuffer1_ps at
+    // binding(1) (`ps1_ring`). Both are dynamic-offset bindings in one bind
+    // group; each draw passes `[ps0_offset, ps1_offset]`.
     ps_ring: UniformRing,
-    ps_uniform0_bind_group: wgpu::BindGroup,
+    ps1_ring: UniformRing,
+    ps_uniform_bind_group: wgpu::BindGroup,
 
     // Pattern texture + sampler bind group (group 2). Shaders that don't
     // use PAINT_PATTERN still need a bind group at this slot since wgpu
@@ -118,15 +128,24 @@ pub struct WgpuRenderDevice {
     samplers: HashMap<SamplerState, wgpu::Sampler>,
     pattern_bind_groups: HashMap<(TextureHandle, SamplerState), wgpu::BindGroup>,
 
-    // Image texture + sampler bind group (group 3). Used by EFFECT_OPACITY
-    // (and the future SHADOW / BLUR / UPSAMPLE families). Same dummy-vs-
-    // real pattern as group(2): every pipeline binds *something* at
-    // group(3) because the layout is shared, but only opacity-class
-    // shaders sample it. The real bind groups come from
-    // `batch.image_handle()` + `batch.image_sampler`.
+    // Image (+shadow) bind group (group 3). Bindings 0/1 are the `image`
+    // texture+sampler used by EFFECT_OPACITY / UPSAMPLE / SHADOW / BLUR;
+    // bindings 2/3 are the `shadow` texture+sampler used only by SHADOW / BLUR.
+    // Every pipeline binds *something* at group(3) because the layout is
+    // shared; shaders that don't sample a slot get the dummy texture there.
+    // Cache key is `(image, shadow)` where `shadow` is `None` for the
+    // opacity/upsample shaders (dummy bound at 2/3).
     image_bind_group_layout: wgpu::BindGroupLayout,
     dummy_image_bg: wgpu::BindGroup,
-    image_bind_groups: HashMap<(TextureHandle, SamplerState), wgpu::BindGroup>,
+    image_bind_groups: HashMap<ImageBindGroupKey, wgpu::BindGroup>,
+
+    // Dummy 1×1 white texture view + sampler, kept so per-draw image bind
+    // groups can fill unused `shadow` (and `image`) slots without a real
+    // texture. The dummy texture itself stays alive behind these.
+    #[allow(dead_code)] // owns the allocation behind `dummy_view`
+    dummy_texture: wgpu::Texture,
+    dummy_view: wgpu::TextureView,
+    dummy_sampler: wgpu::Sampler,
 
     // Pipelines (lazy)
     pipelines: PipelineCache,
@@ -171,8 +190,22 @@ pub struct WgpuRenderDevice {
     /// Always `None` on the Noesis-driven path.
     forced_image: Option<(TextureHandle, SamplerState)>,
 
+    /// Test-only override for the group(3) shadow texture (bindings 2/3),
+    /// mirroring [`Self::forced_image`]. Lets standalone-wgpu tests exercise
+    /// the SHADOW / BLUR path. Always `None` on the Noesis-driven path.
+    forced_shadow: Option<(TextureHandle, SamplerState)>,
+
     next_handle: u64,
 }
+
+/// Cache key for a group(3) bind group: the `image` slot plus an optional
+/// `shadow` slot. `None` shadow binds the dummy texture at bindings 2/3 (the
+/// opacity / upsample shaders that don't read `shadow`).
+type ImageBindGroupKey = (
+    TextureHandle,
+    SamplerState,
+    Option<(TextureHandle, SamplerState)>,
+);
 
 /// A texture owned by the render device, reachable from a [`TextureHandle`].
 ///
@@ -258,6 +291,13 @@ impl WgpuRenderDevice {
             UNIFORM_RING_SLOTS,
             uniform_alignment,
         );
+        let ps1_ring = UniformRing::new(
+            &device,
+            "noesis_runtime ps_uniforms1 ring (cbuffer1_ps[8])",
+            PS_UNIFORM1_SIZE,
+            UNIFORM_RING_SLOTS,
+            uniform_alignment,
+        );
 
         let vs_uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -273,19 +313,33 @@ impl WgpuRenderDevice {
                     count: None,
                 }],
             });
-        let ps_uniform0_bind_group_layout =
+        let ps_uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("noesis_runtime ps_uniforms0 layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(PS_UNIFORM0_SIZE),
+                label: Some("noesis_runtime ps_uniforms layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: NonZeroU64::new(PS_UNIFORM0_SIZE),
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // cbuffer1_ps — only SHADOW / BLUR read it, but the shared
+                    // layout always declares it so every pipeline matches.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: NonZeroU64::new(PS_UNIFORM1_SIZE),
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         // Bind groups expose a *single* struct-sized window into each ring
@@ -303,17 +357,27 @@ impl WgpuRenderDevice {
                 }),
             }],
         });
-        let ps_uniform0_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("noesis_runtime ps_uniforms0"),
-            layout: &ps_uniform0_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: ps_ring.buffer(),
-                    offset: 0,
-                    size: NonZeroU64::new(PS_UNIFORM0_SIZE),
-                }),
-            }],
+        let ps_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("noesis_runtime ps_uniforms"),
+            layout: &ps_uniform_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: ps_ring.buffer(),
+                        offset: 0,
+                        size: NonZeroU64::new(PS_UNIFORM0_SIZE),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: ps1_ring.buffer(),
+                        offset: 0,
+                        size: NonZeroU64::new(PS_UNIFORM1_SIZE),
+                    }),
+                },
+            ],
         });
 
         // Group(2): pattern texture + pattern sampler. Shared layout for
@@ -341,30 +405,35 @@ impl WgpuRenderDevice {
                 ],
             });
 
-        // Group(3): image texture + image sampler. Same shape as
-        // pattern, separate group so existing pipelines keep their
-        // group(2)-only setup and OPACITY-class shaders can layer the
-        // offscreen image on top.
+        // Group(3): image texture+sampler (bindings 0/1) plus the shadow
+        // texture+sampler (bindings 2/3) co-bound for SHADOW / BLUR. Separate
+        // group from pattern so existing pipelines keep their group(2)-only
+        // setup; OPACITY-class shaders layer the offscreen image on top and
+        // leave the shadow slots dummy.
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
         let image_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("noesis_runtime image layout"),
+                label: Some("noesis_runtime image+shadow layout"),
                 entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
+                    texture_entry(0),
+                    sampler_entry(1),
+                    texture_entry(2),
+                    sampler_entry(3),
                 ],
             });
 
@@ -435,6 +504,14 @@ impl WgpuRenderDevice {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&dummy_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&dummy_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&dummy_sampler),
+                },
             ],
         });
 
@@ -442,7 +519,7 @@ impl WgpuRenderDevice {
             label: Some("noesis_runtime pipeline layout"),
             bind_group_layouts: &[
                 &vs_uniform_bind_group_layout,
-                &ps_uniform0_bind_group_layout,
+                &ps_uniform_bind_group_layout,
                 &pattern_bind_group_layout,
                 &image_bind_group_layout,
             ],
@@ -463,7 +540,8 @@ impl WgpuRenderDevice {
             vs_ring,
             vs_uniform_bind_group,
             ps_ring,
-            ps_uniform0_bind_group,
+            ps1_ring,
+            ps_uniform_bind_group,
             pattern_bind_group_layout,
             dummy_pattern_bg,
             samplers: HashMap::new(),
@@ -471,6 +549,9 @@ impl WgpuRenderDevice {
             image_bind_group_layout,
             dummy_image_bg,
             image_bind_groups: HashMap::new(),
+            dummy_texture,
+            dummy_view,
+            dummy_sampler,
             pipelines,
             textures: HashMap::new(),
             render_targets: HashMap::new(),
@@ -484,6 +565,7 @@ impl WgpuRenderDevice {
             current_tile: None,
             forced_pattern: None,
             forced_image: None,
+            forced_shadow: None,
             next_handle: 1,
         }
     }
@@ -500,6 +582,13 @@ impl WgpuRenderDevice {
     /// image texture. Production code never calls this.
     pub fn test_set_forced_image(&mut self, forced: Option<(TextureHandle, SamplerState)>) {
         self.forced_image = forced;
+    }
+
+    /// Test-only sibling of [`Self::test_set_forced_image`] for the group(3)
+    /// shadow texture (bindings 2/3), exercising the SHADOW / BLUR path.
+    /// Production code never calls this.
+    pub fn test_set_forced_shadow(&mut self, forced: Option<(TextureHandle, SamplerState)>) {
+        self.forced_shadow = forced;
     }
 
     /// Build or fetch the cached pattern bind group for `(texture, state)`.
@@ -545,44 +634,74 @@ impl WgpuRenderDevice {
     }
 
     /// Sibling of [`Self::pattern_bind_group_for`] for the group(3) image
-    /// texture. Same caching shape — the input texture is whatever
-    /// offscreen RT Noesis rendered the layer into; the sampler comes
-    /// from `batch.image_sampler`.
+    /// (+shadow) texture. Bindings 0/1 hold the `image` texture (whatever
+    /// offscreen RT Noesis rendered the layer into); bindings 2/3 hold the
+    /// `shadow` texture for SHADOW / BLUR, or the dummy when `shadow` is
+    /// `None` (opacity / upsample shaders that don't read it).
     fn image_bind_group_for(
         &mut self,
-        handle: TextureHandle,
-        state: SamplerState,
+        image: (TextureHandle, SamplerState),
+        shadow: Option<(TextureHandle, SamplerState)>,
     ) -> &wgpu::BindGroup {
-        if self.image_bind_groups.contains_key(&(handle, state)) {
+        let key: ImageBindGroupKey = (image.0, image.1, shadow);
+        if self.image_bind_groups.contains_key(&key) {
             return self
                 .image_bind_groups
-                .get(&(handle, state))
+                .get(&key)
                 .expect("just checked contains_key");
         }
-        let view = self
+        // Ensure the samplers exist before borrowing the maps for the bind
+        // group entries.
+        self.samplers
+            .entry(image.1)
+            .or_insert_with(|| build_sampler(&self.device, image.1));
+        if let Some((_, sstate)) = shadow {
+            self.samplers
+                .entry(sstate)
+                .or_insert_with(|| build_sampler(&self.device, sstate));
+        }
+
+        let image_view = self
             .textures
-            .get(&handle)
+            .get(&image.0)
             .map(|t| &t.view)
-            .expect("image_bind_group_for: unknown TextureHandle");
-        let sampler = self
-            .samplers
-            .entry(state)
-            .or_insert_with(|| build_sampler(&self.device, state));
+            .expect("image_bind_group_for: unknown image TextureHandle");
+        let image_sampler = &self.samplers[&image.1];
+        // Shadow slot: real texture+sampler, or the dummy when unused.
+        let (shadow_view, shadow_sampler) = match shadow {
+            Some((handle, sstate)) => {
+                let view = self
+                    .textures
+                    .get(&handle)
+                    .map(|t| &t.view)
+                    .expect("image_bind_group_for: unknown shadow TextureHandle");
+                (view, &self.samplers[&sstate])
+            }
+            None => (&self.dummy_view, &self.dummy_sampler),
+        };
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("noesis_runtime image bg"),
+            label: Some("noesis_runtime image+shadow bg"),
             layout: &self.image_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(view),
+                    resource: wgpu::BindingResource::TextureView(image_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::Sampler(image_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
                 },
             ],
         });
-        self.image_bind_groups.entry((handle, state)).or_insert(bg)
+        self.image_bind_groups.entry(key).or_insert(bg)
     }
 
     /// Point the onscreen phase at `view`. Used by the Bevy plugin (Phase
@@ -666,7 +785,7 @@ impl WgpuRenderDevice {
     /// dynamic offsets to bind. The VS slot packs `cbuffer0_vs` (mat4) into
     /// bytes 0..64 and `cbuffer1_vs` (glyph-atlas size) into bytes 64..72;
     /// the trailing 8 bytes are zeroed so non-SDF shaders see vec4(0).
-    fn upload_uniforms(&mut self, batch: &Batch) -> (u32, u32) {
+    fn upload_uniforms(&mut self, batch: &Batch) -> (u32, u32, u32) {
         let cbuf0 = batch.vertex_uniforms[0].as_bytes();
         let cbuf1 = batch.vertex_uniforms[1].as_bytes();
         let mut vs_buf = [0u8; VS_UNIFORM_SIZE as usize];
@@ -681,7 +800,12 @@ impl WgpuRenderDevice {
         let ps_offset = self
             .ps_ring
             .write(&self.queue, batch.pixel_uniforms[0].as_bytes());
-        (vs_offset, ps_offset)
+        // cbuffer1_ps — only SHADOW / BLUR populate pixel_uniforms[1]; the ring
+        // zero-pads, so non-shadow draws still get a valid (zeroed) slot bound.
+        let ps1_offset = self
+            .ps1_ring
+            .write(&self.queue, batch.pixel_uniforms[1].as_bytes());
+        (vs_offset, ps_offset, ps1_offset)
     }
 }
 
@@ -835,6 +959,7 @@ const fn shader_uses_paint_texture(shader: u8) -> bool {
         || shader == Shader::PATH_RADIAL.0
         || shader == Shader::PATH_AA_RADIAL.0
         || shader == Shader::SDF_SOLID.0
+        || shader == Shader::SDF_LCD_SOLID.0
         || shader == Shader::OPACITY_LINEAR.0
         || shader == Shader::OPACITY_RADIAL.0
         || shader == Shader::OPACITY_PATTERN.0
@@ -886,7 +1011,9 @@ fn batch_paint_texture(batch: &Batch) -> Option<(TextureHandle, SamplerState)> {
         {
             batch.ramps_handle().map(|h| (h, batch.ramps_sampler))
         }
-        s if s == Shader::SDF_SOLID.0 => batch.glyphs_handle().map(|h| (h, batch.glyphs_sampler)),
+        s if s == Shader::SDF_SOLID.0 || s == Shader::SDF_LCD_SOLID.0 => {
+            batch.glyphs_handle().map(|h| (h, batch.glyphs_sampler))
+        }
         // DOWNSAMPLE/UPSAMPLE source the (to-be-)blurred layer at group(2).
         s if s == Shader::DOWNSAMPLE.0 || s == Shader::UPSAMPLE.0 => {
             batch.pattern_handle().map(|h| (h, batch.pattern_sampler))
@@ -909,8 +1036,15 @@ const fn shader_uses_image_texture(shader: u8) -> bool {
         || shader == Shader::OPACITY_PATTERN_MIRROR.0
         // UPSAMPLE blends the lower-res `image` (group 3) with `pattern`.
         || shader == Shader::UPSAMPLE.0
-    // SHADOW / BLUR also read `image` but additionally need the `shadow`
-    // texture co-bound; they land when group(3) carries image+shadow.
+        // SHADOW / BLUR read `image` at bindings 0/1 and `shadow` at 2/3.
+        || shader == Shader::SHADOW.0
+        || shader == Shader::BLUR.0
+}
+
+/// True when `shader` additionally reads the `shadow` texture at group(3)
+/// bindings 2/3 (co-bound with `image`). Only the SHADOW / BLUR effects do.
+const fn shader_uses_shadow_texture(shader: u8) -> bool {
+    shader == Shader::SHADOW.0 || shader == Shader::BLUR.0
 }
 
 fn wgpu_wrap_mode(wrap_raw: u8) -> wgpu::AddressMode {
@@ -975,6 +1109,15 @@ impl RenderDevice for WgpuRenderDevice {
         DeviceCaps {
             center_pixel_offset: 0.0,
             linear_rendering: false,
+            // The SDF_LCD_SOLID subpixel shader + SrcOver_Dual blend are
+            // implemented (see noesis.wgsl / pipeline.rs), but reporting
+            // `subpixel_rendering = true` makes Noesis emit the SDF_LCD_*
+            // matrix on every device — which requires the wgpu
+            // `DUAL_SOURCE_BLENDING` feature (not in downlevel defaults) and a
+            // glyph-orientation-aware coverage that we can't validate against
+            // the SDK (it ships no LCD reference). Kept off until the render
+            // app negotiates the feature per-device and the algorithm is
+            // verified; the path is exercised directly by `tests/wgpu_sdf_lcd`.
             subpixel_rendering: false,
             depth_range_zero_to_one: true,
             clip_space_y_inverted: false,
@@ -1106,7 +1249,9 @@ impl RenderDevice for WgpuRenderDevice {
         // Invalidate any pattern / image bind group referencing this
         // texture. Small caches; a linear scan is fine.
         self.pattern_bind_groups.retain(|(h, _), _| *h != handle);
-        self.image_bind_groups.retain(|(h, _), _| *h != handle);
+        self.image_bind_groups.retain(|(img, _, shadow), _| {
+            *img != handle && shadow.is_none_or(|(s, _)| s != handle)
+        });
     }
 
     fn create_render_target(&mut self, desc: RenderTargetDesc<'_>) -> RenderTargetBinding {
@@ -1232,6 +1377,7 @@ impl RenderDevice for WgpuRenderDevice {
         );
         self.vs_ring.reset();
         self.ps_ring.reset();
+        self.ps1_ring.reset();
         self.encoder = Some(
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1264,6 +1410,7 @@ impl RenderDevice for WgpuRenderDevice {
         );
         self.vs_ring.reset();
         self.ps_ring.reset();
+        self.ps1_ring.reset();
         self.encoder = Some(
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1394,7 +1541,7 @@ impl RenderDevice for WgpuRenderDevice {
 
         let key = PipelineKey::from_batch(batch, has_stencil);
 
-        let (vs_offset, ps_offset) = self.upload_uniforms(batch);
+        let (vs_offset, ps_offset, ps1_offset) = self.upload_uniforms(batch);
         self.pipelines.ensure(key);
 
         // Resolve / build the group(2) bind group before we take a &mut borrow
@@ -1411,16 +1558,28 @@ impl RenderDevice for WgpuRenderDevice {
             None
         };
 
-        // Same shape for the group(3) image bind group used by EFFECT_OPACITY.
-        let image_slot = if shader_uses_image_texture(batch.shader.0) {
-            let slot = self.forced_image.unwrap_or_else(|| {
+        // Group(3): the `image` slot (OPACITY / UPSAMPLE / SHADOW / BLUR) plus
+        // the `shadow` slot co-bound for SHADOW / BLUR. The cache key carries
+        // both; `None` shadow binds the dummy at bindings 2/3.
+        let image_slot: Option<ImageBindGroupKey> = if shader_uses_image_texture(batch.shader.0) {
+            let image = self.forced_image.unwrap_or_else(|| {
                 let handle = batch.image_handle().expect(
-                    "OPACITY/UPSAMPLE batch with null image handle — Noesis should populate batch.image",
+                    "OPACITY/UPSAMPLE/SHADOW/BLUR batch with null image handle — Noesis should populate batch.image",
                 );
                 (handle, batch.image_sampler)
             });
-            let _ = self.image_bind_group_for(slot.0, slot.1);
-            Some(slot)
+            let shadow = if shader_uses_shadow_texture(batch.shader.0) {
+                Some(self.forced_shadow.unwrap_or_else(|| {
+                    let handle = batch.shadow_handle().expect(
+                        "SHADOW/BLUR batch with null shadow handle — Noesis should populate batch.shadow",
+                    );
+                    (handle, batch.shadow_sampler)
+                }))
+            } else {
+                None
+            };
+            let _ = self.image_bind_group_for(image, shadow);
+            Some((image.0, image.1, shadow))
         } else {
             None
         };
@@ -1473,7 +1632,7 @@ impl RenderDevice for WgpuRenderDevice {
         let vertex_buffer = &self.vertex_buffer;
         let index_buffer = &self.index_buffer;
         let vs_bg = &self.vs_uniform_bind_group;
-        let ps_bg = &self.ps_uniform0_bind_group;
+        let ps_bg = &self.ps_uniform_bind_group;
         let pattern_bg = if let Some(slot) = pattern_slot {
             self.pattern_bind_groups
                 .get(&slot)
@@ -1530,7 +1689,7 @@ impl RenderDevice for WgpuRenderDevice {
             rpass.set_stencil_reference(u32::from(batch.stencil_ref));
         }
         rpass.set_bind_group(0, vs_bg, &[vs_offset]);
-        rpass.set_bind_group(1, ps_bg, &[ps_offset]);
+        rpass.set_bind_group(1, ps_bg, &[ps_offset, ps1_offset]);
         rpass.set_bind_group(2, pattern_bg, &[]);
         rpass.set_bind_group(3, image_bg, &[]);
         if let Some((x, y, w, h)) = scissor {

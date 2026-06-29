@@ -53,7 +53,7 @@ use noesis_runtime::events::{
     subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
-use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D};
+use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D, MatrixTransform3D};
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::binding::{BindingEntry, BuiltBinding};
@@ -578,6 +578,18 @@ struct SceneInstance {
     /// [`crate::transforms3d::NoesisTransform3DChanged`] emissions. Resets on
     /// scene rebuild.
     transform3d_snapshots: HashMap<String, crate::transforms3d::Transform3DSpec>,
+    /// `MatrixTransform3D` handles assigned as elements' `Transform3D` by
+    /// [`crate::transforms3d::NoesisTransform3D`]'s matrix writes, keyed by
+    /// `x:Name`. Held at +1 (the same object Noesis stores) so the poll can read
+    /// it back; same lifetime/identity rules as [`Self::transform3d_handles`].
+    /// Distinct from [`Self::transform3d_handles`] because the two transform
+    /// kinds carry different read-back payloads — a name should use one or the
+    /// other (both write the single `Transform3D` DP, so the later apply wins).
+    matrix_transform3d_handles: HashMap<String, MatrixTransform3D>,
+    /// Last 12-float `Transform3` matrix snapshot per `x:Name`, to dedupe
+    /// [`crate::transforms3d::NoesisMatrixTransform3DChanged`] emissions. Resets
+    /// on scene rebuild.
+    matrix_transform3d_snapshots: HashMap<String, [f32; 12]>,
     /// Last brush read back per `(x:Name, property)` painted by
     /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
     /// emissions; resets on scene rebuild.
@@ -1332,6 +1344,8 @@ impl NoesisRenderState {
                 transform_snapshots: HashMap::new(),
                 transform3d_handles: HashMap::new(),
                 transform3d_snapshots: HashMap::new(),
+                matrix_transform3d_handles: HashMap::new(),
+                matrix_transform3d_snapshots: HashMap::new(),
                 brush_snapshots: HashMap::new(),
                 typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
@@ -1857,10 +1871,10 @@ impl NoesisRenderState {
     /// Populate each named `TextBlock`'s `Inlines` with the desired inline tree
     /// from view `entity`'s [`crate::inlines::NoesisInlines`] component. Builds
     /// the live Noesis inlines and stores their handles in the scene for the
-    /// read-back. Only a `TextBlock` whose `Inlines` is currently *empty* is
-    /// populated — the runtime 0.10 FFI exposes no `InlineCollection::Clear`, so a
-    /// later, different spec for a name that already has content is refused with a
-    /// warning (rebuild the scene to change it). No-op until the scene exists.
+    /// read-back. Re-apply is full replacement: any existing `Inlines` content
+    /// (from an earlier apply or authored in XAML) is cleared
+    /// (`InlineCollection::clear`) and rebuilt from the spec. No-op until the
+    /// scene exists.
     pub(crate) fn apply_inlines_for(
         &mut self,
         entity: Entity,
@@ -1891,13 +1905,13 @@ impl NoesisRenderState {
                 warn!("NoesisInlines: element {name:?} is not a TextBlock; skipped");
                 continue;
             };
+            // Clear any existing content, then drop our previously-built handles
+            // (releasing their refs) before building the replacement so the live
+            // collection holds only the new inlines.
             if collection.count() != 0 {
-                warn!(
-                    "NoesisInlines: {name:?} already has inline content; clear-and-replace is \
-                     unavailable in runtime 0.10 (rebuild the scene to change it)",
-                );
-                continue;
+                collection.clear();
             }
+            scene.inline_handles.remove(name);
             let built = crate::inlines::build_into(&mut collection, specs);
             scene.inline_handles.insert(name.clone(), built);
         }
@@ -2521,6 +2535,106 @@ impl NoesisRenderState {
             }
             scene
                 .transform3d_snapshots
+                .insert(name.to_string(), current);
+            changed.push((name.to_string(), current));
+        }
+        changed
+    }
+
+    /// Assign view `entity`'s desired raw 3D matrix transforms (`x:Name → 12
+    /// `Transform3` floats`). Each becomes a `MatrixTransform3D` held at +1 in
+    /// [`Self::matrix_transform3d_handles`] (the same object Noesis stores), so
+    /// the poll can read it back. Missing names / non-`UIElement` targets warn.
+    /// Matrix analogue of [`Self::apply_transforms3d_for`]; both set the single
+    /// `UIElement::Transform3D` DP, so a name given both kinds keeps whichever
+    /// applied last.
+    pub(crate) fn apply_matrix_transforms3d_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, [f32; 12]>,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        // Drop handles for names no longer requested; releasing each handle's +1.
+        scene
+            .matrix_transform3d_handles
+            .retain(|k, _| desired.contains_key(k));
+        if desired.is_empty() {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, matrix) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTransform3D(matrix): x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let transform = MatrixTransform3D::new(*matrix);
+            if element.set_transform3d(&transform) {
+                scene
+                    .matrix_transform3d_handles
+                    .insert(name.clone(), transform);
+            } else {
+                warn!(
+                    "NoesisTransform3D(matrix): {name:?} has no Transform3D (not a UIElement?) \
+                     in scene {:?}",
+                    scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Poll view `entity`'s named elements' live raw 3D matrix transforms,
+    /// returning `(name, matrix)` for each that changed since last frame (deduped
+    /// against the per-scene snapshot). A name only reports while the element's
+    /// current `Transform3D` is the exact `MatrixTransform3D` we assigned (pointer
+    /// identity), so the read-back is element-sourced proof the assignment took.
+    /// First poll after assignment always reports. Matrix analogue of
+    /// [`Self::poll_transforms3d_for`].
+    pub(crate) fn poll_matrix_transforms3d_for(
+        &mut self,
+        entity: Entity,
+        names: &[&str],
+    ) -> Vec<(String, [f32; 12])> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .matrix_transform3d_snapshots
+            .retain(|name, _| names.contains(&name.as_str()));
+        if names.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for &name in names {
+            let Some(handle) = scene.matrix_transform3d_handles.get(name) else {
+                continue;
+            };
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            // Trust the value only when the element's live Transform3D is the very
+            // object we assigned (Noesis stores our pointer, no clone).
+            let Some(live) = element.transform3d() else {
+                continue;
+            };
+            if live.raw() != handle.raw() {
+                continue;
+            }
+            let current = handle.get();
+            if scene.matrix_transform3d_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene
+                .matrix_transform3d_snapshots
                 .insert(name.to_string(), current);
             changed.push((name.to_string(), current));
         }
@@ -3186,9 +3300,20 @@ pub(crate) struct BlitPipeline {
 }
 
 /// Premultiplied-alpha "over": `result = src.rgb + dst.rgb * (1 - src.a)`. Used
-/// by the Core3d overlay node to composite the UI *directly* onto the camera's
-/// finished scene — transparent intermediate texels (a == 0) leave the scene
-/// intact, anti-aliased edges (premultiplied by Noesis) blend correctly.
+/// by *both* compositing nodes to composite the UI directly onto the camera's
+/// cleared/finished `ViewTarget` (`LoadOp::Load`) — transparent intermediate
+/// texels (a == 0) leave the target intact, fully-opaque texels (a == 1)
+/// overwrite it, and the fractional-alpha edges Noesis emits with
+/// `RenderFlag::Ppaa` enabled blend correctly.
+///
+/// Noesis writes *premultiplied* alpha into the intermediate (its own
+/// `BlendMode::SrcOver` is `One, OneMinusSrcAlpha`). The previous Core2d path
+/// overwrote the target 1:1 (`blend = None`), discarding the camera's clear
+/// colour and leaving premultiplied bytes for a downstream straight-alpha step
+/// to re-multiply — which let the clear colour bleed through PPAA edges.
+/// Compositing premultiplied here makes the `ViewTarget` already-correct and
+/// independent of the clear colour, while staying identical to the old overwrite
+/// whenever the target was cleared transparent (dst == 0 ⇒ result == src).
 const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
     color: wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
@@ -3203,14 +3328,10 @@ const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
 };
 
 impl BlitPipeline {
-    /// `blend = None` overwrites the target 1:1 (Core2d path, where Bevy's own
-    /// multi-camera step alpha-composites the result); `Some(PREMULTIPLIED_OVER)`
-    /// composites onto an existing image (Core3d overlay path).
-    fn new(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-        blend: Option<wgpu::BlendState>,
-    ) -> Self {
+    /// Build the compositing pipeline for `target_format`. Both render-graph
+    /// nodes use the same [`PREMULTIPLIED_OVER`] blend so the UI composites
+    /// correctly over whatever the camera left in its `ViewTarget`.
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("noesis blit shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLIT_WGSL)),
@@ -3269,12 +3390,7 @@ impl BlitPipeline {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    // Overwrite (None) for the Core2d path — Noesis paints the
-                    // whole intermediate and Bevy's multi-camera composite folds
-                    // it over the 3D camera using the alpha channel. The Core3d
-                    // overlay path passes `Some(PREMULTIPLIED_OVER)` to composite
-                    // straight onto the scene instead.
-                    blend,
+                    blend: Some(PREMULTIPLIED_OVER),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -3333,30 +3449,56 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// Test-only: run the production compositing blit (same [`BlitPipeline`] +
+/// [`PREMULTIPLIED_OVER`] blend + `LoadOp::Load` the render-graph nodes use) of
+/// `src` onto `target`. Lets integration tests exercise the real premultiplied
+/// composite without standing up a render world. Not part of the public API.
+#[doc(hidden)]
+pub fn blit_composite_for_test(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    src: &wgpu::TextureView,
+    target: &wgpu::TextureView,
+    target_format: wgpu::TextureFormat,
+) {
+    let blit = BlitPipeline::new(device, target_format);
+    let bg = blit.bind_group(device, src);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("blit_composite_for_test"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(&blit.pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.draw(0..3, 0..1);
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct BlitPipelineCache {
-    /// 1:1 overwrite — the Core2d (separate UI camera) path.
-    overwrite: HashMap<wgpu::TextureFormat, BlitPipeline>,
-    /// Premultiplied-alpha "over" — the Core3d (overlay-on-scene) path.
+    /// Premultiplied-alpha "over" pipeline, one per encountered target format.
+    /// Both the Core2d and Core3d nodes share it (see [`PREMULTIPLIED_OVER`]).
     over: HashMap<wgpu::TextureFormat, BlitPipeline>,
 }
 
 impl BlitPipelineCache {
-    fn get_overwrite(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
-        self.overwrite.get(&format)
-    }
-
-    fn get_over(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
+    fn get(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
         self.over.get(&format)
     }
 
     fn ensure(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        self.overwrite
-            .entry(format)
-            .or_insert_with(|| BlitPipeline::new(device, format, None));
         self.over
             .entry(format)
-            .or_insert_with(|| BlitPipeline::new(device, format, Some(PREMULTIPLIED_OVER)));
+            .or_insert_with(|| BlitPipeline::new(device, format));
     }
 }
 
@@ -3539,27 +3681,23 @@ pub enum NoesisSet {
     Drive,
 }
 
-/// Shared blit body for both nodes. `overlay = false` overwrites the target 1:1
-/// (Core2d, separate UI camera — Bevy composites it afterwards); `overlay = true`
-/// premultiplied-alpha composites the UI straight onto the camera's finished
-/// scene (Core3d, single-camera).
+/// Shared blit body for both nodes. Premultiplied-alpha composites the UI over
+/// whatever the camera left in its `ViewTarget` (`LoadOp::Load`): the Core2d
+/// node runs on every 2D view, the Core3d node only on views tagged
+/// [`NoesisCamera`]. Both use the same [`PREMULTIPLIED_OVER`] blend so PPAA's
+/// fractional-alpha edges composite correctly instead of overwriting the clear
+/// colour (see [`PREMULTIPLIED_OVER`]).
 fn blit_noesis_ui(
     render_context: &mut RenderContext<'_>,
     intermediate: &NoesisIntermediate,
     view_target: &ViewTarget,
     world: &World,
-    overlay: bool,
 ) -> Result<(), NodeRunError> {
     let Some(cache) = world.get_resource::<BlitPipelineCache>() else {
         return Ok(());
     };
     let target_format = view_target.main_texture_format();
-    let blit = if overlay {
-        cache.get_over(target_format)
-    } else {
-        cache.get_overwrite(target_format)
-    };
-    let Some(blit) = blit else {
+    let Some(blit) = cache.get(target_format) else {
         // prepare_noesis_blit should have created it; if it hasn't by
         // now we'd draw garbage so skip cleanly.
         return Ok(());
@@ -3610,9 +3748,11 @@ fn blit_noesis_ui(
     Ok(())
 }
 
-/// Core2d compositing node — runs on **every** Core2d view (unchanged, classic
-/// behaviour). A 2D UI camera layered over the scene relies on Bevy's own
-/// multi-camera step to fold this overwrite blit over the lower camera.
+/// Core2d compositing node — runs on **every** Core2d view. Premultiplied-alpha
+/// composites the UI over the view's `ViewTarget`; when that target was cleared
+/// transparent (a UI camera layered over a lower camera) the result is identical
+/// to the old 1:1 overwrite, and Bevy's multi-camera step folds it over the
+/// lower camera as before.
 #[derive(Default)]
 pub struct NoesisNode;
 
@@ -3626,7 +3766,7 @@ impl ViewNode for NoesisNode {
         (view_target, intermediate): (&'w ViewTarget, &'w NoesisIntermediate),
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, intermediate, view_target, world, false)
+        blit_noesis_ui(render_context, intermediate, view_target, world)
     }
 }
 
@@ -3657,7 +3797,7 @@ impl ViewNode for NoesisOverlayNode {
         ),
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, intermediate, view_target, world, true)
+        blit_noesis_ui(render_context, intermediate, view_target, world)
     }
 }
 
@@ -3713,8 +3853,8 @@ impl Plugin for NoesisRenderPlugin {
         render_app
             .init_resource::<BlitPipelineCache>()
             .add_systems(Render, prepare_noesis_blit.in_set(RenderSystems::Prepare))
-            // Core2d: overwrite blit on any 2D view that has published an
-            // intermediate (the `ViewQuery` gates on `NoesisIntermediate`).
+            // Core2d: premultiplied composite on any 2D view that has published
+            // an intermediate (the `ViewQuery` gates on `NoesisIntermediate`).
             .add_render_graph_node::<ViewNodeRunner<NoesisNode>>(Core2d, NoesisNodeLabel)
             .add_render_graph_edges(
                 Core2d,
