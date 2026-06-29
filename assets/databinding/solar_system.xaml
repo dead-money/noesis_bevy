@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Bevy-idiomatic port of the Noesis SDK "DataBinding" sample
+  ($NOESIS_SDK_DIR/Src/Packages/Samples/DataBinding). The original binds an
+  ObservableCollection<SolarSystemObject> to a ListBox and shows the selected
+  body's Name/Orbit/Diameter/Details. Here the same scene is driven entirely
+  through the crate's safe data bridges:
+
+    * ListBox "Planets" — ItemsSource populated from Rust via NoesisItems
+      (the list/ItemsSource bridge). The ItemTemplate shows each body's name.
+    * Detail panel — bound {Binding ...} to a #[derive(NoesisViewModel)] plain
+      struct attached as the view-root DataContext (the binding bridge).
+
+  Self-contained / theme-free so it boots headless. FontFamily resolves to a
+  registered Roboto when present and falls through to the fallback chain
+  otherwise; only DP/text values are asserted by the smoke test, never pixels.
+-->
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Width="640" Height="400" Background="#FF0B1018"
+      TextElement.FontFamily="Fonts/#Roboto">
+  <Grid.ColumnDefinitions>
+    <ColumnDefinition Width="220"/>
+    <ColumnDefinition Width="*"/>
+  </Grid.ColumnDefinitions>
+
+  <!-- Left: the body list. ItemsSource is set from Rust (NoesisItems), so no
+       {Binding ItemsSource} / DataContext coupling is needed here. -->
+  <ListBox x:Name="Planets" Grid.Column="0" Margin="12"
+           Background="#FF141E2A" BorderBrush="#FF24364A" BorderThickness="1"
+           Foreground="White">
+    <ListBox.ItemTemplate>
+      <DataTemplate>
+        <TextBlock Text="{Binding}" Foreground="White" FontSize="16" Padding="8,4"/>
+      </DataTemplate>
+    </ListBox.ItemTemplate>
+  </ListBox>
+
+  <!-- Right: detail panel bound to the PlanetVm DataContext. -->
+  <StackPanel Grid.Column="1" Margin="24" VerticalAlignment="Center">
+    <TextBlock x:Name="NameText" Text="{Binding name}"
+               FontSize="30" FontWeight="Bold" Foreground="LightSkyBlue"/>
+    <TextBlock x:Name="OrbitText"
+               Text="{Binding orbit, StringFormat=Orbit: \{0:F2\} AU}"
+               FontSize="16" Foreground="White" Margin="0,10,0,0"/>
+    <TextBlock x:Name="DiameterText"
+               Text="{Binding diameter, StringFormat=Diameter: \{0:F0\} km}"
+               FontSize="16" Foreground="White"/>
+    <TextBlock x:Name="DetailsText" Text="{Binding details}"
+               FontSize="14" Foreground="Silver" TextWrapping="Wrap"
+               Margin="0,16,0,0"/>
+  </StackPanel>
+</Grid>

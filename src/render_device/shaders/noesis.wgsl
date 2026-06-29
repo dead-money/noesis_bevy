@@ -1,3 +1,11 @@
+// SDF_LCD_SOLID emits a dual-source fragment output (`@blend_src`), which WGSL
+// gates behind an enable directive. It must precede all other declarations, so
+// it lives at the very top — emitted only for the LCD variant so the other
+// shaders don't require the device's DUAL_SOURCE_BLENDING feature.
+#ifdef EFFECT_SDF_LCD
+enable dual_source_blending;
+#endif
+
 // Unified shader source for the Noesis pipeline matrix. Variants are produced
 // at pipeline-build time by stripping #ifdef branches via shader_preproc.rs;
 // the active define set comes from shader_defines::defines_for_shader().
@@ -31,6 +39,21 @@ struct PsUniforms0 {
 
 @group(1) @binding(0) var<uniform> ps_uniforms0: PsUniforms0;
 
+// cbuffer1_ps in Shader.140.frag — a second pixel-shader constant block, only
+// read by EFFECT_SHADOW / EFFECT_BLUR. Noesis declares it as float[128] but the
+// shadow/blur effects touch at most the first 7 floats, so we bind two vec4s
+// (values[0] = cb[0..3], values[1] = cb[4..7]). Packed into group(1) binding(1)
+// rather than a new bind group so the layout stays within the 4-group
+// downlevel-defaults limit. Gated by HAS_CBUFFER1_PS; the shared pipeline
+// layout always declares the binding so non-shadow shaders just leave it unused.
+#ifdef HAS_CBUFFER1_PS
+struct PsUniforms1 {
+    values: array<vec4<f32>, 2>,
+}
+
+@group(1) @binding(1) var<uniform> ps_uniforms1: PsUniforms1;
+#endif
+
 // Group(2) — a texture+sampler pair consumed by any paint variant that
 // reads from a 2D texture (PAINT_PATTERN binds `batch.pattern`, PAINT_LINEAR
 // binds `batch.ramps`, etc.). Shaders that don't need a texture still share
@@ -50,6 +73,16 @@ struct PsUniforms0 {
 #ifdef HAS_IMAGE_TEXTURE
 @group(3) @binding(0) var image_texture: texture_2d<f32>;
 @group(3) @binding(1) var image_sampler: sampler;
+#endif
+
+// Group(3) bindings 2/3 — the `shadow` texture+sampler, co-bound with `image`
+// for EFFECT_SHADOW / EFFECT_BLUR (GL ref: `uniform sampler2D shadow`). Packed
+// into the same group as `image` to stay within the 4-bind-group limit. The
+// shared pipeline layout always declares these; OPACITY-class shaders that bind
+// only `image` leave them unused (the Rust side binds a dummy at 2/3).
+#ifdef HAS_SHADOW_TEXTURE
+@group(3) @binding(2) var shadow_texture: texture_2d<f32>;
+@group(3) @binding(3) var shadow_sampler: sampler;
 #endif
 
 // ─── Vertex I/O ────────────────────────────────────────────────────────────
@@ -174,6 +207,10 @@ fn vs_main(in: VsIn) -> VsOut {
 // consume a paint (PATH, PATH_AA) compute the paint first and then apply.
 // The trailing `return vec4<f32>(0.0)` is a guaranteed-unreachable fallback
 // that keeps WGSL happy when the active branch is the only one with a return.
+//
+// EFFECT_SDF_LCD needs a dual-source fragment output, so it gets its own
+// `fs_main` below; the single-target body here is gated out for that variant.
+#ifndef EFFECT_SDF_LCD
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #ifdef EFFECT_RGBA
@@ -332,6 +369,44 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         * (opacity * paint.a);
 #endif
 
+#ifdef EFFECT_SHADOW
+    // GL ref Shader.140.frag EFFECT_SHADOW:
+    //   shadowColor = cbuffer1_ps[0..3]
+    //   offset      = (cbuffer1_ps[4], -cbuffer1_ps[5])
+    //   uv          = clamp(uv1 - offset, rect.xy, rect.zw)
+    //   alpha       = mix(image(uv).a, shadow(uv).a, cbuffer1_ps[6])
+    //   img         = image(clamp(uv1, rect.xy, rect.zw))
+    //   fragColor   = (img + (1 - img.a) * (shadowColor * alpha)) * (opacity * paint.a)
+    // `image` is the layer's offscreen render; `shadow` is the blurred-alpha
+    // pass. The drop shadow is composited *under* the layer (premultiplied
+    // `1 - img.a` weight), then scaled by the effect's overall opacity (the
+    // paint alpha carries the per-pixel opacity, opacity_ the global scalar).
+    let shadow_color = ps_uniforms1.values[0];
+    let shadow_offset = vec2<f32>(ps_uniforms1.values[1].x, -ps_uniforms1.values[1].y);
+    let shadow_uv = clamp(in.uv1 - shadow_offset, in.rect.xy, in.rect.zw);
+    let shadow_alpha = mix(
+        textureSample(image_texture, image_sampler, shadow_uv).a,
+        textureSample(shadow_texture, shadow_sampler, shadow_uv).a,
+        ps_uniforms1.values[1].z,
+    );
+    let shadow_img = textureSample(
+        image_texture, image_sampler, clamp(in.uv1, in.rect.xy, in.rect.zw));
+    return (shadow_img + (1.0 - shadow_img.a) * (shadow_color * shadow_alpha))
+        * (opacity * paint.a);
+#endif
+
+#ifdef EFFECT_BLUR
+    // GL ref Shader.140.frag EFFECT_BLUR:
+    //   fragColor = mix(image(uv1), shadow(uv1), cbuffer1_ps[0]) * (opacity * paint.a)
+    // `image` is the unblurred layer, `shadow` the blurred pass; cbuffer1_ps[0]
+    // crossfades between them (full blur = 1.0). Drives the blur resolve.
+    return mix(
+        textureSample(image_texture, image_sampler, in.uv1),
+        textureSample(shadow_texture, shadow_sampler, in.uv1),
+        ps_uniforms1.values[0].x,
+    ) * (opacity * paint.a);
+#endif
+
 #ifdef EFFECT_DOWNSAMPLE
     // GL ref Shader.140.frag EFFECT_DOWNSAMPLE: average four taps of the
     // source (`pattern`, group 2) at the offset UVs computed in the VS. Halves
@@ -384,3 +459,66 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     return vec4<f32>(0.0);
 }
+#endif
+
+// ─── EFFECT_SDF_LCD — subpixel (LCD) text via dual-source blending ──────────
+//
+// Single-channel SDF text with per-subpixel-channel coverage. The SDK ships no
+// GL/VK reference for this path (those devices set `subpixelRendering = false`),
+// so this follows the standard single-channel-SDF LCD technique: sample the
+// distance field at three horizontally-staggered positions one-third of a
+// screen pixel apart, turn each into a coverage value with the same SDF
+// smoothstep `SDF_SOLID` uses, and emit those as the R/G/B subpixel coverages.
+//
+// Output is dual-source:
+//   blend_src(0) = paint.rgb premultiplied by per-channel coverage (+ paint.a)
+//   blend_src(1) = the per-channel coverage itself
+// composited with the `SrcOver_Dual` blend (`cs + cd*(1 - src1)` per channel),
+// giving `paint*cov + dst*(1 - cov)` independently for R/G/B — the subpixel
+// blend an LCD panel's stripe layout expects.
+#ifdef EFFECT_SDF_LCD
+struct FsLcdOut {
+    @location(0) @blend_src(0) color: vec4<f32>,
+    @location(0) @blend_src(1) coverage: vec4<f32>,
+}
+
+@fragment
+fn fs_main(in: VsOut) -> FsLcdOut {
+    let paint = in.color;
+
+    let SDF_SCALE: f32 = 7.96875;
+    let SDF_BIAS: f32 = 0.50196078431;
+    let SDF_AA_FACTOR: f32 = 0.65;
+    let SDF_BASE_MIN: f32 = 0.125;
+    let SDF_BASE_MAX: f32 = 0.25;
+    let SDF_BASE_DEV: f32 = -0.65;
+
+    // AA window sizing — identical to EFFECT_SDF, from the st1 gradient.
+    let gradLen = length(dpdx(in.st1));
+    let scale = 1.0 / gradLen;
+    let base = SDF_BASE_DEV
+        * (1.0 - (clamp(scale, SDF_BASE_MIN, SDF_BASE_MAX) - SDF_BASE_MIN)
+                  / (SDF_BASE_MAX - SDF_BASE_MIN));
+    let range = SDF_AA_FACTOR * gradLen;
+
+    // One-third-of-a-pixel horizontal stagger in glyph-atlas UV space. dpdx(uv1)
+    // is the UV change per screen pixel in x; the R/G/B stripes sit at -1/3, 0,
+    // +1/3 pixel.
+    let duv = dpdx(in.uv1) * (1.0 / 3.0);
+    let dr = SDF_SCALE * (textureSample(paint_texture, paint_sampler, in.uv1 - duv).r - SDF_BIAS);
+    let dg = SDF_SCALE * (textureSample(paint_texture, paint_sampler, in.uv1).r - SDF_BIAS);
+    let db = SDF_SCALE * (textureSample(paint_texture, paint_sampler, in.uv1 + duv).r - SDF_BIAS);
+    let cov = vec3<f32>(
+        smoothstep(base - range, base + range, dr),
+        smoothstep(base - range, base + range, dg),
+        smoothstep(base - range, base + range, db),
+    );
+    let cov_a = (cov.r + cov.g + cov.b) * (1.0 / 3.0);
+
+    var out: FsLcdOut;
+    // Premultiplied so the dual blend's `One` src factor leaves it untouched.
+    out.color = vec4<f32>(paint.rgb * cov, paint.a * cov_a);
+    out.coverage = vec4<f32>(cov * paint.a, cov_a * paint.a);
+    return out;
+}
+#endif

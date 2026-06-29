@@ -110,3 +110,7 @@ path = "examples/xaml_viewer.rs"
 [[example]]
 name = "controls_gallery"
 path = "examples/controls_gallery.rs"
+
+[[example]]
+name = "databinding"
+path = "examples/databinding.rs"
