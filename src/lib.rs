@@ -32,6 +32,7 @@ pub mod plain_vm;
 pub mod render;
 pub mod render_device;
 pub mod routed_events;
+pub mod svg;
 pub mod text;
 pub mod theme;
 pub mod transforms;
@@ -86,6 +87,7 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
+pub use svg::{NoesisSvg, NoesisSvgChanged, NoesisSvgPlugin};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use transforms::{
@@ -187,6 +189,7 @@ impl Plugin for NoesisPlugin {
             typography::NoesisTypographyPlugin,
             binding::NoesisBindingPlugin,
             imaging::NoesisImagingPlugin,
+            svg::NoesisSvgPlugin,
         ));
     }
 }
