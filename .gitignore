@@ -21,3 +21,4 @@
 # Phase 5.F convenience — symlink `assets/Data -> $NOESIS_SDK_DIR/Data` so
 # `xaml_viewer` can cycle through SDK samples. Same rule: don't commit.
 /assets/Data
+.claude/worktrees/
