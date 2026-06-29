@@ -24,14 +24,17 @@
 //! back. Output is premultiplied alpha, so sample it with
 //! `AlphaMode::Premultiplied`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::render_resource::{
+    Extent3d, Texture, TextureDimension, TextureFormat, TextureUsages,
+};
 use bevy_render::{
+    Render, RenderApp, RenderSystems,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
     texture::GpuImage,
@@ -58,10 +61,17 @@ struct BakeRequest {
 
 #[derive(Default)]
 struct BakerState {
-    /// Content key → handle. Identical keys reuse one baked texture.
+    /// Content key to handle. Identical keys reuse one baked texture.
     cache: HashMap<String, Handle<Image>>,
-    /// Requests awaiting their first bake on the render side.
+    /// Requests awaiting their first bake on the main side.
     pending: Vec<BakeRequest>,
+    /// Targets whose GPU texture the render world still has to resolve.
+    /// `bake_label` inserts here; the render-world system drains into `resolved`.
+    want: HashSet<AssetId<Image>>,
+    /// Target textures the render world resolved, ready for the main-world bake.
+    /// The texture is the same GPU resource Bevy's `GpuImage` owns (no copy);
+    /// it crosses the world boundary because `Texture` is `Send + Sync`.
+    resolved: HashMap<AssetId<Image>, Texture>,
 }
 
 /// Main-world handle to the label baker. Cheap to clone; it wraps a shared
@@ -95,6 +105,7 @@ impl NoesisLabelBaker {
         }
         let handle = images.add(bake_target(size));
         state.cache.insert(key, handle.clone());
+        state.want.insert(handle.id());
         state.pending.push(BakeRequest {
             target: handle.id(),
             xaml_uri: xaml_uri.into(),
@@ -102,6 +113,18 @@ impl NoesisLabelBaker {
             fields,
         });
         handle
+    }
+
+    /// Number of labels still waiting to bake. Drops to zero once every queued
+    /// label has rendered, so a host can hold a loading state until then. A
+    /// label whose template or fonts never load stays counted.
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("NoesisLabelBaker poisoned")
+            .pending
+            .len()
     }
 }
 
@@ -133,48 +156,90 @@ fn bake_target(size: UVec2) -> Image {
     image
 }
 
-/// Render-world buffer of requests not yet baked (their `GpuImage` may not be
-/// prepared, or Noesis prerequisites like fonts/template may not be ready). Held
-/// across frames so a request retries until it succeeds.
-#[derive(Resource, Default)]
-struct PendingBakes(Vec<BakeRequest>);
+/// Render-world pass: hand each pending bake target's GPU texture back to the
+/// main world. `GpuImage`s prepare in [`RenderSystems::PrepareAssets`], so by
+/// this `Prepare` system the texture exists; cloning it is just another handle
+/// to the same GPU resource. Noesis itself never runs here, only the texture
+/// crosses worlds.
+#[allow(clippy::needless_pass_by_value)]
+fn resolve_bake_textures(baker: Res<NoesisLabelBaker>, gpu_images: Res<RenderAssets<GpuImage>>) {
+    let mut guard = baker.inner.lock().expect("NoesisLabelBaker poisoned");
+    if guard.want.is_empty() {
+        return;
+    }
+    let ready: Vec<AssetId<Image>> = guard
+        .want
+        .iter()
+        .copied()
+        .filter(|id| gpu_images.get(*id).is_some())
+        .collect();
+    for id in ready {
+        if let Some(gpu) = gpu_images.get(id) {
+            guard.resolved.insert(id, gpu.texture.clone());
+            guard.want.remove(&id);
+        }
+    }
+}
 
+/// Main-world pass: render Noesis into each target whose texture the render
+/// world resolved. Runs where [`NoesisRenderState`] lives (main thread, `!Send`)
+/// and pulls only the resolved `Texture` across the boundary, so the bake stays
+/// on the single Noesis thread. A request stays queued until its texture is
+/// resolved and Noesis prerequisites (fonts, template) are ready.
 #[allow(clippy::needless_pass_by_value)]
 fn bake_pending_labels(
     baker: Option<Res<NoesisLabelBaker>>,
-    mut retry: ResMut<PendingBakes>,
-    gpu_images: Res<RenderAssets<GpuImage>>,
     state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
         return;
     };
-    if let Some(baker) = baker {
+    let Some(baker) = baker else {
+        return;
+    };
+
+    // Pull the bakeable requests (texture resolved) out from under the lock, so
+    // `bake_into` (slow) never stalls the render thread holding the mutex.
+    let mut work: Vec<(BakeRequest, Texture)> = Vec::new();
+    {
         let mut guard = baker.inner.lock().expect("NoesisLabelBaker poisoned");
-        retry.0.append(&mut guard.pending);
+        if guard.pending.is_empty() {
+            return;
+        }
+        let mut keep = Vec::new();
+        for req in std::mem::take(&mut guard.pending) {
+            match guard.resolved.get(&req.target).cloned() {
+                Some(texture) => work.push((req, texture)),
+                None => keep.push(req),
+            }
+        }
+        guard.pending = keep;
     }
-    if retry.0.is_empty() {
+    if work.is_empty() {
         return;
     }
 
-    let mut still_pending = Vec::new();
-    for req in std::mem::take(&mut retry.0) {
-        let Some(gpu) = gpu_images.get(req.target) else {
-            // GpuImage not prepared yet; retry next frame.
-            still_pending.push(req);
-            continue;
-        };
-        let render_view = gpu.texture.create_view(&wgpu::TextureViewDescriptor {
+    let mut baked = Vec::new();
+    let mut requeue = Vec::new();
+    for (req, texture) in work {
+        let render_view = texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("noesis label bake (render, Unorm)"),
             format: Some(RENDER_FORMAT),
             ..Default::default()
         });
-        if !state.bake_into(&render_view, &req.xaml_uri, req.size, &req.fields) {
+        if state.bake_into(&render_view, &req.xaml_uri, req.size, &req.fields) {
+            baked.push(req.target);
+        } else {
             // Fonts/template not ready; retry on a later frame.
-            still_pending.push(req);
+            requeue.push(req);
         }
     }
-    retry.0 = still_pending;
+
+    let mut guard = baker.inner.lock().expect("NoesisLabelBaker poisoned");
+    for id in baked {
+        guard.resolved.remove(&id);
+    }
+    guard.pending.append(&mut requeue);
 }
 
 /// Wires [`NoesisLabelBaker`] into the app. Add after [`crate::NoesisPlugin`].
@@ -186,9 +251,14 @@ impl Plugin for NoesisLabelBakerPlugin {
             .add_plugins(ExtractResourcePlugin::<NoesisLabelBaker>::default());
 
         // Runs in `NoesisSet::Apply`, after the scene is ensured and before the
-        // frame is driven. Tolerant of running before `NoesisRenderState` exists
-        // or fonts load: such requests just retry.
-        app.init_resource::<PendingBakes>()
-            .add_systems(PostUpdate, bake_pending_labels.in_set(NoesisSet::Apply));
+        // frame is driven. Tolerant of running before `NoesisRenderState` exists,
+        // a target texture is resolved, or fonts load: such requests just retry.
+        app.add_systems(PostUpdate, bake_pending_labels.in_set(NoesisSet::Apply));
+
+        // Render-world half: resolve each queued target's GPU texture and hand it
+        // back through the shared state for the main-world bake above.
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app.add_systems(Render, resolve_bake_textures.in_set(RenderSystems::Prepare));
+        }
     }
 }
