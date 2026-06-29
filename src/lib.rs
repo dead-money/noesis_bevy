@@ -125,34 +125,37 @@ impl Plugin for NoesisPlugin {
         // + input forwarder. Safe to add unconditionally —
         // NoesisRenderPlugin no-ops if RenderApp isn't present (e.g. a
         // headless-test setup without a display).
-        // Grouped into two nested tuples: asset/render/input infrastructure, and
-        // the per-feature Bevy bridges. The nesting also keeps each tuple under
-        // Bevy's 15-element `Plugins` impl limit.
+        // Grouped into tuples kept under Bevy's 15-element `Plugins` impl limit:
+        // asset/render/input infrastructure, then the per-feature Bevy bridges
+        // split into two groups so new bridges have headroom (each new bridge
+        // appends to `bridge_group_b`).
         app.add_plugins((
-            (
-                xaml::XamlAssetPlugin,
-                font::FontAssetPlugin,
-                image::ImageAssetPlugin,
-                render::NoesisRenderPlugin,
-                input::NoesisInputPlugin,
-            ),
-            (
-                events::NoesisEventsPlugin,
-                routed_events::NoesisRoutedEventsPlugin,
-                classes::NoesisClassPlugin,
-                markup::NoesisMarkupExtensionPlugin,
-                visibility::NoesisVisibilityPlugin,
-                layout::NoesisLayoutPlugin,
-                text::NoesisTextPlugin,
-                geometry::NoesisGeometryPlugin,
-                focus::NoesisFocusPlugin,
-                visual_state::NoesisVisualStatePlugin,
-                focus_input::NoesisFocusControlPlugin,
-                viewmodel::NoesisViewModelPlugin,
-                commands::NoesisCommandsPlugin,
-                items::NoesisItemsPlugin,
-                dp::NoesisDpPlugin,
-            ),
+            xaml::XamlAssetPlugin,
+            font::FontAssetPlugin,
+            image::ImageAssetPlugin,
+            render::NoesisRenderPlugin,
+            input::NoesisInputPlugin,
+        ));
+        // Bridge group A — the foundational per-element bridges.
+        app.add_plugins((
+            events::NoesisEventsPlugin,
+            routed_events::NoesisRoutedEventsPlugin,
+            classes::NoesisClassPlugin,
+            markup::NoesisMarkupExtensionPlugin,
+            visibility::NoesisVisibilityPlugin,
+            layout::NoesisLayoutPlugin,
+            text::NoesisTextPlugin,
+            geometry::NoesisGeometryPlugin,
+        ));
+        // Bridge group B — interaction + data bridges. New bridges append here.
+        app.add_plugins((
+            focus::NoesisFocusPlugin,
+            visual_state::NoesisVisualStatePlugin,
+            focus_input::NoesisFocusControlPlugin,
+            viewmodel::NoesisViewModelPlugin,
+            commands::NoesisCommandsPlugin,
+            items::NoesisItemsPlugin,
+            dp::NoesisDpPlugin,
         ));
     }
 }
