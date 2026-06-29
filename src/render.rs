@@ -53,7 +53,7 @@ use noesis_runtime::events::{
     subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
-use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D};
+use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D, MatrixTransform3D};
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
 use crate::binding::{BindingEntry, BuiltBinding};
@@ -459,6 +459,18 @@ struct SceneInstance {
     /// [`crate::transforms3d::NoesisTransform3DChanged`] emissions. Resets on
     /// scene rebuild.
     transform3d_snapshots: HashMap<String, crate::transforms3d::Transform3DSpec>,
+    /// `MatrixTransform3D` handles assigned as elements' `Transform3D` by
+    /// [`crate::transforms3d::NoesisTransform3D`]'s matrix writes, keyed by
+    /// `x:Name`. Held at +1 (the same object Noesis stores) so the poll can read
+    /// it back; same lifetime/identity rules as [`Self::transform3d_handles`].
+    /// Distinct from [`Self::transform3d_handles`] because the two transform
+    /// kinds carry different read-back payloads — a name should use one or the
+    /// other (both write the single `Transform3D` DP, so the later apply wins).
+    matrix_transform3d_handles: HashMap<String, MatrixTransform3D>,
+    /// Last 12-float `Transform3` matrix snapshot per `x:Name`, to dedupe
+    /// [`crate::transforms3d::NoesisMatrixTransform3DChanged`] emissions. Resets
+    /// on scene rebuild.
+    matrix_transform3d_snapshots: HashMap<String, [f32; 12]>,
     /// Last brush read back per `(x:Name, property)` painted by
     /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
     /// emissions; resets on scene rebuild.
@@ -1213,6 +1225,8 @@ impl NoesisRenderState {
                 transform_snapshots: HashMap::new(),
                 transform3d_handles: HashMap::new(),
                 transform3d_snapshots: HashMap::new(),
+                matrix_transform3d_handles: HashMap::new(),
+                matrix_transform3d_snapshots: HashMap::new(),
                 brush_snapshots: HashMap::new(),
                 typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
@@ -2402,6 +2416,106 @@ impl NoesisRenderState {
             }
             scene
                 .transform3d_snapshots
+                .insert(name.to_string(), current);
+            changed.push((name.to_string(), current));
+        }
+        changed
+    }
+
+    /// Assign view `entity`'s desired raw 3D matrix transforms (`x:Name → 12
+    /// `Transform3` floats`). Each becomes a `MatrixTransform3D` held at +1 in
+    /// [`Self::matrix_transform3d_handles`] (the same object Noesis stores), so
+    /// the poll can read it back. Missing names / non-`UIElement` targets warn.
+    /// Matrix analogue of [`Self::apply_transforms3d_for`]; both set the single
+    /// `UIElement::Transform3D` DP, so a name given both kinds keeps whichever
+    /// applied last.
+    pub(crate) fn apply_matrix_transforms3d_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, [f32; 12]>,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        // Drop handles for names no longer requested; releasing each handle's +1.
+        scene
+            .matrix_transform3d_handles
+            .retain(|k, _| desired.contains_key(k));
+        if desired.is_empty() {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, matrix) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTransform3D(matrix): x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let transform = MatrixTransform3D::new(*matrix);
+            if element.set_transform3d(&transform) {
+                scene
+                    .matrix_transform3d_handles
+                    .insert(name.clone(), transform);
+            } else {
+                warn!(
+                    "NoesisTransform3D(matrix): {name:?} has no Transform3D (not a UIElement?) \
+                     in scene {:?}",
+                    scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Poll view `entity`'s named elements' live raw 3D matrix transforms,
+    /// returning `(name, matrix)` for each that changed since last frame (deduped
+    /// against the per-scene snapshot). A name only reports while the element's
+    /// current `Transform3D` is the exact `MatrixTransform3D` we assigned (pointer
+    /// identity), so the read-back is element-sourced proof the assignment took.
+    /// First poll after assignment always reports. Matrix analogue of
+    /// [`Self::poll_transforms3d_for`].
+    pub(crate) fn poll_matrix_transforms3d_for(
+        &mut self,
+        entity: Entity,
+        names: &[&str],
+    ) -> Vec<(String, [f32; 12])> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .matrix_transform3d_snapshots
+            .retain(|name, _| names.contains(&name.as_str()));
+        if names.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for &name in names {
+            let Some(handle) = scene.matrix_transform3d_handles.get(name) else {
+                continue;
+            };
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            // Trust the value only when the element's live Transform3D is the very
+            // object we assigned (Noesis stores our pointer, no clone).
+            let Some(live) = element.transform3d() else {
+                continue;
+            };
+            if live.raw() != handle.raw() {
+                continue;
+            }
+            let current = handle.get();
+            if scene.matrix_transform3d_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene
+                .matrix_transform3d_snapshots
                 .insert(name.to_string(), current);
             changed.push((name.to_string(), current));
         }

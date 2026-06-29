@@ -110,7 +110,8 @@ pub use transforms::{
     NoesisTransform, NoesisTransformChanged, NoesisTransformPlugin, TransformSpec,
 };
 pub use transforms3d::{
-    NoesisTransform3D, NoesisTransform3DChanged, NoesisTransform3DPlugin, Transform3DSpec,
+    Matrix3DSpec, NoesisMatrixTransform3DChanged, NoesisTransform3D, NoesisTransform3DChanged,
+    NoesisTransform3DPlugin, Transform3DSpec,
 };
 pub use typography::{
     FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
