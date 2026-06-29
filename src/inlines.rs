@@ -9,6 +9,12 @@
 //! (It is distinct from `noesis_runtime::formatted_text`, which is a standalone
 //! text *measurement* object, not a `TextBlock`'s content.)
 //!
+//! Beyond the styled spans, an [`InlineSpec`] can carry a [`TextDecorations`]
+//! value (via [`InlineSpec::decorated`], a `Span` with the decoration applied to
+//! it and its descendants) and embed an arbitrary `UIElement` in flow content
+//! (via [`InlineSpec::ui_container`], an `InlineUIContainer` hosting a child
+//! parsed from XAML).
+//!
 //! Add a [`NoesisInlines`] component to the view's camera entity. Its `set` map is
 //! the desired inline tree ([`InlineSpec`]) per `x:Name`, applied whenever the
 //! component changes (Bevy change detection). Its `watch` list names `TextBlock`s
@@ -30,14 +36,14 @@
 //! );
 //! ```
 //!
-//! # One-shot semantics (runtime 0.10 limitation)
+//! # Re-apply semantics
 //!
-//! Noesis exposes no way to *clear* an `InlineCollection` through the 0.10 FFI
-//! surface (`UICollection::Clear` is unwrapped, and setting `TextBlock.Text`
-//! does **not** reset already-populated `Inlines`). The bridge therefore only
-//! populates a `TextBlock` whose `Inlines` is currently empty; once content has
-//! been applied (by this bridge or authored in XAML) a later, different `set` for
-//! the same name is refused with a warning. Rebuild the scene to change it.
+//! A changed [`NoesisInlines`] component is fully re-applied: for each named
+//! `TextBlock` in `set`, the bridge **clears** the live `InlineCollection`
+//! (`InlineCollection::clear`, exposed since runtime 0.10) and repopulates it
+//! from the new spec, replacing whatever was there — whether built by an earlier
+//! apply or authored in XAML. Editing a spec therefore swaps the rendered
+//! content in place without rebuilding the scene.
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies the writes /
@@ -48,8 +54,14 @@ use std::ffi::c_void;
 
 use bevy::prelude::*;
 use noesis_runtime::text_inlines::{
-    Bold, Hyperlink, InlineCollection, Italic, LineBreak, Run, Span, Underline,
+    Bold, Hyperlink, Inline, InlineCollection, InlineUIContainer, Italic, LineBreak, Run, Span,
+    Underline,
 };
+use noesis_runtime::view::FrameworkElement;
+
+/// Re-exported from `noesis_runtime`: the `TextDecorations` an inline can carry
+/// (see [`InlineSpec::decorated`]).
+pub use noesis_runtime::text_inlines::TextDecorations;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
@@ -80,6 +92,23 @@ pub enum InlineSpec {
         uri: Option<String>,
         /// The hyperlink's child inlines (typically its label `Run`).
         children: Vec<InlineSpec>,
+    },
+    /// A `Span` carrying a [`TextDecorations`] value applied to it and its
+    /// descendants (e.g. `Strikethrough` / `OverLine`). This is how per-inline
+    /// `TextDecorations` is expressed in the spec.
+    Decorated {
+        /// The decoration to apply to the span.
+        decoration: TextDecorations,
+        /// The decorated span's child inlines.
+        children: Vec<InlineSpec>,
+    },
+    /// An `InlineUIContainer` embedding an arbitrary `UIElement` in flow content.
+    /// The child is parsed from `child_xaml` (e.g. `"<Button Content=\"Go\"/>"`,
+    /// with the presentation namespace declared) so it is freshly owned by the
+    /// container and never collides with an element already in the visual tree.
+    UiContainer {
+        /// XAML markup parsed into the hosted `UIElement`.
+        child_xaml: String,
     },
 }
 
@@ -131,6 +160,26 @@ impl InlineSpec {
             children: children.into_iter().collect(),
         }
     }
+
+    /// A `Span` with `decoration` applied to it (and its descendants).
+    #[must_use]
+    pub fn decorated(
+        decoration: TextDecorations,
+        children: impl IntoIterator<Item = InlineSpec>,
+    ) -> Self {
+        Self::Decorated {
+            decoration,
+            children: children.into_iter().collect(),
+        }
+    }
+
+    /// An `InlineUIContainer` hosting the `UIElement` parsed from `child_xaml`.
+    #[must_use]
+    pub fn ui_container(child_xaml: impl Into<String>) -> Self {
+        Self::UiContainer {
+            child_xaml: child_xaml.into(),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -151,6 +200,14 @@ pub(crate) enum BuiltInline {
     Underline(Underline, Vec<BuiltInline>),
     Span(Span, Vec<BuiltInline>),
     Hyperlink(Hyperlink, Vec<BuiltInline>),
+    /// A decoration-carrying `Span`; the second field is its children. Held
+    /// separately from `Span` so the read-back can report its live
+    /// [`TextDecorations`].
+    Decorated(Span, Vec<BuiltInline>),
+    /// An `InlineUIContainer` and the child element it hosts (`None` if the
+    /// child XAML failed to parse). The child handle is kept so the read-back
+    /// can check the live `Child` against it by pointer identity.
+    UiContainer(InlineUIContainer, Option<FrameworkElement>),
 }
 
 impl BuiltInline {
@@ -164,6 +221,8 @@ impl BuiltInline {
             BuiltInline::Underline(h, _) => h.raw(),
             BuiltInline::Span(h, _) => h.raw(),
             BuiltInline::Hyperlink(h, _) => h.raw(),
+            BuiltInline::Decorated(h, _) => h.raw(),
+            BuiltInline::UiContainer(h, _) => h.raw(),
         }
     }
 
@@ -177,6 +236,8 @@ impl BuiltInline {
             BuiltInline::Underline(h, _) => collection.add(h),
             BuiltInline::Span(h, _) => collection.add(h),
             BuiltInline::Hyperlink(h, _) => collection.add(h),
+            BuiltInline::Decorated(h, _) => collection.add(h),
+            BuiltInline::UiContainer(h, _) => collection.add(h),
         };
     }
 }
@@ -230,6 +291,35 @@ fn build_one(spec: &InlineSpec) -> BuiltInline {
             };
             BuiltInline::Hyperlink(handle, kids)
         }
+        InlineSpec::Decorated {
+            decoration,
+            children,
+        } => {
+            let handle = Span::new();
+            // A false return only means the type rejected the property; the span
+            // (and its children) are still valid flow content.
+            let _ = handle.set_text_decorations(*decoration);
+            let kids = match handle.inlines() {
+                Some(mut col) => build_into(&mut col, children),
+                None => Vec::new(),
+            };
+            BuiltInline::Decorated(handle, kids)
+        }
+        InlineSpec::UiContainer { child_xaml } => {
+            let mut handle = InlineUIContainer::new();
+            let child = FrameworkElement::parse(child_xaml);
+            match &child {
+                Some(element) => {
+                    if !handle.set_child(element) {
+                        warn!("NoesisInlines: InlineUIContainer child is not a UIElement; skipped");
+                    }
+                }
+                None => warn!(
+                    "NoesisInlines: InlineUIContainer child XAML failed to parse: {child_xaml:?}",
+                ),
+            }
+            BuiltInline::UiContainer(handle, child)
+        }
     }
 }
 
@@ -241,12 +331,13 @@ fn flatten_into(tree: &[BuiltInline], out: &mut String) {
                     out.push_str(&text);
                 }
             }
-            BuiltInline::LineBreak(_) => {}
+            BuiltInline::LineBreak(_) | BuiltInline::UiContainer(_, _) => {}
             BuiltInline::Bold(_, kids)
             | BuiltInline::Italic(_, kids)
             | BuiltInline::Underline(_, kids)
             | BuiltInline::Span(_, kids)
-            | BuiltInline::Hyperlink(_, kids) => flatten_into(kids, out),
+            | BuiltInline::Hyperlink(_, kids)
+            | BuiltInline::Decorated(_, kids) => flatten_into(kids, out),
         }
     }
 }
@@ -263,7 +354,51 @@ fn collect_uris(tree: &[BuiltInline], out: &mut Vec<String>) {
             BuiltInline::Bold(_, kids)
             | BuiltInline::Italic(_, kids)
             | BuiltInline::Underline(_, kids)
-            | BuiltInline::Span(_, kids) => collect_uris(kids, out),
+            | BuiltInline::Span(_, kids)
+            | BuiltInline::Decorated(_, kids) => collect_uris(kids, out),
+            BuiltInline::Run(_) | BuiltInline::LineBreak(_) | BuiltInline::UiContainer(_, _) => {}
+        }
+    }
+}
+
+/// Collect each [`BuiltInline::Decorated`] span's *live* [`TextDecorations`],
+/// depth-first, re-reading from the Noesis object (not the spec).
+fn collect_decorations(tree: &[BuiltInline], out: &mut Vec<TextDecorations>) {
+    for node in tree {
+        match node {
+            BuiltInline::Decorated(h, kids) => {
+                if let Some(d) = h.text_decorations() {
+                    out.push(d);
+                }
+                collect_decorations(kids, out);
+            }
+            BuiltInline::Bold(_, kids)
+            | BuiltInline::Italic(_, kids)
+            | BuiltInline::Underline(_, kids)
+            | BuiltInline::Span(_, kids)
+            | BuiltInline::Hyperlink(_, kids) => collect_decorations(kids, out),
+            BuiltInline::Run(_) | BuiltInline::LineBreak(_) | BuiltInline::UiContainer(_, _) => {}
+        }
+    }
+}
+
+/// Count [`BuiltInline::UiContainer`]s whose *live* `Child` is present and
+/// matches the element the bridge hosted, by pointer identity (depth-first).
+fn count_hosted_ui(tree: &[BuiltInline], out: &mut usize) {
+    for node in tree {
+        match node {
+            BuiltInline::UiContainer(container, child) => {
+                let live = container.child_raw();
+                if !live.is_null() && child.as_ref().is_some_and(|c| c.raw() == live) {
+                    *out += 1;
+                }
+            }
+            BuiltInline::Bold(_, kids)
+            | BuiltInline::Italic(_, kids)
+            | BuiltInline::Underline(_, kids)
+            | BuiltInline::Span(_, kids)
+            | BuiltInline::Hyperlink(_, kids)
+            | BuiltInline::Decorated(_, kids) => count_hosted_ui(kids, out),
             BuiltInline::Run(_) | BuiltInline::LineBreak(_) => {}
         }
     }
@@ -277,6 +412,10 @@ pub(crate) fn readback(tree: &[BuiltInline], collection: &InlineCollection) -> I
     flatten_into(tree, &mut text);
     let mut hyperlink_uris = Vec::new();
     collect_uris(tree, &mut hyperlink_uris);
+    let mut decorations = Vec::new();
+    collect_decorations(tree, &mut decorations);
+    let mut hosted_ui = 0;
+    count_hosted_ui(tree, &mut hosted_ui);
     // Every built top-level inline must sit at its expected index in the *live*
     // collection: this is the bluff-killer (a no-op apply leaves count 0, and the
     // identity check is vacuously true only because `tree` is empty too).
@@ -290,6 +429,8 @@ pub(crate) fn readback(tree: &[BuiltInline], collection: &InlineCollection) -> I
         text,
         matched,
         hyperlink_uris,
+        decorations,
+        hosted_ui,
     }
 }
 
@@ -312,6 +453,13 @@ pub struct InlinesReadback {
     pub matched: bool,
     /// Each `Hyperlink`'s live `NavigateUri`, depth-first.
     pub hyperlink_uris: Vec<String>,
+    /// Each decorated span's live [`TextDecorations`], depth-first. Read from the
+    /// live Noesis `Span` (not echoed from the spec).
+    pub decorations: Vec<TextDecorations>,
+    /// Number of `InlineUIContainer`s whose live `Child` is present and matches
+    /// the element the bridge hosted, by pointer identity. Proves the embedded
+    /// `UIElement` really is this container's child.
+    pub hosted_ui: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,9 +470,9 @@ pub struct InlinesReadback {
 /// entity.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisInlines {
-    /// Desired inline tree per element `x:Name`. Applied when this component
-    /// changes, but only to a `TextBlock` whose `Inlines` is currently empty (see
-    /// the module's one-shot semantics).
+    /// Desired inline tree per element `x:Name`. Fully re-applied whenever this
+    /// component changes: the target `TextBlock`'s `Inlines` is cleared and
+    /// repopulated from the spec (see the module's re-apply semantics).
     pub set: HashMap<String, Vec<InlineSpec>>,
     /// Element `x:Name`s whose live inline structure to observe. A change vs. the
     /// previous frame emits a [`NoesisInlinesChanged`]; the first poll after a
@@ -429,6 +577,23 @@ mod tests {
             Some(&vec![InlineSpec::Bold(vec![InlineSpec::Run("X".into())])]),
         );
         assert_eq!(c.watch, vec!["Body".to_string(), "Title".to_string()]);
+    }
+
+    #[test]
+    fn decorated_and_ui_container_specs() {
+        assert_eq!(
+            InlineSpec::decorated(TextDecorations::Strikethrough, [InlineSpec::run("x")]),
+            InlineSpec::Decorated {
+                decoration: TextDecorations::Strikethrough,
+                children: vec![InlineSpec::Run("x".into())],
+            },
+        );
+        assert_eq!(
+            InlineSpec::ui_container("<Rectangle/>"),
+            InlineSpec::UiContainer {
+                child_xaml: "<Rectangle/>".into(),
+            },
+        );
     }
 
     #[test]

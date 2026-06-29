@@ -85,6 +85,7 @@ pub use imaging::{
 };
 pub use inlines::{
     InlineSpec, InlinesReadback, NoesisInlines, NoesisInlinesChanged, NoesisInlinesPlugin,
+    TextDecorations,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use integration::{
@@ -102,7 +103,9 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
-pub use styles::{NoesisStyles, NoesisStylesPlugin, PropertyTrigger, StyleSpec};
+pub use styles::{
+    DataTriggerSpec, MultiTriggerSpec, NoesisStyles, NoesisStylesPlugin, PropertyTrigger, StyleSpec,
+};
 pub use svg::{NoesisSvg, NoesisSvgChanged, NoesisSvgPlugin};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
@@ -110,7 +113,8 @@ pub use transforms::{
     NoesisTransform, NoesisTransformChanged, NoesisTransformPlugin, TransformSpec,
 };
 pub use transforms3d::{
-    NoesisTransform3D, NoesisTransform3DChanged, NoesisTransform3DPlugin, Transform3DSpec,
+    Matrix3DSpec, NoesisMatrixTransform3DChanged, NoesisTransform3D, NoesisTransform3DChanged,
+    NoesisTransform3DPlugin, Transform3DSpec,
 };
 pub use typography::{
     FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
