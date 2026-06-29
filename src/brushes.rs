@@ -17,12 +17,15 @@
 //! );
 //! ```
 //!
-//! Unlike the purely write-only bridges, this one also *polls back* the solid
-//! color that actually landed on each target and emits a [`NoesisBrushChanged`]
-//! message — a read-back that proves the assignment took (a gradient target has
-//! no single color, so it reports nothing). The default (unset) Background is
-//! null, so a missing apply / wrong-entity routing reads `None` and stays
-//! silent; only a real assignment surfaces a message.
+//! Unlike the purely write-only bridges, this one also *polls back* the brush
+//! that actually landed on each target and emits a [`NoesisBrushChanged`]
+//! message — a read-back that proves the assignment took. A solid spec reports
+//! [`BrushReadback::Solid`] with the exact color read off the live brush; a
+//! gradient reports [`BrushReadback::NonSolid`] (the runtime exposes no safe
+//! per-DP gradient-stop read-back, so the bridge can only prove a non-solid
+//! brush is present, not its stops). The default (unset) Background is null, so
+//! a missing apply / wrong-entity routing reads as *no brush* and stays silent;
+//! only a real assignment surfaces a message.
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component, applies the brush writes,
@@ -153,9 +156,30 @@ impl NoesisBrushes {
 // Read-back message
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Emitted when the solid color read back from a painted target differs from the
-/// previous frame's snapshot. Proves a [`BrushSpec::Solid`] assignment landed
-/// (gradients report no color). Read with `MessageReader<NoesisBrushChanged>`.
+/// What was read back from a painted target's live brush DP — the observable
+/// proof an assignment actually landed on the element (not just on the Rust-side
+/// spec). The two variants are mutually exclusive and both distinguish a real
+/// assignment from the unpainted default (which reads as *no brush* and emits
+/// nothing at all).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BrushReadback {
+    /// A live `SolidColorBrush` is present; carries the exact color read back
+    /// from it (`[r, g, b, a]`). Proves a [`BrushSpec::Solid`] landed with the
+    /// requested color.
+    Solid([f32; 4]),
+    /// A live brush is present but is *not* a `SolidColorBrush` (e.g. a
+    /// `LinearGradientBrush`), so it has no single read-back color. Proves a
+    /// non-solid [`BrushSpec`] (a gradient) landed — the strongest signal the
+    /// `unsafe_code = forbid` crate can read for a gradient, since the runtime
+    /// exposes no safe per-DP gradient-stop read-back (see module note).
+    NonSolid,
+}
+
+/// Emitted when the brush read back from a painted target differs from the
+/// previous frame's snapshot. Proves a [`BrushSpec`] assignment landed: a
+/// [`BrushSpec::Solid`] surfaces [`BrushReadback::Solid`] with its color, a
+/// gradient surfaces [`BrushReadback::NonSolid`], and an unpainted target stays
+/// silent. Read with `MessageReader<NoesisBrushChanged>`.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisBrushChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose brush changed.
@@ -164,8 +188,8 @@ pub struct NoesisBrushChanged {
     pub name: String,
     /// The property that was painted.
     pub target: BrushTarget,
-    /// Solid color read back from the live brush, `[r, g, b, a]`.
-    pub color: [f32; 4],
+    /// What landed on the target's live brush DP.
+    pub readback: BrushReadback,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,12 +212,12 @@ pub(crate) fn sync_brushes_bridge(
         if brushes.is_changed() {
             state.apply_brushes_for(entity, &brushes.brushes);
         }
-        for (name, target, color) in state.poll_brush_reads_for(entity, &brushes.brushes) {
+        for (name, target, readback) in state.poll_brush_reads_for(entity, &brushes.brushes) {
             changed.write(NoesisBrushChanged {
                 view: entity,
                 name,
                 target,
-                color,
+                readback,
             });
         }
     }

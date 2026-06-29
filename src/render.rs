@@ -411,10 +411,10 @@ struct SceneInstance {
     /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
     /// scene so it resets on rebuild.
     dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
-    /// Last solid color read back per `(x:Name, property)` painted by
+    /// Last brush read back per `(x:Name, property)` painted by
     /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
     /// emissions; resets on scene rebuild.
-    brush_snapshots: HashMap<(String, String), [f32; 4]>,
+    brush_snapshots: HashMap<(String, String), crate::brushes::BrushReadback>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
     /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
@@ -1796,16 +1796,25 @@ impl NoesisRenderState {
         }
     }
 
-    /// Poll view `entity`'s painted targets, returning `(name, target, color)`
-    /// for each whose live `SolidColorBrush` color changed since last frame
-    /// (deduped against the per-scene snapshot). Gradient targets have no single
-    /// color and report nothing. The read-back proves a solid assignment landed;
-    /// first poll after a target is painted always reports.
+    /// Poll view `entity`'s painted targets, returning `(name, target, readback)`
+    /// for each whose live brush changed since last frame (deduped against the
+    /// per-scene snapshot). A `SolidColorBrush` reports its exact color
+    /// ([`BrushReadback::Solid`](crate::brushes::BrushReadback::Solid)); any other
+    /// live brush (e.g. a gradient) reports
+    /// [`BrushReadback::NonSolid`](crate::brushes::BrushReadback::NonSolid); a
+    /// target with no brush at all (unpainted / failed assign) reports nothing.
+    /// The read-back proves the assignment landed; first poll after a target is
+    /// painted always reports.
     pub(crate) fn poll_brush_reads_for(
         &mut self,
         entity: Entity,
         desired: &HashMap<(String, crate::brushes::BrushTarget), crate::brushes::BrushSpec>,
-    ) -> Vec<(String, crate::brushes::BrushTarget, [f32; 4])> {
+    ) -> Vec<(
+        String,
+        crate::brushes::BrushTarget,
+        crate::brushes::BrushReadback,
+    )> {
+        use crate::brushes::BrushReadback;
         let mut changed = Vec::new();
         let Some(scene) = self.scenes.get_mut(&entity) else {
             return changed;
@@ -1825,10 +1834,19 @@ impl NoesisRenderState {
             let Some(element) = content.find_name(name) else {
                 continue;
             };
-            let Some(current) = element.solid_brush_color(target.property()) else {
+            let property = target.property();
+            // Solid: read the exact color. Otherwise, if a brush is present at
+            // all (non-null DP), it's a non-solid brush (e.g. a gradient) — the
+            // only gradient signal the unsafe-free crate can read. No brush ⇒
+            // nothing landed ⇒ stay silent.
+            let current = if let Some(color) = element.solid_brush_color(property) {
+                BrushReadback::Solid(color)
+            } else if element.get_component(property).is_some() {
+                BrushReadback::NonSolid
+            } else {
                 continue;
             };
-            let key = (name.clone(), target.property().to_string());
+            let key = (name.clone(), property.to_string());
             if scene.brush_snapshots.get(&key) == Some(&current) {
                 continue;
             }

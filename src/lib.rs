@@ -38,7 +38,8 @@ pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use brushes::{
-    BrushSpec, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes, NoesisBrushesPlugin,
+    BrushReadback, BrushSpec, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes,
+    NoesisBrushesPlugin,
 };
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
 pub use commands::{
