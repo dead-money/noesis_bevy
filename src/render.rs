@@ -411,6 +411,10 @@ struct SceneInstance {
     /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
     /// scene so it resets on rebuild.
     dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
+    /// Last solid color read back per `(x:Name, property)` painted by
+    /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
+    /// emissions; resets on scene rebuild.
+    brush_snapshots: HashMap<(String, String), [f32; 4]>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
     /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
@@ -1005,6 +1009,7 @@ impl NoesisRenderState {
                 event_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
+                brush_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
             },
@@ -1716,6 +1721,119 @@ impl NoesisRenderState {
             }
             scene.dp_snapshots.insert(key, current.clone());
             changed.push((watch.name.clone(), watch.property.clone(), current));
+        }
+        changed
+    }
+
+    /// Paint view `entity`'s elements with the desired code-built brushes
+    /// (`(x:Name, target) → spec`). Each spec is built into a fresh Noesis brush
+    /// and assigned through the element's typed brush sugar; Noesis takes its own
+    /// reference, so the Rust handle is dropped right after. Missing names warn;
+    /// a target the element lacks (e.g. `Fill` on a `Border`) warns too.
+    /// Called when the view's `NoesisBrushes` component changes.
+    pub(crate) fn apply_brushes_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<(String, crate::brushes::BrushTarget), crate::brushes::BrushSpec>,
+    ) {
+        use crate::brushes::{BrushSpec, BrushTarget};
+        use noesis_runtime::brushes::{GradientStop, LinearGradientBrush, SolidColorBrush};
+        use noesis_runtime::view::FrameworkElement;
+
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+
+        // Assign any `Brush` to `target`'s DP via the element's safe sugar.
+        fn assign(
+            target: BrushTarget,
+            el: &mut FrameworkElement,
+            brush: &impl noesis_runtime::brushes::Brush,
+        ) -> bool {
+            match target {
+                BrushTarget::Background => el.set_background(brush),
+                BrushTarget::Foreground => el.set_foreground(brush),
+                BrushTarget::Fill => el.set_fill(brush),
+                BrushTarget::Stroke => el.set_stroke(brush),
+            }
+        }
+
+        for ((name, target), spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisBrushes: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let ok = match spec {
+                BrushSpec::Solid(rgba) => {
+                    let brush = SolidColorBrush::new(*rgba);
+                    assign(*target, &mut element, &brush)
+                }
+                BrushSpec::LinearGradient { start, end, stops } => {
+                    let mut brush = LinearGradientBrush::new();
+                    brush.set_start_point(start[0], start[1]);
+                    brush.set_end_point(end[0], end[1]);
+                    for stop in stops {
+                        brush.add_stop(GradientStop::new(stop.offset, stop.color));
+                    }
+                    assign(*target, &mut element, &brush)
+                }
+            };
+            if !ok {
+                warn!(
+                    "NoesisBrushes: assigning {:?} to {name:?} failed (no such property on this element type)",
+                    target.property(),
+                );
+            }
+        }
+    }
+
+    /// Poll view `entity`'s painted targets, returning `(name, target, color)`
+    /// for each whose live `SolidColorBrush` color changed since last frame
+    /// (deduped against the per-scene snapshot). Gradient targets have no single
+    /// color and report nothing. The read-back proves a solid assignment landed;
+    /// first poll after a target is painted always reports.
+    pub(crate) fn poll_brush_reads_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<(String, crate::brushes::BrushTarget), crate::brushes::BrushSpec>,
+    ) -> Vec<(String, crate::brushes::BrushTarget, [f32; 4])> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene.brush_snapshots.retain(|(name, property), _| {
+            desired
+                .keys()
+                .any(|(n, t)| n == name && t.property() == property)
+        });
+        if desired.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for (name, target) in desired.keys() {
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            let Some(current) = element.solid_brush_color(target.property()) else {
+                continue;
+            };
+            let key = (name.clone(), target.property().to_string());
+            if scene.brush_snapshots.get(&key) == Some(&current) {
+                continue;
+            }
+            scene.brush_snapshots.insert(key, current);
+            changed.push((name.clone(), *target, current));
         }
         changed
     }

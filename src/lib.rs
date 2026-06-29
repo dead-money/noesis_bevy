@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 
 pub mod bake;
+pub mod brushes;
 pub mod classes;
 pub mod commands;
 pub mod dp;
@@ -36,6 +37,9 @@ pub mod visual_state;
 pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
+pub use brushes::{
+    BrushSpec, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes, NoesisBrushesPlugin,
+};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
 pub use commands::{
     CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
@@ -153,6 +157,9 @@ impl Plugin for NoesisPlugin {
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,
             ),
+            // Newer bridges spill into a third tuple (the one above is at Bevy's
+            // 15-element `Plugins` impl limit).
+            (brushes::NoesisBrushesPlugin,),
         ));
     }
 }
