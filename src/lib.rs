@@ -47,6 +47,7 @@ pub mod typography;
 pub mod viewmodel;
 pub mod visibility;
 pub mod visual_state;
+pub mod window_compat;
 pub mod xaml;
 
 pub use animation::{AnimationSpec, NoesisAnimation, NoesisAnimationPlugin};
@@ -96,6 +97,7 @@ pub use integration::{
 };
 pub use items::{
     CollectionViewOp, ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin,
+    ObjectRow, ObjectSource,
 };
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
@@ -132,6 +134,7 @@ pub use viewmodel::{
 };
 pub use visibility::{NoesisVisibility, NoesisVisibilityPlugin};
 pub use visual_state::{NoesisVisualState, NoesisVisualStatePlugin, StateRequest};
+pub use window_compat::{NoesisWindowCompatPlugin, WINDOW_CLASS};
 pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, XamlRegistry};
 
 /// Per-developer Indie license credentials.

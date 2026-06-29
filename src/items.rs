@@ -60,7 +60,11 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use noesis_runtime::binding::ObservableCollection;
+use noesis_runtime::classes::{
+    ClassBuilder, ClassInstance, ClassRegistration, Instance, PropertyChangeHandler, PropertyValue,
+};
 use noesis_runtime::collection_view::{CollectionView, CollectionViewSource, CurrentItem};
+use noesis_runtime::ffi::{ClassBase, PropType};
 use noesis_runtime::view::FrameworkElement;
 
 use crate::render::{NoesisRenderState, NoesisSet};
@@ -134,6 +138,60 @@ impl ItemValue {
             }
         }
     }
+
+    /// The dependency-property [`PropType`] backing this value when it is a
+    /// field of an object item (see [`NoesisItems::with_objects`]).
+    fn prop_type(&self) -> PropType {
+        match self {
+            Self::Str(_) => PropType::String,
+            Self::I32(_) => PropType::Int32,
+            Self::F64(_) => PropType::Double,
+            Self::Bool(_) => PropType::Bool,
+        }
+    }
+
+    /// Write this value into `instance`'s dependency property at `index`.
+    fn set_on(&self, instance: Instance, index: u32) {
+        match self {
+            Self::Str(v) => instance.set_string(index, v),
+            Self::I32(v) => instance.set_int32(index, *v),
+            Self::F64(v) => instance.set_double(index, *v),
+            Self::Bool(v) => instance.set_bool(index, *v),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Object items
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One bindable object item: an ordered list of `(property name, typed value)`
+/// pairs. Each pair becomes a dependency property on a Rust-backed Noesis class
+/// (a [`ClassBase::Freezable`] data object), so a `DataTemplate` can bind
+/// `{Binding <name>}` against it.
+pub type ObjectRow = Vec<(String, ItemValue)>;
+
+/// A list of bindable object items for one `ItemsControl` / `ListBox`, plus the
+/// Noesis class name to register them under. The schema (property names + types)
+/// is taken from the first row; every row should carry the same fields.
+///
+/// `class_name` must be globally unique among registered Noesis classes (it is
+/// registered once, on first use, and held for the binding's lifetime).
+#[derive(Clone, Debug)]
+pub struct ObjectSource {
+    /// Noesis class name registered for these item objects.
+    pub class_name: String,
+    /// One entry per item; each is the item's `(property, value)` fields.
+    pub rows: Vec<ObjectRow>,
+}
+
+/// No-op [`PropertyChangeHandler`] for item objects: their dependency properties
+/// are written once at construction and never mutated, so changes need no
+/// forwarding.
+struct NoopChangeHandler;
+
+impl PropertyChangeHandler for NoopChangeHandler {
+    fn on_changed(&self, _instance: Instance, _prop_index: u32, _value: PropertyValue<'_>) {}
 }
 
 /// Unbox an `ICollectionView` current item into a typed [`ItemValue`], probing
@@ -214,6 +272,11 @@ pub struct NoesisItems {
     /// control's default `ICollectionView` once each time the component changes;
     /// the resulting current item surfaces via [`NoesisItemsCurrent`].
     pub navigate: HashMap<String, CollectionViewOp>,
+    /// Desired bindable **object** items per `x:Name` — for lists whose
+    /// `ItemTemplate`/`DataTemplate` binds per-item properties (`{Binding Name}`,
+    /// `{Binding Score}`, ...). A control should appear in either [`Self::sources`]
+    /// (primitive items) or here, not both.
+    pub objects: HashMap<String, ObjectSource>,
 }
 
 impl NoesisItems {
@@ -258,6 +321,27 @@ impl NoesisItems {
         self.navigate.insert(name.into(), op);
         self
     }
+
+    /// Builder: set element `name`'s items to bindable **objects** registered as
+    /// the Noesis class `class_name`. Each row is the item's `(property, value)`
+    /// fields; the `DataTemplate` binds `{Binding <property>}` against them. The
+    /// schema is taken from the first row.
+    #[must_use]
+    pub fn with_objects(
+        mut self,
+        name: impl Into<String>,
+        class_name: impl Into<String>,
+        rows: Vec<ObjectRow>,
+    ) -> Self {
+        self.objects.insert(
+            name.into(),
+            ObjectSource {
+                class_name: class_name.into(),
+                rows,
+            },
+        );
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,6 +382,16 @@ pub struct ItemsBinding {
     /// Last `(count, selected_index, current_position, current)` reported, to
     /// emit a message only on change. Mirrors the DP bridge's snapshot.
     last_readback: Option<(usize, i32, i32, Option<ItemValue>)>,
+    /// Live object-item instances (for object sources). Holds a `+1` ref each;
+    /// declared before `obj_registration` so they release before the class
+    /// unregisters (the C++ refcount rule).
+    obj_instances: Vec<ClassInstance>,
+    /// Property-name order of the object-item class, for name → DP-index writes.
+    obj_schema: Vec<String>,
+    /// Registration of the object-item class (registered once, on first use).
+    /// Declared last so it drops after `coll` (releases its item refs) and
+    /// `obj_instances`.
+    obj_registration: Option<ClassRegistration>,
 }
 
 impl Default for ItemsBinding {
@@ -324,6 +418,9 @@ impl ItemsBinding {
             desired_nav: None,
             nav_pending: false,
             last_readback: None,
+            obj_instances: Vec::new(),
+            obj_schema: Vec::new(),
+            obj_registration: None,
         }
     }
 
@@ -347,6 +444,59 @@ impl ItemsBinding {
             item.push_into(&mut self.coll);
         }
         // A new list invalidates any previously-applied selection.
+        self.applied_select = None;
+    }
+
+    /// Replace the whole list with bindable object items. Registers the item
+    /// class on first use (schema from the first row), then rebuilds the
+    /// instances and the backing collection. No-op (clears) for an empty source.
+    pub(crate) fn set_objects(&mut self, src: &ObjectSource) {
+        if self.obj_registration.is_none() {
+            let Some(first) = src.rows.first() else {
+                self.coll.clear();
+                self.obj_instances.clear();
+                self.applied_select = None;
+                return;
+            };
+            let mut builder =
+                ClassBuilder::new(&src.class_name, ClassBase::Freezable, NoopChangeHandler);
+            let mut schema = Vec::with_capacity(first.len());
+            for (name, value) in first {
+                builder.add_property(name, value.prop_type());
+                schema.push(name.clone());
+            }
+            match builder.register() {
+                Some(reg) => {
+                    self.obj_registration = Some(reg);
+                    self.obj_schema = schema;
+                }
+                None => {
+                    warn!(
+                        "NoesisItems: failed to register item class {:?} (duplicate name?)",
+                        src.class_name,
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(reg) = self.obj_registration.as_ref() else {
+            return;
+        };
+        self.coll.clear();
+        self.obj_instances.clear();
+        for row in &src.rows {
+            let Some(instance) = reg.create_instance() else {
+                continue;
+            };
+            let handle = instance.handle();
+            for (name, value) in row {
+                if let Some(index) = self.obj_schema.iter().position(|n| n == name) {
+                    value.set_on(handle, index as u32);
+                }
+            }
+            self.coll.push_object(&instance);
+            self.obj_instances.push(instance);
+        }
         self.applied_select = None;
     }
 
@@ -548,6 +698,7 @@ pub(crate) fn sync_items_bridge(
         state.apply_items_for(
             entity,
             &items.sources,
+            &items.objects,
             &items.select,
             &items.navigate,
             items.is_changed(),
