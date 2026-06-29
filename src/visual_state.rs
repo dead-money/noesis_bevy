@@ -101,7 +101,10 @@ pub struct NoesisVisualStatePlugin;
 
 impl Plugin for NoesisVisualStatePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, sync_visual_state_bridge.in_set(NoesisSet::Apply));
+        app.add_systems(
+            PostUpdate,
+            sync_visual_state_bridge.in_set(NoesisSet::Apply),
+        );
     }
 }
 

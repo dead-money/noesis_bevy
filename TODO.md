@@ -34,6 +34,27 @@ and read-back `Message`s carry `view: Entity`. `bake` stays a global offscreen u
 (intentionally not view-scoped). Bevy-app integration tests now exist:
 `tests/headless_app_{bridges,plain_vm,props}.rs`.
 
+**Phase 3A (interaction core) — done.** Four per-view bridges, each with a green Bevy-app
+integration test (`tests/headless_app_{visual_state,routed_events,focus_input,commands}.rs`):
+- `NoesisVisualState` — `VisualStateManager::GoToState` per named control (write-only).
+- `NoesisEventWatch` → `NoesisRoutedEvent` — generic routed-event subscriptions
+  (`subscribe_event`), generalizing the click/keydown bridge.
+- `NoesisFocusControl` — directional `MoveFocus` / `PredictFocus` / focus-engage +
+  `KeyBinding` install, additive to `NoesisFocus`.
+- `NoesisCommands` → `NoesisCommandInvoked` — `ICommand` invocation from XAML
+  `Command="{Binding ...}"`, surfaced per view entity.
+
+Three runtime-side follow-ups these surfaced (file under `noesis_runtime`):
+1. **Command parameter decoding.** `NoesisCommandInvoked.parameter` is always `None` —
+   decoding the boxed `CommandParameter` needs a *safe* unbox in `noesis_runtime`
+   (`ConvertArg` / `noesis_unbox_*` are `unsafe`/`pub(crate)`), unreachable from this
+   `unsafe_code = forbid` crate. The invoke path itself needs no change.
+2. **`predict_focus_name`.** `PredictFocus` returns a borrowed element pointer; naming the
+   predicted element needs a `predict_focus_name(direction) -> Option<String>` wrapper.
+3. **`remove_input_binding`.** The shim wraps `InputBindings.Add` but not remove, so
+   `KeyBinding`s are append-only per scene (drop releases our refs but leaves the binding
+   attached). A remove wrapper would enable true diff-sync teardown.
+
 ---
 
 ## 1. Render device / shaders

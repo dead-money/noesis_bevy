@@ -112,7 +112,11 @@ impl FocusPredict {
     /// Stable identity key for the per-scene prediction snapshot map.
     #[must_use]
     pub fn ident(&self) -> (String, i32, Option<String>) {
-        (self.from.clone(), self.direction as i32, self.expect.clone())
+        (
+            self.from.clone(),
+            self.direction as i32,
+            self.expect.clone(),
+        )
     }
 }
 
@@ -377,7 +381,11 @@ impl Plugin for NoesisFocusControlPlugin {
             .add_systems(PreUpdate, drain_focus_binding_queue)
             .add_systems(
                 PostUpdate,
-                (sync_focus_control, sync_focus_bindings, poll_focus_predictions)
+                (
+                    sync_focus_control,
+                    sync_focus_bindings,
+                    poll_focus_predictions,
+                )
                     .in_set(NoesisSet::Apply),
             );
     }
@@ -411,6 +419,9 @@ mod tests {
             key: Key::A,
             modifiers: ModifierKeys::CONTROL,
         };
-        assert_eq!(b.ident(), ("X".to_string(), Key::A as i32, ModifierKeys::CONTROL.bits()));
+        assert_eq!(
+            b.ident(),
+            ("X".to_string(), Key::A as i32, ModifierKeys::CONTROL.bits())
+        );
     }
 }

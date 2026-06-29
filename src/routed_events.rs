@@ -275,8 +275,18 @@ mod tests {
     fn shared_routed_queue_drain_takes_all_and_resets() {
         let q = SharedRoutedEventQueue::default();
         let v = Entity::PLACEHOLDER;
-        q.push(v, "Alpha".into(), RoutedEvent::MouseDown, RoutedEventSnapshot::default());
-        q.push(v, "Beta".into(), RoutedEvent::MouseUp, RoutedEventSnapshot::default());
+        q.push(
+            v,
+            "Alpha".into(),
+            RoutedEvent::MouseDown,
+            RoutedEventSnapshot::default(),
+        );
+        q.push(
+            v,
+            "Beta".into(),
+            RoutedEvent::MouseUp,
+            RoutedEventSnapshot::default(),
+        );
         let drained = q.drain();
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].1, "Alpha");

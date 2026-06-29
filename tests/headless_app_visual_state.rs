@@ -104,7 +104,10 @@ fn visual_state_bridge_transitions_named_control() {
     app.add_systems(
         Startup,
         move |mut commands: Commands, mut reg: ResMut<XamlRegistry>| {
-            reg.insert("states.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
+            reg.insert(
+                "states.xaml".to_string(),
+                Arc::new(XAML.as_bytes().to_vec()),
+            );
             let view = commands
                 .spawn((
                     Camera2d,

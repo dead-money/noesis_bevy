@@ -53,14 +53,14 @@ use noesis_runtime::events::{
 use noesis_runtime::input::KeyBinding;
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
-use crate::events::{SharedClickQueue, SharedKeyDownQueue};
-use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
-use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
+use crate::events::{SharedClickQueue, SharedKeyDownQueue};
+use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::ItemsBinding;
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
+use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
 
@@ -1560,7 +1560,12 @@ impl NoesisRenderState {
         &mut self,
         entity: Entity,
         predicts: &[crate::focus_input::FocusPredict],
-    ) -> Vec<(String, crate::focus_input::FocusNavigationDirection, bool, bool)> {
+    ) -> Vec<(
+        String,
+        crate::focus_input::FocusNavigationDirection,
+        bool,
+        bool,
+    )> {
         let mut changed = Vec::new();
         let Some(scene) = self.scenes.get_mut(&entity) else {
             return changed;

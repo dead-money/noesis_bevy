@@ -42,7 +42,13 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <Border x:Name="Target" Background="#400000FF"/>
 </Grid>"##;
 
-type Collected = Vec<(Entity, String, RoutedEvent, Option<MouseButton>, Option<(f32, f32)>)>;
+type Collected = Vec<(
+    Entity,
+    String,
+    RoutedEvent,
+    Option<MouseButton>,
+    Option<(f32, f32)>,
+)>;
 
 #[test]
 fn routed_event_watch_surfaces_mouse_down_with_args() {
@@ -70,7 +76,10 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
     app.add_systems(
         Startup,
         move |mut commands: Commands, mut reg: ResMut<XamlRegistry>| {
-            reg.insert("routed.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
+            reg.insert(
+                "routed.xaml".to_string(),
+                Arc::new(XAML.as_bytes().to_vec()),
+            );
             let view = commands
                 .spawn((
                     Camera2d,

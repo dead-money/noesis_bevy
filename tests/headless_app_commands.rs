@@ -149,8 +149,7 @@ fn ui_command_invocation_surfaces_message_for_the_right_view() {
 
     // Positive signal: the click invoked `Fire` on the right view entity.
     assert!(
-        got.iter()
-            .any(|(_, e, name)| *e == view && name == "Fire"),
+        got.iter().any(|(_, e, name)| *e == view && name == "Fire"),
         "expected a NoesisCommandInvoked {{ view: {view:?}, name: \"Fire\" }}; got {got:?}",
     );
 

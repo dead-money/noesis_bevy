@@ -323,7 +323,8 @@ impl CommandEntry {
         queue: &SharedCommandQueue,
     ) -> Option<Self> {
         let names: Vec<String> = def.commands.clone();
-        let mut builder = ClassBuilder::new(&def.class_name, ClassBase::ContentControl, NoCommandChanges);
+        let mut builder =
+            ClassBuilder::new(&def.class_name, ClassBase::ContentControl, NoCommandChanges);
         for name in &names {
             builder.add_property(name, PropType::BaseComponent);
         }

@@ -32,8 +32,8 @@ use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
 use dm_noesis_bevy::{
-    DpKind, DpValue, FocusNavigationDirection, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisFocus,
-    NoesisFocusControl, NoesisFocusPredicted, NoesisPlugin, NoesisView, XamlRegistry,
+    DpKind, DpValue, FocusNavigationDirection, NoesisCamera, NoesisDp, NoesisDpChanged,
+    NoesisFocus, NoesisFocusControl, NoesisFocusPredicted, NoesisPlugin, NoesisView, XamlRegistry,
 };
 
 const FOCUS_AT_FRAME: usize = 10;
@@ -140,10 +140,11 @@ fn focus_control_moves_focus_and_predicts() {
             }
 
             for ev in dp_changes.read() {
-                dp_sys
-                    .lock()
-                    .unwrap()
-                    .push((ev.view, format!("{}.{}", ev.name, ev.property), ev.value.clone()));
+                dp_sys.lock().unwrap().push((
+                    ev.view,
+                    format!("{}.{}", ev.name, ev.property),
+                    ev.value.clone(),
+                ));
             }
             for ev in predicts.read() {
                 predict_sys.lock().unwrap().push((
