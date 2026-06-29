@@ -25,6 +25,7 @@ pub mod font;
 pub mod geometry;
 pub mod image;
 pub mod imaging;
+pub mod inlines;
 pub mod input;
 pub mod integration;
 pub mod items;
@@ -79,6 +80,9 @@ pub use image::{
 };
 pub use imaging::{
     ImageBitmap, ImageReadback, NoesisImageChanged, NoesisImaging, NoesisImagingPlugin,
+};
+pub use inlines::{
+    InlineSpec, InlinesReadback, NoesisInlines, NoesisInlinesChanged, NoesisInlinesPlugin,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use integration::{
@@ -180,6 +184,7 @@ impl Plugin for NoesisPlugin {
             visibility::NoesisVisibilityPlugin,
             layout::NoesisLayoutPlugin,
             text::NoesisTextPlugin,
+            inlines::NoesisInlinesPlugin,
             geometry::NoesisGeometryPlugin,
         ));
         // Bridge group B — interaction + data bridges. New bridges append here.

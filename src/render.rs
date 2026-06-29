@@ -465,6 +465,14 @@ struct SceneInstance {
     /// [`crate::imaging::NoesisImaging`]. Dedupes
     /// [`crate::imaging::NoesisImageChanged`] emissions; resets on scene rebuild.
     image_snapshots: HashMap<String, crate::imaging::ImageReadback>,
+    /// Live inline handle trees built by [`crate::inlines::NoesisInlines`], keyed
+    /// by `x:Name`. Held so the read-back can re-read live `Run` text / `Hyperlink`
+    /// URIs; the `TextBlock`'s collection also owns these (`AddRef`'d on add), so
+    /// they stay valid while it keeps them. Drops with the scene.
+    inline_handles: HashMap<String, Vec<crate::inlines::BuiltInline>>,
+    /// Last inline read-back per `x:Name` watched by `NoesisInlines`. Dedupes
+    /// [`crate::inlines::NoesisInlinesChanged`] emissions; resets on scene rebuild.
+    inlines_snapshots: HashMap<String, crate::inlines::InlinesReadback>,
 }
 
 /// One installed `KeyBinding`. Holds the `Command` *and* the `KeyBinding` at +1
@@ -1155,6 +1163,8 @@ impl NoesisRenderState {
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
                 image_snapshots: HashMap::new(),
+                inline_handles: HashMap::new(),
+                inlines_snapshots: HashMap::new(),
             },
         );
     }
@@ -1666,6 +1676,100 @@ impl NoesisRenderState {
             }
             scene.typo_snapshots.insert(key, current.clone());
             changed.push((watch.name.clone(), current));
+        }
+        changed
+    }
+
+    /// Populate each named `TextBlock`'s `Inlines` with the desired inline tree
+    /// from view `entity`'s [`crate::inlines::NoesisInlines`] component. Builds
+    /// the live Noesis inlines and stores their handles in the scene for the
+    /// read-back. Only a `TextBlock` whose `Inlines` is currently *empty* is
+    /// populated — the runtime 0.10 FFI exposes no `InlineCollection::Clear`, so a
+    /// later, different spec for a name that already has content is refused with a
+    /// warning (rebuild the scene to change it). No-op until the scene exists.
+    pub(crate) fn apply_inlines_for(
+        &mut self,
+        entity: Entity,
+        set: &HashMap<String, Vec<crate::inlines::InlineSpec>>,
+    ) {
+        if set.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, specs) in set {
+            if specs.is_empty() {
+                continue;
+            }
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisInlines: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let Some(mut collection) = noesis_runtime::text_inlines::text_block_inlines(&element)
+            else {
+                warn!("NoesisInlines: element {name:?} is not a TextBlock; skipped");
+                continue;
+            };
+            if collection.count() != 0 {
+                warn!(
+                    "NoesisInlines: {name:?} already has inline content; clear-and-replace is \
+                     unavailable in runtime 0.10 (rebuild the scene to change it)",
+                );
+                continue;
+            }
+            let built = crate::inlines::build_into(&mut collection, specs);
+            scene.inline_handles.insert(name.clone(), built);
+        }
+    }
+
+    /// Poll view `entity`'s watched `TextBlock`s, returning `(x:Name, readback)`
+    /// for each whose live inline structure changed since last frame (deduped
+    /// against the per-scene snapshot). The read re-reads the *live* collection
+    /// count and pointer identity, plus the live `Run` text / `Hyperlink` URIs of
+    /// the handles the bridge built. First poll after a watch is added reports.
+    pub(crate) fn poll_inlines_reads_for(
+        &mut self,
+        entity: Entity,
+        watched: &[String],
+    ) -> Vec<(String, crate::inlines::InlinesReadback)> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .inlines_snapshots
+            .retain(|name, _| watched.iter().any(|w| w == name));
+        if watched.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for name in watched {
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            let Some(collection) = noesis_runtime::text_inlines::text_block_inlines(&element)
+            else {
+                continue;
+            };
+            let empty = Vec::new();
+            let tree = scene.inline_handles.get(name).unwrap_or(&empty);
+            let current = crate::inlines::readback(tree, &collection);
+            if scene.inlines_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene
+                .inlines_snapshots
+                .insert(name.clone(), current.clone());
+            changed.push((name.clone(), current));
         }
         changed
     }
