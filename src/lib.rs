@@ -12,9 +12,11 @@ use bevy::prelude::*;
 
 pub mod bake;
 pub mod classes;
+pub mod commands;
 pub mod dp;
 pub mod events;
 pub mod focus;
+pub mod focus_input;
 pub mod font;
 pub mod geometry;
 pub mod image;
@@ -25,14 +27,20 @@ pub mod markup;
 pub mod plain_vm;
 pub mod render;
 pub mod render_device;
+pub mod routed_events;
 pub mod text;
 pub mod theme;
 pub mod viewmodel;
 pub mod visibility;
+pub mod visual_state;
 pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
+pub use commands::{
+    CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
+    SharedCommandQueue,
+};
 /// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
 pub use dm_noesis_bevy_derive::NoesisViewModel;
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
@@ -41,6 +49,10 @@ pub use events::{
     NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue,
 };
 pub use focus::{NoesisFocus, NoesisFocusPlugin};
+pub use focus_input::{
+    FocusMove, FocusNavigationDirection, FocusPredict, KeyBindingSpec, ModifierKeys,
+    NoesisFocusBindingFired, NoesisFocusControl, NoesisFocusControlPlugin, NoesisFocusPredicted,
+};
 pub use font::{BevyFontProvider, FontAsset, FontAssetLoader, FontAssetPlugin, FontRegistry};
 pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
 pub use image::{
@@ -52,6 +64,10 @@ pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
+pub use routed_events::{
+    EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
+    RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
+};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use viewmodel::{
@@ -59,6 +75,7 @@ pub use viewmodel::{
     ViewModelChangeForwarder, ViewModelDef, VmValue,
 };
 pub use visibility::{NoesisVisibility, NoesisVisibilityPlugin};
+pub use visual_state::{NoesisVisualState, NoesisVisualStatePlugin, StateRequest};
 pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, XamlRegistry};
 
 /// Per-developer Indie license credentials.
@@ -121,6 +138,7 @@ impl Plugin for NoesisPlugin {
             ),
             (
                 events::NoesisEventsPlugin,
+                routed_events::NoesisRoutedEventsPlugin,
                 classes::NoesisClassPlugin,
                 markup::NoesisMarkupExtensionPlugin,
                 visibility::NoesisVisibilityPlugin,
@@ -128,7 +146,10 @@ impl Plugin for NoesisPlugin {
                 text::NoesisTextPlugin,
                 geometry::NoesisGeometryPlugin,
                 focus::NoesisFocusPlugin,
+                visual_state::NoesisVisualStatePlugin,
+                focus_input::NoesisFocusControlPlugin,
                 viewmodel::NoesisViewModelPlugin,
+                commands::NoesisCommandsPlugin,
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,
             ),

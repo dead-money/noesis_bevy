@@ -45,17 +45,22 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice, RenderQueue},
     view::ViewTarget,
 };
+use noesis_runtime::commands::Command;
 use noesis_runtime::events::{
-    ClickSubscription, KeyDownSubscription, subscribe_click, subscribe_keydown,
+    ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, subscribe_click,
+    subscribe_event, subscribe_keydown,
 };
+use noesis_runtime::input::KeyBinding;
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
+use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::ItemsBinding;
 use crate::plain_vm::PlainVmEntry;
 use crate::render_device::WgpuRenderDevice;
+use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
 
@@ -318,6 +323,13 @@ pub(crate) struct NoesisRenderState {
     /// swallow list has changed and re-bind the C++-side handler with
     /// the new closure (which captures `swallow` by value).
     last_keydown_swallow: HashMap<(Entity, String), Vec<Key>>,
+    /// Last `(mark_handled, handled_too)` flags installed per subscribed
+    /// `(view, x:Name, event name)`. The routed-event callback captures these
+    /// by value, so a flag change can't be patched in place — we detect it
+    /// here and drop + re-create the subscription. Mirrors
+    /// [`Self::last_keydown_swallow`]. Keyed across views; pruned per view at
+    /// sync time.
+    last_event_config: HashMap<(Entity, String, &'static str), (bool, bool)>,
     /// Reusable offscreen view for baking label panels (lazily built). Lives
     /// here so it shares the single registered device and its renderer is torn
     /// down before the device drops — see [`Drop`].
@@ -342,6 +354,13 @@ pub(crate) struct NoesisRenderState {
     /// [`Self::view_models`]; released in [`Drop`] before the registered device.
     /// See [`crate::plain_vm`].
     plain_vms: HashMap<(Entity, std::any::TypeId), PlainVmEntry>,
+    /// Live Rust-owned command hosts (`ICommand` bridge). Each owns a
+    /// `ClassInstance` + `ClassRegistration` + the per-command `Command`
+    /// objects, bound as a scene element's `DataContext`. Outlives scene
+    /// rebuilds (re-bound by the attach pass) and is released in `Drop`
+    /// before the registered device. Keyed by view entity. See
+    /// [`crate::commands`].
+    command_hosts: HashMap<Entity, CommandEntry>,
 }
 
 struct SceneInstance {
@@ -374,6 +393,14 @@ struct SceneInstance {
     /// [`NoesisRenderState::sync_keydown_subscriptions`]. Same lifetime
     /// rules as `click_subs`.
     keydown_subs: HashMap<String, KeyDownSubscription>,
+    /// Active generic `RoutedEvent` subscriptions keyed by `(x:Name, event
+    /// name)` — one element may be watched for several events. Synced each
+    /// frame against [`crate::routed_events::NoesisEventWatch`] by
+    /// [`NoesisRenderState::sync_event_subscriptions_for`]. Drops with the
+    /// scene; same orphan-safety rules as `click_subs` / `keydown_subs`. The
+    /// `&'static str` half is `RoutedEvent::as_str()` (the enum is not `Hash`,
+    /// its stable name is).
+    event_subs: HashMap<(String, &'static str), EventSubscription>,
     /// Last text snapshot per name in [`crate::text::NoesisTextReadWatch`].
     /// Used to dedupe `NoesisTextChanged` emissions — only push when the
     /// text actually differs from the previous frame's snapshot. Names
@@ -384,6 +411,25 @@ struct SceneInstance {
     /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
     /// scene so it resets on rebuild.
     dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
+    /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
+    /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
+    /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
+    input_bindings: HashMap<(String, i32, i32), InstalledKeyBinding>,
+    /// Last `(candidate, matches_expected)` per [`crate::focus_input::FocusPredict`]
+    /// ident, to dedupe [`crate::focus_input::NoesisFocusPredicted`] emissions.
+    /// Resets on scene rebuild.
+    predict_snapshots: HashMap<(String, i32, Option<String>), (bool, bool)>,
+}
+
+/// One installed `KeyBinding`. Holds the `Command` *and* the `KeyBinding` at +1
+/// so neither is released while the binding lives in the element's
+/// `InputBindings`. Dropping it (scene teardown) releases our references; the
+/// binding is NOT detached from the element — Noesis exposes no remove (see the
+/// `focus_input` NOTES). Kept keyed so we never double-install the same chord.
+#[allow(dead_code)] // held only to keep the +1 references alive.
+struct InstalledKeyBinding {
+    command: Command,
+    binding: KeyBinding,
 }
 
 /// A persistent, camera-less Noesis view reused to bake label panels to
@@ -439,10 +485,12 @@ impl NoesisRenderState {
             loaded_app_resources_chain: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
+            last_event_config: HashMap::new(),
             bake_rig: None,
             view_models: HashMap::new(),
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
+            command_hosts: HashMap::new(),
         }
     }
 
@@ -526,6 +574,78 @@ impl NoesisRenderState {
                 entry.mark_attached(uri);
             } else {
                 warn!("NoesisViewModel: set_data_context returned false for view {entity:?}");
+            }
+        }
+    }
+
+    /// Build view `entity`'s [`CommandEntry`] on first sight (register the Noesis
+    /// command-host class, instantiate, build a `Command` per declared name tagged
+    /// with `entity` and pushing to `queue`). No-op if it already exists.
+    /// Main-thread only.
+    pub(crate) fn ensure_commands(
+        &mut self,
+        entity: Entity,
+        def: &CommandsDef,
+        queue: &SharedCommandQueue,
+    ) {
+        if self.command_hosts.contains_key(&entity) {
+            return;
+        }
+        match CommandEntry::build(entity, def, queue) {
+            Some(entry) => {
+                self.command_hosts.insert(entity, entry);
+            }
+            None => warn!(
+                "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
+                def.class_name(),
+            ),
+        }
+    }
+
+    /// Apply queued enabled-state edits to view `entity`'s command host. Unknown
+    /// command names log a warning. No-op when the host isn't built yet.
+    pub(crate) fn apply_command_enables_for(&mut self, entity: Entity, enables: &[(String, bool)]) {
+        let Some(entry) = self.command_hosts.get(&entity) else {
+            return;
+        };
+        for (name, value) in enables {
+            if !entry.set_enabled(name, *value) {
+                warn!("NoesisCommands: view {entity:?} has no command {name:?}");
+            }
+        }
+    }
+
+    /// Attach any not-yet-attached command host as its target's `DataContext` in
+    /// its own view's scene. No-op until that view (and any named target) exists;
+    /// retries each frame, and re-attaches after a scene rebuild. Mirrors
+    /// [`Self::attach_view_models`].
+    pub(crate) fn attach_commands(&mut self) {
+        for (&entity, entry) in &mut self.command_hosts {
+            let Some(scene) = self.scenes.get(&entity) else {
+                continue;
+            };
+            let Some(content) = scene.view.content() else {
+                continue;
+            };
+            let uri = &scene.built_for_uri;
+            if !entry.needs_attach(uri) {
+                continue;
+            }
+            let target = match entry.target() {
+                AttachTarget::Root => scene.view.content(),
+                AttachTarget::Named(name) => content.find_name(name),
+            };
+            let Some(mut element) = target else {
+                warn!(
+                    "NoesisCommands: attach target for view {:?} not found in scene {:?}",
+                    entity, scene.built_for_uri,
+                );
+                continue;
+            };
+            if element.set_data_context(entry.instance()) {
+                entry.mark_attached(uri);
+            } else {
+                warn!("NoesisCommands: set_data_context returned false for view {entity:?}");
             }
         }
     }
@@ -882,8 +1002,11 @@ impl NoesisRenderState {
                 applied_scale: config.scale,
                 click_subs: HashMap::new(),
                 keydown_subs: HashMap::new(),
+                event_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
+                input_bindings: HashMap::new(),
+                predict_snapshots: HashMap::new(),
             },
         );
     }
@@ -941,6 +1064,43 @@ impl NoesisRenderState {
                 continue;
             };
             element.set_margin(left, top, right, bottom);
+        }
+    }
+
+    /// Apply view `entity`'s desired visual-state transitions
+    /// (`x:Name → (state, use_transitions)`) via `VisualStateManager::GoToState`.
+    /// No-op until the scene exists; missing names warn, and a failed transition
+    /// (non-templated element, or unknown state) warns too.
+    pub(crate) fn apply_visual_state_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, (String, bool)>,
+    ) {
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, (state, use_transitions)) in desired {
+            // `go_to_state` takes `&self`, so no `mut` binding needed.
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisVisualState: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if !element.go_to_state(state, *use_transitions) {
+                warn!(
+                    "NoesisVisualState: GoToState({state:?}) failed for {name:?} \
+                     in scene {:?} (not a templated control, or unknown state)",
+                    scene.built_for_uri,
+                );
+            }
         }
     }
 
@@ -1066,6 +1226,98 @@ impl NoesisRenderState {
             .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }
 
+    /// Reconcile view `entity`'s generic `RoutedEvent` subscriptions against
+    /// `entries`. Mirrors [`Self::sync_keydown_subscriptions_for`] — adds /
+    /// drops subscriptions to match the desired watch list, and re-binds an
+    /// entry whose `(mark_handled, handled_too)` flags changed (the callback
+    /// captures them by value). Each callback snapshots the live args and pushes
+    /// `(entity, name, event, snapshot)` so the emitted [`NoesisRoutedEvent`]
+    /// carries the originating view.
+    pub(crate) fn sync_event_subscriptions_for(
+        &mut self,
+        entity: Entity,
+        entries: &[crate::routed_events::EventWatchEntry],
+        queue: &SharedRoutedEventQueue,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+
+        // Drop subscriptions that are no longer requested. `retain` runs each
+        // entry's drop in place, which fires the C++ unsubscribe.
+        scene.event_subs.retain(|(name, evname), _| {
+            entries
+                .iter()
+                .any(|e| e.name == *name && e.event.as_str() == *evname)
+        });
+
+        for entry in entries {
+            let evname = entry.event.as_str();
+            let key = (entry.name.clone(), evname);
+
+            // Leave an existing subscription alone iff its captured flags still
+            // match the requested ones (sibling map keyed by view + name + event).
+            if scene.event_subs.contains_key(&key)
+                && self
+                    .last_event_config
+                    .get(&(entity, entry.name.clone(), evname))
+                    .is_some_and(|prev| *prev == (entry.mark_handled, entry.handled_too))
+            {
+                continue;
+            }
+
+            // Pull the content tree per change. `find_name` is cheap but the FFI
+            // hop isn't free, so we only reach here on the frames the watch moved.
+            let Some(content) = scene.view.content() else {
+                return;
+            };
+            let Some(element) = content.find_name(&entry.name) else {
+                warn!(
+                    "NoesisEventWatch: x:Name {:?} not found in scene {:?}",
+                    entry.name, scene.built_for_uri,
+                );
+                continue;
+            };
+
+            let queue_handle = queue.clone();
+            let captured_name = entry.name.clone();
+            let captured_event = entry.event;
+            let mark_handled = entry.mark_handled;
+            let Some(sub) = subscribe_event(
+                &element,
+                entry.event,
+                entry.handled_too,
+                move |args: &EventArgs| {
+                    let snapshot = RoutedEventSnapshot::capture(args);
+                    queue_handle.push(entity, captured_name.clone(), captured_event, snapshot);
+                    mark_handled
+                },
+            ) else {
+                warn!(
+                    "NoesisEventWatch: element {:?} not a UIElement / event {:?} unknown; skipping",
+                    entry.name, evname,
+                );
+                continue;
+            };
+
+            // Replace any stale sub (flag change) — drop runs the C++ unsubscribe.
+            scene.event_subs.insert(key, sub);
+            self.last_event_config.insert(
+                (entity, entry.name.clone(), evname),
+                (entry.mark_handled, entry.handled_too),
+            );
+        }
+
+        // Prune this view's config snapshots whose (name, event) is no longer
+        // watched (leave other views' entries intact).
+        self.last_event_config.retain(|(ent, name, evname), _| {
+            *ent != entity
+                || entries
+                    .iter()
+                    .any(|e| &e.name == name && e.event.as_str() == *evname)
+        });
+    }
+
     /// Write each `(x:Name → text)` desired by view `entity`'s [`NoesisText`]
     /// component onto that view's elements. Missing names / non-text targets log
     /// a warning. No-op until the view's scene exists.
@@ -1156,6 +1408,199 @@ impl NoesisRenderState {
         if !element.focus() {
             warn!("NoesisFocus: element {name:?} refused focus (non-focusable?)");
         }
+    }
+
+    /// Apply view `entity`'s one-shot directional / tab focus moves
+    /// (`UIElement::MoveFocus`). Missing names warn; a move that didn't shift
+    /// focus warns (non-traversable direction / no neighbour).
+    pub(crate) fn apply_focus_moves_for(
+        &mut self,
+        entity: Entity,
+        moves: &[crate::focus_input::FocusMove],
+    ) {
+        if moves.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for m in moves {
+            let Some(mut element) = content.find_name(&m.from) else {
+                warn!(
+                    "NoesisFocusControl: move-from x:Name {:?} not found in scene {:?}",
+                    m.from, scene.built_for_uri,
+                );
+                continue;
+            };
+            if !element.move_focus(m.direction, m.wrapped) {
+                warn!(
+                    "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
+                    m.direction, m.wrapped, m.from,
+                );
+            }
+        }
+    }
+
+    /// Apply view `entity`'s one-shot focus-engagement actions
+    /// (`UIElement::Focus(engage)`).
+    pub(crate) fn apply_focus_engages_for(
+        &mut self,
+        entity: Entity,
+        engages: &[crate::focus_input::FocusEngage],
+    ) {
+        if engages.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for e in engages {
+            let Some(mut element) = content.find_name(&e.name) else {
+                warn!(
+                    "NoesisFocusControl: engage x:Name {:?} not found in scene {:?}",
+                    e.name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if !element.focus_engage(e.engage) {
+                warn!(
+                    "NoesisFocusControl: element {:?} refused focus(engage={})",
+                    e.name, e.engage,
+                );
+            }
+        }
+    }
+
+    /// Reconcile view `entity`'s `KeyBinding`s against `specs`. Each binding's
+    /// command callback pushes `(entity, name, key, modifiers)` onto `queue`, so
+    /// the emitted `NoesisFocusBindingFired` carries the originating view.
+    /// Bindings already installed are left alone; bindings dropped from `specs`
+    /// release their `+1` references (but stay attached to the element — no
+    /// Noesis remove API). Mirrors `sync_click_subscriptions_for`.
+    pub(crate) fn sync_key_bindings_for(
+        &mut self,
+        entity: Entity,
+        specs: &[crate::focus_input::KeyBindingSpec],
+        queue: &crate::focus_input::SharedFocusBindingQueue,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+
+        // Forget bindings no longer requested (releases our +1s in place).
+        scene
+            .input_bindings
+            .retain(|k, _| specs.iter().any(|s| &s.ident() == k));
+
+        let needs_new = specs
+            .iter()
+            .any(|s| !scene.input_bindings.contains_key(&s.ident()));
+        if !needs_new {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for spec in specs {
+            let ident = spec.ident();
+            if scene.input_bindings.contains_key(&ident) {
+                continue;
+            }
+            let Some(element) = content.find_name(&spec.name) else {
+                warn!(
+                    "NoesisFocusControl: binding x:Name {:?} not found in scene {:?}",
+                    spec.name, scene.built_for_uri,
+                );
+                continue;
+            };
+
+            let queue_handle = queue.clone();
+            let view = entity;
+            let name = spec.name.clone();
+            let key = spec.key;
+            let modifiers = spec.modifiers;
+            // Fire-always command: pushes the chord onto the shared queue.
+            let command = Command::new(move |_param| {
+                queue_handle.push(view, name.clone(), key, modifiers);
+            });
+
+            let Some(binding) = KeyBinding::new(&command, spec.key, spec.modifiers) else {
+                warn!(
+                    "NoesisFocusControl: could not build KeyBinding for {:?} (command not an ICommand?)",
+                    spec.name,
+                );
+                continue;
+            };
+            if !binding.add_to(&element) {
+                warn!(
+                    "NoesisFocusControl: element {:?} is not a UIElement; binding skipped",
+                    spec.name,
+                );
+                continue;
+            }
+            scene
+                .input_bindings
+                .insert(ident, InstalledKeyBinding { command, binding });
+        }
+    }
+
+    /// Poll view `entity`'s focus predictions. For each `FocusPredict` returns
+    /// `(from, direction, candidate, matches_expected)` when the answer changed
+    /// since last frame (deduped against the per-scene snapshot). First poll
+    /// after a watch is added always reports. `matches_expected` is a safe
+    /// raw-pointer identity compare of `PredictFocus`'s borrowed result against
+    /// the `expect` element's pointer (no deref). Mirrors `poll_dp_reads_for`.
+    pub(crate) fn poll_focus_predictions_for(
+        &mut self,
+        entity: Entity,
+        predicts: &[crate::focus_input::FocusPredict],
+    ) -> Vec<(
+        String,
+        crate::focus_input::FocusNavigationDirection,
+        bool,
+        bool,
+    )> {
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .predict_snapshots
+            .retain(|k, _| predicts.iter().any(|p| &p.ident() == k));
+        if predicts.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for p in predicts {
+            let Some(from) = content.find_name(&p.from) else {
+                continue;
+            };
+            let predicted = from.predict_focus(p.direction);
+            let candidate = predicted.is_some();
+            let matches_expected = match (&p.expect, predicted) {
+                (Some(expect), Some(ptr)) => content
+                    .find_name(expect)
+                    .is_some_and(|target| target.raw() == ptr.as_ptr()),
+                _ => false,
+            };
+            let ident = p.ident();
+            if scene.predict_snapshots.get(&ident) == Some(&(candidate, matches_expected)) {
+                continue;
+            }
+            scene
+                .predict_snapshots
+                .insert(ident, (candidate, matches_expected));
+            changed.push((p.from.clone(), p.direction, candidate, matches_expected));
+        }
+        changed
     }
 
     /// Poll text values for every name in `watched`, and push a
@@ -1593,6 +2038,9 @@ impl NoesisRenderState {
                 entry.reset_attach();
             }
         }
+        if let Some(entry) = self.command_hosts.get_mut(&entity) {
+            entry.reset_attach();
+        }
         let Some(mut scene) = self.scenes.remove(&entity) else {
             return;
         };
@@ -1631,6 +2079,7 @@ impl Drop for NoesisRenderState {
         self.view_models.clear();
         self.items_sources.clear();
         self.plain_vms.clear();
+        self.command_hosts.clear();
         self.teardown_bake_rig();
         drop(self.registered_device.take());
         drop(self.registered_provider.take());
