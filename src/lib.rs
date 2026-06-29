@@ -15,6 +15,7 @@ pub mod classes;
 pub mod dp;
 pub mod events;
 pub mod focus;
+pub mod focus_input;
 pub mod font;
 pub mod geometry;
 pub mod image;
@@ -43,6 +44,10 @@ pub use events::{
     NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue,
 };
 pub use focus::{NoesisFocus, NoesisFocusPlugin};
+pub use focus_input::{
+    FocusMove, FocusNavigationDirection, FocusPredict, KeyBindingSpec, ModifierKeys,
+    NoesisFocusBindingFired, NoesisFocusControl, NoesisFocusControlPlugin, NoesisFocusPredicted,
+};
 pub use font::{BevyFontProvider, FontAsset, FontAssetLoader, FontAssetPlugin, FontRegistry};
 pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
 pub use image::{
@@ -137,6 +142,7 @@ impl Plugin for NoesisPlugin {
                 geometry::NoesisGeometryPlugin,
                 focus::NoesisFocusPlugin,
                 visual_state::NoesisVisualStatePlugin,
+                focus_input::NoesisFocusControlPlugin,
                 viewmodel::NoesisViewModelPlugin,
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,
