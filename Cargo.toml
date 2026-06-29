@@ -14,9 +14,6 @@ categories = ["gui", "game-development", "graphics"]
 # Dev-only files that consumers of the published crate don't need. docs/ stays
 # (the README image) and assets/ + examples/ stay (the runnable samples).
 exclude = [".github/", ".claude/", "CLAUDE.md", "TODO.md", "RELEASING.md", "release.toml"]
-# Not published yet. Remove this (and the same line in derive/Cargo.toml) as the
-# deliberate go-live step; see RELEASING.md.
-publish = false
 
 # docs.rs has no Noesis SDK, so build.rs short-circuits on the DOCS_RS env var
 # and rustdoc builds the API without linking.
