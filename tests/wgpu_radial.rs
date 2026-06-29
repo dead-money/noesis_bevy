@@ -110,7 +110,7 @@ async fn run_test() {
 
     let device_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
-    rd.set_onscreen_target(device_view);
+    rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
     // ── 256×1 ramp: R channel = texel index, full alpha. ───────────────────
     // Sampling with NEAREST at u ∈ [0, 1] picks texel floor(u * 256), so
