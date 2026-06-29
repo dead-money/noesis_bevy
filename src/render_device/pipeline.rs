@@ -106,11 +106,11 @@ fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
 /// fresh `PipelineKey` arrives at `draw_batch`: the wgpu device, the layout,
 /// and the target color format.
 ///
-/// The pipeline layout binds three groups: `group(0)` vs uniforms,
-/// `group(1)` ps uniforms, `group(2)` pattern texture + sampler. Shaders
-/// that don't use the pattern bindings still share this layout — the Rust
-/// side binds a dummy bind group at group(2) for those draws since wgpu
-/// requires every declared group to be set before a draw.
+/// The pipeline layout binds four groups: `group(0)` vs uniforms, `group(1)`
+/// ps uniforms (`cbuffer0_ps` + `cbuffer1_ps`), `group(2)` pattern texture +
+/// sampler, `group(3)` image + shadow textures + samplers. Shaders that don't
+/// use a group's bindings still share this layout — the Rust side binds a dummy
+/// bind group there since wgpu requires every declared group to be set.
 pub struct PipelineCache {
     device: wgpu::Device,
     pipeline_layout: wgpu::PipelineLayout,
@@ -170,9 +170,9 @@ impl PipelineCache {
 /// overwrites the destination. That's `BlendMode::Src`. Every other variant
 /// returns `Some` with the appropriate factor / op pair.
 ///
-/// `SrcOverDual` requires dual-source blending (extra `@location(0)
-/// @blend_src(1)` fragment output) for SDF LCD subpixel rendering and lands
-/// with the SDF shader matrix in a later phase.
+/// `SrcOverDual` uses dual-source blending (a second `@location(0)
+/// @blend_src(1)` fragment output) for SDF LCD subpixel rendering — the second
+/// output carries per-channel coverage that drives the `OneMinusSrc1` factor.
 fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
     let comp = |src, dst| wgpu::BlendComponent {
         src_factor: src,
@@ -203,7 +203,16 @@ fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
             color: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::One),
             alpha: src_over_alpha,
         }),
-        5 => panic!("BlendMode::SrcOverDual needs dual-source blending — Phase 6 (SDF LCD)"),
+        5 => Some(wgpu::BlendState {
+            // BlendMode::SrcOverDual: cs + cd*(1 - src1) per channel, used by
+            // the SDF LCD subpixel shader. The fragment's second output
+            // (`@blend_src(1)`) carries the per-channel coverage; `Src1` /
+            // `OneMinusSrc1` pull it into the blend. Requires the device's
+            // `DUAL_SOURCE_BLENDING` feature (only reached when the SDF_LCD_*
+            // shaders are emitted, which needs `DeviceCaps::subpixel_rendering`).
+            color: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc1),
+            alpha: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc1Alpha),
+        }),
         other => panic!("unknown BlendMode raw value: {other}"),
     }
 }
