@@ -72,7 +72,8 @@ pub use routed_events::{
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
 pub use typography::{
-    FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyPlugin,
+    FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
+    NoesisTypographyPlugin, TypographyField, TypographyValue, TypographyWatch,
 };
 pub use viewmodel::{
     NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,

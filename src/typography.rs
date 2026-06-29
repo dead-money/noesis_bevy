@@ -78,6 +78,61 @@ impl FontStyling {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Read-back (observation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which typed font property to read back on a watched element. Selects the
+/// runtime's *typed* getter.
+///
+/// `FontWeight` / `FontStyle` / `FontStretch` are Noesis **enum** dependency
+/// properties, so they are not reachable through the generic
+/// [`NoesisDp`](crate::dp) `i32` read path (a `GetValue<int>` against an enum DP
+/// type-mismatches, the same way `Visibility` does); they round-trip only
+/// through these dedicated typed getters. This is the typography bridge's own
+/// observation surface — exclusive of `NoesisDp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypographyField {
+    FontSize,
+    FontFamily,
+    FontWeight,
+    FontStyle,
+    FontStretch,
+}
+
+/// A typed font value read back from a live element by a [`TypographyWatch`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypographyValue {
+    FontSize(f32),
+    /// `FontFamily` *source* string (`None` when the element has a family object
+    /// but no source string set).
+    FontFamily(Option<String>),
+    FontWeight(FontWeight),
+    FontStyle(FontStyle),
+    FontStretch(FontStretch),
+}
+
+/// One read-back subscription: an element's `x:Name` and the typed
+/// [`TypographyField`] to observe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypographyWatch {
+    pub name: String,
+    pub field: TypographyField,
+}
+
+/// Emitted when a watched typed font property differs from the previous frame's
+/// snapshot. Read with `MessageReader<NoesisTypographyChanged>`. The first poll
+/// after a watch is added always reports, so callers see the current value.
+#[derive(Message, Debug, Clone)]
+pub struct NoesisTypographyChanged {
+    /// The [`NoesisView`](crate::NoesisView) entity whose property changed.
+    pub view: Entity,
+    /// `x:Name` of the element whose property changed.
+    pub name: String,
+    /// Current value, read as the watched [`TypographyField`].
+    pub value: TypographyValue,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -90,6 +145,9 @@ pub struct NoesisTypography {
     /// `TextElement` (`TextBlock` / `Run` / `TextBox` / …); a non-text element
     /// silently ignores font properties it doesn't expose.
     pub set: HashMap<String, FontStyling>,
+    /// `(x:Name, field)` pairs to observe. Polled every frame; a change vs. the
+    /// previous frame emits a [`NoesisTypographyChanged`].
+    pub watch: Vec<TypographyWatch>,
 }
 
 impl NoesisTypography {
@@ -140,6 +198,17 @@ impl NoesisTypography {
         self
     }
 
+    /// Builder: observe element `name`'s typed `field` and surface changes as
+    /// [`NoesisTypographyChanged`].
+    #[must_use]
+    pub fn watch(mut self, name: impl Into<String>, field: TypographyField) -> Self {
+        self.watch.push(TypographyWatch {
+            name: name.into(),
+            field,
+        });
+        self
+    }
+
     fn entry(&mut self, name: impl Into<String>) -> &mut FontStyling {
         self.set.entry(name.into()).or_default()
     }
@@ -150,11 +219,13 @@ impl NoesisTypography {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Reconcile every view's [`NoesisTypography`]: apply desired font-property
-/// writes when the component changed.
+/// writes when the component changed, then poll its watch list and emit
+/// [`NoesisTypographyChanged`] for each typed value that moved.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_typography_bridge(
     views: Query<(Entity, Ref<NoesisTypography>)>,
     state: Option<NonSendMut<NoesisRenderState>>,
+    mut changed: MessageWriter<NoesisTypographyChanged>,
 ) {
     let Some(mut state) = state else {
         return;
@@ -162,6 +233,13 @@ pub(crate) fn sync_typography_bridge(
     for (entity, typography) in &views {
         if typography.is_changed() {
             state.apply_typography_for(entity, &typography.set);
+        }
+        for (name, value) in state.poll_typography_reads_for(entity, &typography.watch) {
+            changed.write(NoesisTypographyChanged {
+                view: entity,
+                name,
+                value,
+            });
         }
     }
 }
@@ -176,7 +254,8 @@ pub struct NoesisTypographyPlugin;
 
 impl Plugin for NoesisTypographyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, sync_typography_bridge.in_set(NoesisSet::Apply));
+        app.add_message::<NoesisTypographyChanged>()
+            .add_systems(PostUpdate, sync_typography_bridge.in_set(NoesisSet::Apply));
     }
 }
 

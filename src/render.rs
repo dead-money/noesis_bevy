@@ -411,6 +411,12 @@ struct SceneInstance {
     /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
     /// scene so it resets on rebuild.
     dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
+    /// Last typed font value per `(x:Name, field)` watched by
+    /// [`crate::typography::NoesisTypography`]. Dedupes `NoesisTypographyChanged`
+    /// emissions; resets on scene rebuild. Distinct from [`Self::dp_snapshots`]
+    /// because enum font DPs need the typed getters, not the generic `i32` read.
+    typo_snapshots:
+        HashMap<(String, crate::typography::TypographyField), crate::typography::TypographyValue>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
     /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
@@ -1005,6 +1011,7 @@ impl NoesisRenderState {
                 event_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
+                typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
             },
@@ -1412,6 +1419,66 @@ impl NoesisRenderState {
                 debug!("NoesisTypography: {name:?} did not accept FontStretch");
             }
         }
+    }
+
+    /// Poll view `entity`'s watched typed font properties, returning
+    /// `(x:Name, value)` for each that changed since last frame (deduped against
+    /// the per-scene snapshot). First poll after a watch is added always reports.
+    ///
+    /// Uses the runtime's *typed* font getters rather than the generic DP read
+    /// path: `FontWeight`/`FontStyle`/`FontStretch` are enum DPs and don't
+    /// round-trip through `get_i32`.
+    pub(crate) fn poll_typography_reads_for(
+        &mut self,
+        entity: Entity,
+        watched: &[crate::typography::TypographyWatch],
+    ) -> Vec<(String, crate::typography::TypographyValue)> {
+        use crate::typography::{TypographyField, TypographyValue};
+        use noesis_runtime::typography as ty;
+
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene.typo_snapshots.retain(|(name, field), _| {
+            watched.iter().any(|w| &w.name == name && w.field == *field)
+        });
+        if watched.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for watch in watched {
+            let Some(element) = content.find_name(&watch.name) else {
+                continue;
+            };
+            let current = match watch.field {
+                TypographyField::FontSize => ty::font_size(&element).map(TypographyValue::FontSize),
+                TypographyField::FontFamily => {
+                    ty::get_font_family(&element).map(|f| TypographyValue::FontFamily(f.source()))
+                }
+                TypographyField::FontWeight => {
+                    ty::font_weight(&element).map(TypographyValue::FontWeight)
+                }
+                TypographyField::FontStyle => {
+                    ty::font_style(&element).map(TypographyValue::FontStyle)
+                }
+                TypographyField::FontStretch => {
+                    ty::font_stretch(&element).map(TypographyValue::FontStretch)
+                }
+            };
+            let Some(current) = current else {
+                continue;
+            };
+            let key = (watch.name.clone(), watch.field);
+            if scene.typo_snapshots.get(&key) == Some(&current) {
+                continue;
+            }
+            scene.typo_snapshots.insert(key, current.clone());
+            changed.push((watch.name.clone(), current));
+        }
+        changed
     }
 
     /// Apply pending geometry writes from
