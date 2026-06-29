@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 
 pub mod bake;
+pub mod binding;
 pub mod classes;
 pub mod commands;
 pub mod dp;
@@ -36,6 +37,10 @@ pub mod visual_state;
 pub mod xaml;
 
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
+pub use binding::{
+    BindingMode, ConvertArg, Converted, MultiValueConverter, NoesisBinding, NoesisBindingPlugin,
+    SourceSpec, ValueConverter,
+};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
 pub use commands::{
     CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
@@ -151,7 +156,9 @@ impl Plugin for NoesisPlugin {
                 viewmodel::NoesisViewModelPlugin,
                 commands::NoesisCommandsPlugin,
                 items::NoesisItemsPlugin,
-                dp::NoesisDpPlugin,
+                // Paired into a sub-tuple: the inner `Plugins` tuple is already at
+                // Bevy's 15-element impl limit, so further bridges nest here.
+                (dp::NoesisDpPlugin, binding::NoesisBindingPlugin),
             ),
         ));
     }
