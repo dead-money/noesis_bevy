@@ -2450,6 +2450,85 @@ impl NoesisRenderState {
         }
     }
 
+    /// Build view `entity`'s desired code-built styles (`x:Name → spec`) and
+    /// assign each to its named element via `FrameworkElement::set_style`. Each
+    /// spec becomes a fresh `Noesis::Style` (target type + setters + property
+    /// triggers); Noesis takes its own reference, so the Rust handle is dropped
+    /// right after. A `Style` is sealed on first apply, so rebuilding per change
+    /// is correct. Missing names / unknown target types / unresolvable
+    /// properties warn. Called when the view's `NoesisStyles` component changes.
+    pub(crate) fn apply_styles_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::styles::StyleSpec>,
+    ) {
+        use noesis_runtime::styles::{Style, Trigger};
+
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let uri = scene.built_for_uri.clone();
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+
+        for (name, spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!("NoesisStyles: x:Name {name:?} not found in scene {uri:?}");
+                continue;
+            };
+
+            let mut style = Style::new();
+            if !style.set_target_type(&spec.target_type) {
+                warn!(
+                    "NoesisStyles: unknown TargetType {:?} for {name:?} in scene {uri:?}",
+                    spec.target_type,
+                );
+                continue;
+            }
+            for (property, value) in &spec.setters {
+                if !style.add_setter(property, &value.to_boxed()) {
+                    warn!(
+                        "NoesisStyles: setter {property:?} unresolved on {:?} ({name:?})",
+                        spec.target_type,
+                    );
+                }
+            }
+            for trig in &spec.triggers {
+                let mut trigger = Trigger::new();
+                if !trigger.set_property(&spec.target_type, &trig.property) {
+                    warn!(
+                        "NoesisStyles: trigger property {:?} unresolved on {:?} ({name:?})",
+                        trig.property, spec.target_type,
+                    );
+                    continue;
+                }
+                if !trigger.set_value(&trig.value.to_boxed()) {
+                    warn!(
+                        "NoesisStyles: trigger value for {:?} rejected ({name:?})",
+                        trig.property
+                    );
+                }
+                for (property, value) in &trig.setters {
+                    if !trigger.add_setter(&spec.target_type, property, &value.to_boxed()) {
+                        warn!(
+                            "NoesisStyles: trigger setter {property:?} unresolved on {:?} ({name:?})",
+                            spec.target_type,
+                        );
+                    }
+                }
+                let _ = style.add_trigger(&trigger);
+            }
+
+            if !element.set_style(&style) {
+                warn!("NoesisStyles: {name:?} is not a FrameworkElement in scene {uri:?}");
+            }
+        }
+    }
+
     /// Poll view `entity`'s named elements' live `RenderTransform`s, returning
     /// `(name, spec)` for each that changed since last frame (deduped against the
     /// per-scene snapshot). A name only reports while the element's current
