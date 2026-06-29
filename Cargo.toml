@@ -106,3 +106,7 @@ path = "examples/controls_gallery.rs"
 [[example]]
 name = "databinding"
 path = "examples/databinding.rs"
+
+[[example]]
+name = "commands"
+path = "examples/commands.rs"
