@@ -12,6 +12,7 @@ use bevy::prelude::*;
 
 pub mod animation;
 pub mod bake;
+pub mod binding;
 pub mod brushes;
 pub mod classes;
 pub mod commands;
@@ -41,6 +42,10 @@ pub mod xaml;
 
 pub use animation::{AnimationSpec, NoesisAnimation, NoesisAnimationPlugin};
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
+pub use binding::{
+    BindingMode, ConvertArg, Converted, MultiValueConverter, NoesisBinding, NoesisBindingPlugin,
+    SourceSpec, ValueConverter,
+};
 pub use brushes::{
     BrushReadback, BrushSpec, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes,
     NoesisBrushesPlugin,
@@ -176,6 +181,7 @@ impl Plugin for NoesisPlugin {
             brushes::NoesisBrushesPlugin,
             animation::NoesisAnimationPlugin,
             typography::NoesisTypographyPlugin,
+            binding::NoesisBindingPlugin,
         ));
     }
 }

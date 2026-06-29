@@ -55,6 +55,7 @@ use noesis_runtime::input::KeyBinding;
 use noesis_runtime::transforms::CompositeTransform;
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
+use crate::binding::{BindingEntry, BuiltBinding};
 use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
@@ -363,6 +364,13 @@ pub(crate) struct NoesisRenderState {
     /// before the registered device. Keyed by view entity. See
     /// [`crate::commands`].
     command_hosts: HashMap<Entity, CommandEntry>,
+    /// Rust-owned converted/multi bindings keyed by `(view entity, x:Name,
+    /// property)`. Each owns the built `Binding`/`MultiBinding` + its
+    /// `Converter`/`MultiConverter`, attached to a named element's DP. Same
+    /// rebuild/teardown rules as [`Self::items_sources`] (re-bound by the apply
+    /// pass after a scene rebuild); released in [`Drop`] before the registered
+    /// device. See [`crate::binding`].
+    binding_entries: HashMap<(Entity, String, String), BindingEntry>,
 }
 
 struct SceneInstance {
@@ -514,6 +522,7 @@ impl NoesisRenderState {
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
+            binding_entries: HashMap::new(),
         }
     }
 
@@ -724,6 +733,60 @@ impl NoesisRenderState {
                 binding.mark_bound(&uri);
             } else {
                 warn!("NoesisItems: element {name:?} is not an ItemsControl; skipped");
+            }
+        }
+    }
+
+    /// Whether view `entity` already has a built binding for `(element,
+    /// property)`. The bridge builds each target's runtime binding once.
+    pub(crate) fn has_binding(&self, entity: Entity, element: &str, property: &str) -> bool {
+        self.binding_entries
+            .contains_key(&(entity, element.to_owned(), property.to_owned()))
+    }
+
+    /// Store a freshly built binding for view `entity`'s `(element, property)`
+    /// target. Bound to its element by the next [`Self::bind_pending_for`] pass.
+    pub(crate) fn insert_binding(
+        &mut self,
+        entity: Entity,
+        element: String,
+        property: String,
+        built: BuiltBinding,
+    ) {
+        self.binding_entries
+            .insert((entity, element, property), BindingEntry::new(built));
+    }
+
+    /// Attach any of view `entity`'s not-yet-bound bindings onto their named
+    /// element's DP. No-op until the view (and named element) exists; retries each
+    /// frame, and re-attaches after a scene rebuild. Mirrors
+    /// [`Self::apply_items_for`]'s bind pass.
+    pub(crate) fn bind_pending_for(&mut self, entity: Entity) {
+        let Some(scene) = self.scenes.get(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let uri = scene.built_for_uri.clone();
+        for ((ent, element, property), entry) in &mut self.binding_entries {
+            if *ent != entity || !entry.needs_bind(&uri) {
+                continue;
+            }
+            let Some(target) = content.find_name(element) else {
+                warn!(
+                    "NoesisBinding: x:Name {:?} not found in scene {:?}",
+                    element, scene.built_for_uri,
+                );
+                continue;
+            };
+            if entry.bind_onto(&target, property) {
+                entry.mark_bound(&uri);
+            } else {
+                warn!(
+                    "NoesisBinding: binding {element:?}.{property:?} failed \
+                     (unknown property or type mismatch)",
+                );
             }
         }
     }
@@ -2462,6 +2525,11 @@ impl NoesisRenderState {
         if let Some(entry) = self.command_hosts.get_mut(&entity) {
             entry.reset_attach();
         }
+        for ((ent, _, _), entry) in &mut self.binding_entries {
+            if *ent == entity {
+                entry.reset_bind();
+            }
+        }
         let Some(mut scene) = self.scenes.remove(&entity) else {
             return;
         };
@@ -2501,6 +2569,7 @@ impl Drop for NoesisRenderState {
         self.items_sources.clear();
         self.plain_vms.clear();
         self.command_hosts.clear();
+        self.binding_entries.clear();
         self.teardown_bake_rig();
         drop(self.registered_device.take());
         drop(self.registered_provider.take());
