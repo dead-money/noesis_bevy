@@ -30,6 +30,7 @@ pub mod render_device;
 pub mod routed_events;
 pub mod text;
 pub mod theme;
+pub mod transforms;
 pub mod viewmodel;
 pub mod visibility;
 pub mod visual_state;
@@ -70,6 +71,9 @@ pub use routed_events::{
 };
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
+pub use transforms::{
+    NoesisTransform, NoesisTransformChanged, NoesisTransformPlugin, TransformSpec,
+};
 pub use viewmodel::{
     NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,
     ViewModelChangeForwarder, ViewModelDef, VmValue,
@@ -156,6 +160,7 @@ impl Plugin for NoesisPlugin {
             commands::NoesisCommandsPlugin,
             items::NoesisItemsPlugin,
             dp::NoesisDpPlugin,
+            transforms::NoesisTransformPlugin,
         ));
     }
 }
