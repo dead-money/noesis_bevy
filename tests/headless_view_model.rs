@@ -1,5 +1,5 @@
 //! End-to-end test for the `ViewModel` / `DataContext` binding bridge
-//! (`dm_noesis_bevy::viewmodel`, TODO §3).
+//! (`noesis_bevy::viewmodel`, TODO §3).
 //!
 //! Proves the two-way data flow a Rust-owned settings menu needs, against real
 //! `Slider` (`Double`) and `ComboBox` (`Int32`) controls bound
@@ -25,13 +25,13 @@
 //! `VmValue` decoding the plugin installs render-side. The plugin's main↔render
 //! queue plumbing is covered by the unit tests in `src/viewmodel.rs`.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_view_model -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_view_model -- --nocapture`
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::prelude::Entity;
-use dm_noesis_bevy::viewmodel::{SharedVmChangedQueue, ViewModelChangeForwarder, VmValue};
+use noesis_bevy::viewmodel::{SharedVmChangedQueue, ViewModelChangeForwarder, VmValue};
 use noesis_runtime::classes::ClassBuilder;
 use noesis_runtime::ffi::{ClassBase, PropType};
 use noesis_runtime::view::{FrameworkElement, View};

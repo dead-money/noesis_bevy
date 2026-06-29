@@ -21,7 +21,7 @@
 //! When `$NOESIS_SDK_DIR` is unset the SDK assets can't be loaded, so the test
 //! skips (passes) — the same graceful no-op the example uses.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_example_scoreboard -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_example_scoreboard -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,7 +29,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{
+use noesis_bevy::{
     DpValue, FontRegistry, NoesisDpChanged, NoesisItemsCurrent, NoesisVm, XamlRegistry,
 };
 
@@ -72,9 +72,9 @@ fn scoreboard_example_binds_players_and_selected_team() {
             }),
     );
     app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(dm_noesis_bevy::NoesisPlugin::default());
+    app.add_plugins(noesis_bevy::NoesisPlugin::default());
     // The sample's `<Window>` root needs the content-host stand-in to parse.
-    app.add_plugins(dm_noesis_bevy::NoesisWindowCompatPlugin);
+    app.add_plugins(noesis_bevy::NoesisWindowCompatPlugin);
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(

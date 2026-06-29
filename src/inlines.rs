@@ -22,7 +22,7 @@
 //! [`NoesisInlinesChanged`] carrying an [`InlinesReadback`].
 //!
 //! ```ignore
-//! use dm_noesis_bevy::{InlineSpec, NoesisInlines};
+//! use noesis_bevy::{InlineSpec, NoesisInlines};
 //!
 //! commands.entity(view).insert(
 //!     NoesisInlines::new()

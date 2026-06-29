@@ -1,4 +1,4 @@
-//! End-to-end test for the `ItemsSource` bridge (`dm_noesis_bevy::items`,
+//! End-to-end test for the `ItemsSource` bridge (`noesis_bevy::items`,
 //! TODO §3): populate a `ComboBox`'s items from Rust and mutate them live.
 //!
 //! Drives Noesis directly (no GPU), like the runtime's `binding.rs` /
@@ -11,11 +11,11 @@
 //! bound. The plugin's main↔render queue plumbing is covered by the unit tests
 //! in `src/items.rs`.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_items_source -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_items_source -- --nocapture`
 
 use std::collections::HashMap;
 
-use dm_noesis_bevy::items::ItemsBinding;
+use noesis_bevy::items::ItemsBinding;
 use noesis_runtime::view::{FrameworkElement, View};
 use noesis_runtime::xaml_provider::XamlProvider;
 

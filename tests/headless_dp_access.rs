@@ -1,4 +1,4 @@
-//! End-to-end test for the generic DP get/set bridge (`dm_noesis_bevy::dp`,
+//! End-to-end test for the generic DP get/set bridge (`noesis_bevy::dp`,
 //! TODO §3): read and write arbitrary dependency properties by
 //! `(x:Name, property)`, with no binding involved.
 //!
@@ -10,11 +10,11 @@
 //! queue / watch / snapshot plumbing is covered by the unit tests in
 //! `src/dp.rs`.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_dp_access -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_dp_access -- --nocapture`
 
 use std::collections::HashMap;
 
-use dm_noesis_bevy::dp::{DpKind, DpValue};
+use noesis_bevy::dp::{DpKind, DpValue};
 use noesis_runtime::view::{FrameworkElement, View};
 use noesis_runtime::xaml_provider::XamlProvider;
 

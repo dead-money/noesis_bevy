@@ -30,7 +30,7 @@
 //!
 //! ```ignore
 //! use bevy::prelude::*;
-//! use dm_noesis_bevy::classes::{
+//! use noesis_bevy::classes::{
 //!     ClassBase, ClassBuilder, NoesisClassRegistry, PropType,
 //!     PropertyChangeHandler, PropertyValue, Instance,
 //! };

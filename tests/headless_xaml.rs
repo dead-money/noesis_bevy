@@ -94,7 +94,7 @@ async fn run_test() {
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut render_device =
-        dm_noesis_bevy::render_device::WgpuRenderDevice::new(device.clone(), queue.clone());
+        noesis_bevy::render_device::WgpuRenderDevice::new(device.clone(), queue.clone());
     render_device.set_onscreen_target(target_view, RT_SIZE, RT_SIZE);
 
     // ── Register render device + XAML provider with Noesis ────────────────

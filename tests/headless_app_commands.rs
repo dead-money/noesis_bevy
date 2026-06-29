@@ -1,5 +1,5 @@
 //! Bevy-app-level integration test for the per-view **`ICommand`** bridge
-//! (`dm_noesis_bevy::commands`), exercised end-to-end through the real
+//! (`noesis_bevy::commands`), exercised end-to-end through the real
 //! `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
 //! Bluff-resistance: a [`NoesisCommands`] host declares two commands, `Fire`
@@ -32,7 +32,7 @@
 //! Theme-free / font-free XAML (coloured `Border`s, no glyphs, no `Button`
 //! template), so the scene builds with no font gate and no theme dictionary.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_app_commands -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_app_commands -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,8 +40,8 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::commands::{CommandsDef, NoesisCommandInvoked, NoesisCommands};
-use dm_noesis_bevy::{
+use noesis_bevy::commands::{CommandsDef, NoesisCommandInvoked, NoesisCommands};
+use noesis_bevy::{
     NoesisCamera, NoesisInputEvent, NoesisInputQueue, NoesisPlugin, NoesisView, XamlRegistry,
 };
 use noesis_runtime::view::MouseButton;

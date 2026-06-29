@@ -1,5 +1,5 @@
 //! Bevy-app-level integration test for the **typed `ItemsSource`** bridge
-//! (`dm_noesis_bevy::items`), exercised end-to-end through the real
+//! (`noesis_bevy::items`), exercised end-to-end through the real
 //! `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
 //! A [`NoesisItems`] populates a `ListBox` with **`i32`** items `[10, 20, 30]`
@@ -26,7 +26,7 @@
 //! to a `TextBlock`, but we never read pixels), so the scene builds with no font
 //! gate.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_app_typed_items -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_app_typed_items -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,7 +34,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{
+use noesis_bevy::{
     ItemValue, NoesisCamera, NoesisItems, NoesisItemsCurrent, NoesisPlugin, NoesisView,
     XamlRegistry,
 };

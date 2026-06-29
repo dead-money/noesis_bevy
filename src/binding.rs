@@ -18,8 +18,8 @@
 //! scene rebuild, exactly like [`crate::items`].
 //!
 //! ```ignore
-//! use dm_noesis_bevy::binding::{NoesisBinding, SourceSpec};
-//! use dm_noesis_bevy::binding::{ConvertArg, Converted};
+//! use noesis_bevy::binding::{NoesisBinding, SourceSpec};
+//! use noesis_bevy::binding::{ConvertArg, Converted};
 //!
 //! commands.entity(view).insert(
 //!     NoesisBinding::new()

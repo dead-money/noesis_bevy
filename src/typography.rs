@@ -20,7 +20,7 @@
 //! (`FontSize` is a readable `f32` DP) when you need observation.
 //!
 //! ```ignore
-//! use dm_noesis_bevy::{NoesisTypography, FontWeight};
+//! use noesis_bevy::{NoesisTypography, FontWeight};
 //!
 //! commands.entity(view).insert(
 //!     NoesisTypography::new()

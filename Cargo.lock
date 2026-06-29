@@ -2223,30 +2223,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dm_noesis_bevy"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_render",
- "bytemuck",
- "dm_noesis_bevy_derive",
- "image",
- "noesis_runtime",
- "pollster",
- "thiserror 2.0.18",
- "wgpu",
-]
-
-[[package]]
-name = "dm_noesis_bevy_derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3400,6 +3376,30 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "noesis_bevy"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_render",
+ "bytemuck",
+ "image",
+ "noesis_bevy_derive",
+ "noesis_runtime",
+ "pollster",
+ "thiserror 2.0.18",
+ "wgpu",
+]
+
+[[package]]
+name = "noesis_bevy_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

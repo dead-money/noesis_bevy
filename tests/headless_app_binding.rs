@@ -26,7 +26,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{
+use noesis_bevy::{
     ConvertArg, Converted, DpKind, DpValue, NoesisBinding, NoesisCamera, NoesisDp, NoesisDpChanged,
     NoesisPlugin, NoesisView, SourceSpec, XamlRegistry,
 };

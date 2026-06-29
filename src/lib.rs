@@ -66,8 +66,6 @@ pub use commands::{
     SharedCommandQueue,
 };
 pub use diagnostics::{NoesisDiagnostics, NoesisDiagnosticsPlugin};
-/// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
-pub use dm_noesis_bevy_derive::NoesisViewModel;
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
 pub use events::{
     Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin, NoesisKeyDown,
@@ -101,6 +99,8 @@ pub use items::{
 };
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
+/// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
+pub use noesis_bevy_derive::NoesisViewModel;
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
 pub use resources::{

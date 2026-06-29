@@ -12,7 +12,7 @@
 //!
 //! ```ignore
 //! use bevy::prelude::*;
-//! use dm_noesis_bevy::{NoesisViewModel, NoesisViewModelAppExt};
+//! use noesis_bevy::{NoesisViewModel, NoesisViewModelAppExt};
 //!
 //! #[derive(Component, NoesisViewModel)]
 //! struct SettingsVm {
@@ -23,7 +23,7 @@
 //!
 //! fn main() {
 //!     App::new()
-//!         .add_plugins((DefaultPlugins, dm_noesis_bevy::NoesisPlugin::default()))
+//!         .add_plugins((DefaultPlugins, noesis_bevy::NoesisPlugin::default()))
 //!         .add_noesis_view_model::<SettingsVm>() // register the type once
 //!         .run();
 //! }

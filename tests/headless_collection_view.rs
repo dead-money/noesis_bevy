@@ -1,5 +1,5 @@
 //! End-to-end test for the collection-view navigation bridge
-//! (`dm_noesis_bevy::items`): drive a bound `ListBox`'s default
+//! (`noesis_bevy::items`): drive a bound `ListBox`'s default
 //! `ICollectionView` current item and assert the exact `CurrentPosition` /
 //! `CurrentItem` the engine reports back.
 //!
@@ -28,12 +28,12 @@
 //! programmatic `SortDescription`/`Filter` is exposed), so they are not tested
 //! here — see `noesis_runtime::collection_view`.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_collection_view -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_collection_view -- --nocapture`
 
 use std::collections::HashMap;
 
-use dm_noesis_bevy::ItemValue;
-use dm_noesis_bevy::items::{CollectionViewOp, ItemsBinding};
+use noesis_bevy::ItemValue;
+use noesis_bevy::items::{CollectionViewOp, ItemsBinding};
 use noesis_runtime::view::{FrameworkElement, View};
 use noesis_runtime::xaml_provider::XamlProvider;
 

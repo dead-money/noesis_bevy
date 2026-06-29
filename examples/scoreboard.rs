@@ -34,10 +34,10 @@
 //! Run it windowed (requires `$NOESIS_SDK_DIR`):
 //!
 //! ```sh
-//! cargo run -p dm_noesis_bevy --example scoreboard
+//! cargo run -p noesis_bevy --example scoreboard
 //! # headless screenshot:
 //! NOESIS_VIEWER_EXIT_AFTER=1 NOESIS_SCREENSHOT=scoreboard.png \
-//!   cargo run -p dm_noesis_bevy --example scoreboard
+//!   cargo run -p noesis_bevy --example scoreboard
 //! ```
 //!
 //! The headless data round-trip is asserted by
@@ -49,8 +49,8 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use dm_noesis_bevy::classes::PropType;
-use dm_noesis_bevy::{
+use noesis_bevy::classes::PropType;
+use noesis_bevy::{
     DpKind, FontRegistry, NoesisCamera, NoesisDp, NoesisItems, NoesisPlugin, NoesisView, NoesisVm,
     NoesisWindowCompatPlugin, ObjectRow, ViewModelDef, XamlRegistry,
 };
@@ -392,7 +392,7 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "dm_noesis_bevy — Scoreboard".into(),
+            title: "noesis_bevy — Scoreboard".into(),
             resolution: (VIEW_W, VIEW_H).into(),
             ..default()
         }),

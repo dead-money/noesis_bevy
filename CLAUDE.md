@@ -1,4 +1,4 @@
-# dm_noesis_bevy
+# noesis_bevy
 
 Bevy plugin that drives the closed-source Noesis GUI SDK — via the sibling FFI crate
 `noesis_runtime` — and renders its UIs into a Bevy frame through a wgpu-backed
@@ -26,4 +26,4 @@ footers to PR bodies. Author lines and PR bodies stay clean.
   `apply_*_for(entity, …)` / `poll_*_for(entity, …)` method against that view's live scene;
   read-backs surface as a `Message { view, … }`. Mirror an existing bridge module in `src/`
   (`text.rs`, `dp.rs`, `viewmodel.rs`, `commands.rs`, …) when adding a new one.
-- Try XAML live: `cargo run -p dm_noesis_bevy --example xaml_viewer <path>`.
+- Try XAML live: `cargo run -p noesis_bevy --example xaml_viewer <path>`.

@@ -9,8 +9,8 @@
 //! [`NoesisViewModelChanged`] messages carrying the originating `view` entity.
 //!
 //! ```ignore
-//! use dm_noesis_bevy::viewmodel::{NoesisVm, ViewModelDef};
-//! use dm_noesis_bevy::classes::PropType;
+//! use noesis_bevy::viewmodel::{NoesisVm, ViewModelDef};
+//! use noesis_bevy::classes::PropType;
 //!
 //! commands.entity(view).insert(NoesisVm::new(
 //!     ViewModelDef::new("Settings.ViewModel")

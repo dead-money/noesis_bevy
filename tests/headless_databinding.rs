@@ -22,7 +22,7 @@
 //! Font-free assertion path: only DP/text *values* are read (no glyph pixels),
 //! so the scene builds with no font gate.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_databinding -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_databinding -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,7 +30,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{
+use noesis_bevy::{
     NoesisCamera, NoesisItems, NoesisItemsCurrent, NoesisPlugin, NoesisText, NoesisTextChanged,
     NoesisView, NoesisViewModel, NoesisViewModelAppExt, XamlRegistry,
 };

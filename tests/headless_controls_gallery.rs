@@ -21,7 +21,7 @@
 //! end to end. The test also asserts the app exits cleanly (no panic across the
 //! whole frame pump).
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_controls_gallery -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_controls_gallery -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,8 +29,8 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{DpValue, NoesisDpChanged};
-use dm_noesis_bevy::{NoesisClicked, NoesisInputEvent, NoesisInputQueue};
+use noesis_bevy::{DpValue, NoesisDpChanged};
+use noesis_bevy::{NoesisClicked, NoesisInputEvent, NoesisInputQueue};
 use noesis_runtime::view::MouseButton;
 
 // The example is a binary; included as a module here only some items are used.
