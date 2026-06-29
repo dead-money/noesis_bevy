@@ -77,6 +77,22 @@ impl DpValue {
             Self::Str(v) => element.set_string(property, v),
         }
     }
+
+    /// Box this value as a `Noesis::BoxedValue<T>` for the code-built style /
+    /// trigger setter path (`Setter.Value`, `Trigger.Value`). The boxed variant
+    /// must match the target property's runtime type, exactly as for
+    /// [`write_to`](Self::write_to) (see the module docs on `f32` vs `f64`).
+    #[must_use]
+    pub fn to_boxed(&self) -> noesis_runtime::binding::Boxed {
+        use noesis_runtime::binding::{box_bool, box_f32, box_f64, box_i32, box_string};
+        match self {
+            Self::F32(v) => box_f32(*v),
+            Self::F64(v) => box_f64(*v),
+            Self::I32(v) => box_i32(*v),
+            Self::Bool(v) => box_bool(*v),
+            Self::Str(v) => box_string(v),
+        }
+    }
 }
 
 /// Which value type to read a watched property as — picks the runtime getter.
