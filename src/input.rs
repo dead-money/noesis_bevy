@@ -1,4 +1,4 @@
-//! Bevy → Noesis input forwarding (Phase 5.B).
+//! Bevy → Noesis input forwarding.
 //!
 //! The main app observes Bevy's raw input events and a few window events,
 //! converts each into a [`NoesisInputEvent`], and pushes it onto a shared
@@ -10,8 +10,8 @@
 //! # Coordinate handling
 //!
 //! Bevy delivers cursor positions in *logical* pixels relative to the
-//! window. Noesis hit-tests in the view's own pixel space — which is
-//! whatever [`NoesisScene::size`] is set to (the intermediate texture).
+//! window. Noesis hit-tests in the view's own pixel space, whatever
+//! [`NoesisView::size`] is set to (the intermediate texture).
 //! We convert on the main side, collapsing Window scale factor and any
 //! intermediate-vs-window size mismatch into a single ratio:
 //!
@@ -20,9 +20,8 @@
 //!   view_y = cursor_logical_y * view_h / window_logical_h
 //! ```
 //!
-//! When the intermediate is made to match the window physical size (a
-//! straight-line Phase 5.C follow-up once we wire `WindowResized`), this
-//! ratio reduces to the scale factor.
+//! Once `resize_noesis_scene` snaps the intermediate to the window's
+//! physical size, this ratio reduces to the scale factor.
 //!
 //! # Queue lifecycle
 //!
@@ -30,7 +29,7 @@
 //! render world by [`ExtractResourcePlugin`] between the main schedule
 //! and the render sub-app's own schedules. Since Bevy's `Last` runs
 //! *before* the render sub-app's `ExtractSchedule` (the main schedule
-//! completes, then sub-apps run), we can't clear in `Last` — that would
+//! completes, then sub-apps run), we can't clear in `Last`; that would
 //! wipe the queue before extract copies it. Instead we clear at the
 //! very start of the next frame's `PreUpdate`, before the forwarders
 //! push new events:
@@ -41,7 +40,7 @@
 //!   Frame N Last:       (no-op)
 //!   Between N and N+1:  ExtractSchedule copies [A, B, C] into render world
 //!   Render frame N:     apply_noesis_input drains render-side copy
-//!   Frame N+1 PreUpdate: clear (drops A, B, C from main queue) — then push again
+//!   Frame N+1 PreUpdate: clear (drops A, B, C from main queue), then push again
 //! ```
 //!
 //! `Clone` on the queue is cheap: every variant is `Copy`-sized, so
@@ -60,75 +59,125 @@ use noesis_runtime::view::{Key, MouseButton};
 
 use crate::render::NoesisView;
 
-// ── key map ────────────────────────────────────────────────────────────────
-
 pub mod key_map;
 
 // ── Events and queue ───────────────────────────────────────────────────────
 
+/// A single input event already translated into Noesis terms, waiting in the
+/// [`NoesisInputQueue`] to be replayed onto the live [`View`].
+///
+/// All `x`/`y` coordinates are in the view's own pixel space (see the
+/// module-level coordinate handling notes), already converted from Bevy's
+/// logical-pixel window coordinates by `to_view_coords`.
+///
+/// [`View`]: noesis_runtime::view::View
 #[derive(Clone, Copy, Debug)]
 pub enum NoesisInputEvent {
+    /// Pointer moved to a new position. Noesis tracks this as the last known
+    /// cursor location for subsequent hit-tests.
     MouseMove {
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
     },
+    /// A mouse button changed state at the given position.
     MouseButton {
+        /// `true` on press, `false` on release.
         down: bool,
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
+        /// Which button changed.
         button: MouseButton,
     },
+    /// A wheel detent, in the Win32 `WHEEL_DELTA` convention Noesis expects
+    /// (120 units per notch).
     MouseWheel {
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
+        /// Wheel movement in 120-units-per-notch increments.
         delta: i32,
     },
+    /// A scroll in line counts, the path Noesis's scrolling controls listen
+    /// on. Emitted alongside [`MouseWheel`](Self::MouseWheel) so controls
+    /// bound to either signal respond.
     Scroll {
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
+        /// Scroll amount in lines.
         value: f32,
+        /// `true` for horizontal scroll, `false` for vertical.
         horizontal: bool,
     },
+    /// A touch point made contact.
     TouchDown {
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
+        /// Touch point identifier, stable across this contact's lifetime.
         id: u64,
     },
+    /// A touch point moved while in contact.
     TouchMove {
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
+        /// Touch point identifier, stable across this contact's lifetime.
         id: u64,
     },
+    /// A touch point lifted or was canceled.
     TouchUp {
+        /// X position in view-pixel space.
         x: i32,
+        /// Y position in view-pixel space.
         y: i32,
+        /// Touch point identifier, stable across this contact's lifetime.
         id: u64,
     },
+    /// A key was pressed. Carries the mapped Noesis [`Key`]; keys that don't
+    /// map are dropped before they reach the queue.
     KeyDown(Key),
+    /// A key was released.
     KeyUp(Key),
+    /// A typed character, as a Unicode scalar value. Drives text entry
+    /// separately from the [`KeyDown`](Self::KeyDown) / [`KeyUp`](Self::KeyUp)
+    /// pair, including on auto-repeat.
     Char(u32),
+    /// Window focus changed: `true` gained, `false` lost.
     Focus(bool),
 }
 
-/// Batched input events waiting to be drained onto the Noesis [`View`].
+/// Batched input events waiting to be drained onto the Noesis `View`.
 /// Populated by systems in this module; drained by the render-world
 /// `apply_noesis_input` system every frame.
 #[derive(Resource, ExtractResource, Clone, Default, Debug)]
 pub struct NoesisInputQueue {
+    /// Events queued this frame, in arrival order.
     pub events: Vec<NoesisInputEvent>,
 }
 
 impl NoesisInputQueue {
+    /// Append an event to the back of the queue.
     pub fn push(&mut self, ev: NoesisInputEvent) {
         self.events.push(ev);
     }
 
+    /// Drain every queued event, leaving the queue empty. The render-side
+    /// `apply_noesis_input` system uses this to feed events onto the [`View`].
+    ///
+    /// [`View`]: noesis_runtime::view::View
     pub fn drain(&mut self) -> std::vec::Drain<'_, NoesisInputEvent> {
         self.events.drain(..)
     }
 }
-
-// ── Coordinate conversion ──────────────────────────────────────────────────
 
 /// Scale a logical-px point on the window into Noesis view-pixel space.
 /// Returns `None` when the window has zero size (startup race).
@@ -164,8 +213,7 @@ fn forward_cursor_moved(
     window: Single<&Window, With<PrimaryWindow>>,
     views: Query<&NoesisView>,
 ) {
-    // Migration scaffolding (Phase 1a step ii): pointer input maps through the
-    // first view's coordinate space. Per-view pointer routing is Phase 3A.
+    // First view only; no per-view pointer routing yet.
     let Some(scene) = views.iter().next() else {
         reader.read(); // drop events so we don't replay them later
         return;
@@ -196,9 +244,8 @@ fn forward_mouse_buttons(
             BevyMouseButton::Other(_) => continue,
         };
         let (x, y) = if last.valid { (last.x, last.y) } else { (0, 0) };
-        // Noesis expects the press coord to match the last MouseMove. We
-        // re-enqueue the last known position to stay consistent in the
-        // unlikely case events arrive in a surprising order.
+        // Re-enqueue last pos so the press coord matches the last MouseMove,
+        // regardless of event arrival order.
         if last.valid {
             queue.push(NoesisInputEvent::MouseMove { x, y });
         }
@@ -217,13 +264,12 @@ fn forward_mouse_wheel(
     mut queue: ResMut<NoesisInputQueue>,
     last: Res<LastPointer>,
 ) {
-    // We forward MouseWheel as a Noesis `MouseWheel` event (Windows-style,
-    // 120 units per detent) AND as a `Scroll` event (line count) so controls
-    // that listen to either get the right signal. Noesis only handles the
-    // first one it cares about; redundant calls are cheap.
+    // Emit both a Noesis MouseWheel event (Windows-style, 120 units per
+    // detent) and a Scroll event (line count) so controls listening to
+    // either get the signal. Redundant calls are cheap.
     for ev in reader.read() {
         let (x, y) = if last.valid { (last.x, last.y) } else { (0, 0) };
-        // Convert pixel scroll to "lines" for the Scroll path — rough
+        // Convert pixel scroll to "lines" for the Scroll path: rough
         // heuristic of 40 px/line; MouseScrollUnit::Line passes through.
         let lines_y = match ev.unit {
             MouseScrollUnit::Line => ev.y,
@@ -264,11 +310,10 @@ fn forward_mouse_wheel(
 #[allow(clippy::needless_pass_by_value)]
 fn forward_keyboard(mut reader: MessageReader<KeyboardInput>, mut queue: ResMut<NoesisInputQueue>) {
     for ev in reader.read() {
-        // Skip synthetic repeat events — Noesis handles its own repeat
-        // timing off the logical KeyDown/KeyUp pair.
+        // Skip synthetic repeat events; Noesis runs its own repeat timing
+        // off the logical KeyDown/KeyUp pair.
         if ev.repeat {
-            // But we DO still want the Char(s) on repeat so TextBox
-            // auto-repeat works.
+            // Still emit Char on repeat so TextBox auto-repeat works.
             if matches!(ev.state, ButtonState::Pressed)
                 && let Some(text) = ev.text.as_deref()
             {
@@ -336,7 +381,7 @@ fn forward_focus(mut reader: MessageReader<WindowFocused>, mut queue: ResMut<Noe
 /// resize. Makes the `NoesisNode` blit effectively 1:1 and brings the
 /// cursor-coord ratio in `to_view_coords` down to just the scale factor.
 ///
-/// Runs on the main app — the render-world clone of each [`NoesisView`] is
+/// Runs on the main app: the render-world clone of each [`NoesisView`] is
 /// overwritten each frame via `ExtractComponent`, so the source of truth has to
 /// live here. The render side picks up the new size on the next frame's
 /// `ensure_scene`, which detects the mismatch and rebuilds the intermediate
@@ -364,7 +409,7 @@ fn resize_noesis_scene(
 /// Clear the main-app queue at the start of `PreUpdate`, before the
 /// forwarders push new events. By the time this fires, the render
 /// sub-app's extract has already copied whatever the previous frame
-/// queued — see the module-level queue-lifecycle diagram.
+/// queued; see the module-level queue-lifecycle diagram.
 fn clear_queue_before_push(mut queue: ResMut<NoesisInputQueue>) {
     queue.events.clear();
 }
@@ -384,7 +429,7 @@ impl Plugin for NoesisInputPlugin {
             .add_systems(
                 PreUpdate,
                 (
-                    // MUST run first — resets the queue so this frame's
+                    // MUST run first: resets the queue so this frame's
                     // pushes land in an empty buffer. See the
                     // queue-lifecycle diagram in the module docs.
                     clear_queue_before_push,

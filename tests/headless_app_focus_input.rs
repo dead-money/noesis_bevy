@@ -1,29 +1,13 @@
-//! Bevy-app-level integration test for the **focus-navigation** bridge
-//! (`NoesisFocusControl`), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on). One Noesis app per test process.
+//! Integration test for `NoesisFocusControl` focus-navigation through the real `NoesisPlugin` pipeline (headless).
 //!
-//! Two bluff-*resistant* effects are asserted, both against the element's
-//! un-applied default:
+//! Two assertions, each verified against the un-applied default:
 //!
-//!   1. **directional `MoveFocus`** — two side-by-side `TextBox`es (`First`,
-//!      `Second`) in a horizontal `StackPanel`. We focus `First`, then issue
-//!      `MoveFocus(First, Right)`. We observe focus through a `NoesisDp` watch on
-//!      `IsFocused` (`bool`): after the move `Second.IsFocused` must be `true`
-//!      (default `false`) and `First.IsFocused` must be `false` (it *was* `true`
-//!      after the initial focus). A missing apply / wrong-entity routing /
-//!      no-op move all read back the default and fail. `First` flipping back to
-//!      `false` proves focus genuinely *moved* rather than being set on both.
+//!   - `MoveFocus(First, Right)` on a horizontal `StackPanel` of two `TextBox`es:
+//!     `Second.IsFocused` must flip to `true` and `First.IsFocused` back to `false`.
+//!   - `PredictFocus(First, Right, "Second")`: must surface `NoesisFocusPredicted`
+//!     with `candidate = true` and `matches_expected = true` (default emits nothing).
 //!
-//!   2. **`PredictFocus`** — a `predict_to(First, Right, "Second")` watch must
-//!      surface a `NoesisFocusPredicted` carrying `candidate = true` and
-//!      `matches_expected = true`. The default is *no message at all*, so any
-//!      such message is itself the positive signal; `matches_expected` (a raw
-//!      pointer identity compare to `Second`'s element) rules out a stray
-//!      candidate.
-//!
-//! Font-free XAML (only DP values / predictions are asserted, no glyph
-//! rendering), so the scene builds with no font gate. The component is filled in
-//! *after* the scene exists because its one-shot moves apply on change-detection.
+//! Font-free XAML; only DP values and predictions are asserted, so no font gate.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,8 +24,7 @@ const FOCUS_AT_FRAME: usize = 10;
 const MOVE_AT_FRAME: usize = 25;
 const EXIT_AT_FRAME: usize = 60;
 
-// Two side-by-side, focusable TextBoxes so directional (Right) navigation has a
-// real spatial neighbour to find.
+// Two focusable TextBoxes side-by-side so Right navigation has a real spatial target.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="80" Height="32">
@@ -97,8 +80,7 @@ fn focus_control_moves_focus_and_predicts() {
                         size: UVec2::new(80, 32),
                         ..default()
                     },
-                    // Write-only / poll components start empty so their one-shot
-                    // apply isn't lost before the scene exists.
+                    // start empty; one-shot applies fire after the scene exists
                     NoesisFocus::new(),
                     NoesisFocusControl::new(),
                     watcher(),
@@ -121,7 +103,6 @@ fn focus_control_moves_focus_and_predicts() {
 
             if *frame == FOCUS_AT_FRAME {
                 for (mut focus, mut ctl) in &mut q {
-                    // Focus First (existing bridge) and start the prediction watch.
                     *focus = NoesisFocus::new().focus("First");
                     *ctl = NoesisFocusControl::new().predict_to(
                         "First",
@@ -132,7 +113,6 @@ fn focus_control_moves_focus_and_predicts() {
             }
             if *frame == MOVE_AT_FRAME {
                 for (_focus, mut ctl) in &mut q {
-                    // Keep the prediction watch; add the directional move action.
                     *ctl = NoesisFocusControl::new()
                         .predict_to("First", FocusNavigationDirection::Right, "Second")
                         .move_focus("First", FocusNavigationDirection::Right, false);
@@ -182,7 +162,6 @@ fn focus_control_moves_focus_and_predicts() {
             .map(|(_, _, v)| v.clone())
     };
 
-    // 1. Directional MoveFocus: focus landed on Second, and left First.
     assert_eq!(
         latest("Second.IsFocused"),
         Some(DpValue::Bool(true)),
@@ -194,8 +173,6 @@ fn focus_control_moves_focus_and_predicts() {
         "after MoveFocus, First must have lost focus (it was true after the initial focus)",
     );
 
-    // 2. PredictFocus: a candidate exists in the Right direction and it IS Second.
-    //    Default behaviour emits no NoesisFocusPredicted at all.
     assert!(
         predicted
             .iter()

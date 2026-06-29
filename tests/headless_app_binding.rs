@@ -1,24 +1,13 @@
-//! Bevy-app-level integration test for the value-converter / multi-binding
-//! bridge ([`NoesisBinding`]), exercised end-to-end through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for [`NoesisBinding`]: value-converter and multi-binding
+//! bridges, run through the real `NoesisPlugin` pipeline (headless).
 //!
-//! The bridge installs code-built `{Binding}`s — driven by **Rust** converters —
-//! onto named elements' DPs. It's self-contained: the sources are sibling
-//! elements resolved by `x:Name` (`ElementName`), so the test needs no
-//! `DataContext`/view model. We observe the *converted* target values through a
-//! [`NoesisDp`] string watch and assert the exact text:
+//! Sources are sibling elements resolved by `x:Name`; no `DataContext` needed.
+//! Assertions read converted target values via [`NoesisDp`] string watch:
 //!
-//!   * **converted** → `Upper.Text` is `Source.Text` ("hello") run through a
-//!     Rust converter that upper-cases it ⇒ `"HELLO"`. A missing binding reads
-//!     the default (empty); an *identity* binding (converter not applied) would
-//!     read "hello" — both differ from "HELLO", so the assertion is
-//!     bluff-resistant.
-//!   * **multi** → `Full.Text` combines `First.Text` ("Ada") and `Last.Text`
-//!     ("Lovelace") through a Rust multi-converter ⇒ `"Ada Lovelace"`, a value
-//!     neither source nor any default equals.
+//!   * `Upper.Text` = `"HELLO"` (Source.Text `"hello"` uppercased by Rust converter)
+//!   * `Full.Text` = `"Ada Lovelace"` (First + Last joined by Rust multi-converter)
 //!
-//! Font-free XAML (only DP text is asserted, no glyph rendering), so the scene
-//! builds with no font gate.
+//! Font-free XAML; no glyph rendering involved.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -86,8 +75,6 @@ fn binding_bridge_drives_targets_through_rust_converters() {
                         size: UVec2::new(200, 120),
                         ..default()
                     },
-                    // Upper.Text <- {Binding Text, ElementName=Source}, upper-cased.
-                    // Full.Text  <- {First} + " " + {Last}.
                     NoesisBinding::new()
                         .converted(
                             "Upper",
@@ -110,7 +97,6 @@ fn binding_bridge_drives_targets_through_rust_converters() {
                                 Some(Converted::String(format!("{a} {b}")))
                             },
                         ),
-                    // Watch the converted target text every frame.
                     NoesisDp::new().watch("Upper", "Text", DpKind::Str).watch(
                         "Full",
                         "Text",

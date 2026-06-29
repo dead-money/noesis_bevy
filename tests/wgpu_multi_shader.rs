@@ -1,15 +1,11 @@
-//! Phase 3.B integration test: render three shader variants (`Path_Solid`,
-//! `Path_AA_Solid`, `RGBA`) into one frame and read back the target.
+//! Renders three shader variants (`Path_Solid`, `Path_AA_Solid`, `RGBA`) into
+//! one frame and reads back the target.
 //!
-//! - Each batch uses a different vertex format (`PosColor`,
-//!   `PosColorCoverage`, `Pos`), driving the `vertex_layout` dispatch.
-//! - All three pipelines come out of `PipelineCache` lazily on first draw.
-//! - `RGBA` exercises the `ps_uniforms0` bind-group path with a yellow fill.
-//! - All vertex / index data is packed into one `map_vertices` /
-//!   `map_indices` pair; per-batch `vertex_offset` / `start_index` slice the
-//!   right region. Per-batch uniforms are isolated via the ring buffer +
-//!   dynamic-offset bind groups landed in Phase 4.A (see
-//!   `tests/wgpu_uniform_ring.rs` for the direct regression test).
+//! Each batch uses a different vertex format (`PosColor`, `PosColorCoverage`,
+//! `Pos`), exercising the `vertex_layout` dispatch. `RGBA` exercises the
+//! `ps_uniforms0` bind-group path. All vertex/index data is packed into one
+//! `map_vertices`/`map_indices` pair; per-batch `vertex_offset`/`start_index`
+//! slice the correct region.
 
 use std::ffi::c_void;
 
@@ -42,7 +38,6 @@ fn three_shader_variants_render_into_distinct_quadrants() {
 
 #[allow(clippy::too_many_lines)]
 async fn run_test() {
-    // ── wgpu init ──────────────────────────────────────────────────────────
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -64,7 +59,6 @@ async fn run_test() {
         .await
         .expect("no wgpu device available");
 
-    // ── Target + pre-clear ─────────────────────────────────────────────────
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("multi-shader target"),
         size: wgpu::Extent3d {
@@ -111,7 +105,6 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // ── Pack all vertex data into one buffer ───────────────────────────────
     // Layout:
     //   bytes  0..36   PosColor  ×3   Path_Solid (red)         upper-left
     //   bytes 36..84   PosColorCoverage ×3  Path_AA_Solid (green) upper-right
@@ -130,7 +123,7 @@ async fn run_test() {
     vb_data.extend_from_slice(&pos_only_verts(&[[-0.7, -0.3], [-0.3, -0.3], [-0.5, -0.7]]));
     assert_eq!(vb_data.len(), 108);
 
-    // All three batches use [0, 1, 2] indices; we just bump start_index per batch.
+    // All three batches share [0, 1, 2]; start_index selects the correct region.
     let mut ib_data = Vec::with_capacity(18);
     for _ in 0..3 {
         ib_data.extend_from_slice(&[0u16, 1, 2].map(u16::to_le_bytes).concat());
@@ -146,7 +139,6 @@ async fn run_test() {
     // RGBA batch's color, fed in via ps_uniforms0.values[0].
     let rgba_color: [f32; 4] = [1.0, 1.0, 0.0, 1.0]; // yellow
 
-    // ── Drive the device ───────────────────────────────────────────────────
     rd.begin_onscreen_render();
 
     rd.map_vertices(vb_data.len() as u32)
@@ -172,7 +164,6 @@ async fn run_test() {
 
     rd.end_onscreen_render();
 
-    // ── Read back ──────────────────────────────────────────────────────────
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(TARGET_H),
@@ -249,14 +240,9 @@ async fn run_test() {
         "RGBA centroid should be yellow"
     );
 
-    // Quadrants outside any triangle should still be the clear color.
     assert_eq!(pixel(200, 200), CLEAR, "lower-right corner should be clear");
     assert_eq!(pixel(10, 10), CLEAR, "top-left corner should be clear");
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Vertex builders + Batch builder
-// ────────────────────────────────────────────────────────────────────────────
 
 fn pos_color_verts(verts: &[([f32; 2], [u8; 4])]) -> Vec<u8> {
     let mut out = Vec::with_capacity(verts.len() * 12);

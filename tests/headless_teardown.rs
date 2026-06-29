@@ -1,15 +1,9 @@
-//! Regression test for the main-world Noesis driving pipeline teardown.
+//! Regression test for Noesis teardown ordering and pipelined-cleanup deadlock.
 //!
-//! Stands up a **headless** Bevy app with the full `NoesisPlugin` — `DefaultPlugins`
-//! (so the render sub-app and **pipelined rendering** are present) minus `WinitPlugin`,
-//! driven by `ScheduleRunnerPlugin`. Seeds a *font-free* inline XAML (a solid `Border`,
-//! so the scene builds with no font gate), pumps a handful of frames, then exits via
-//! `AppExit` — exercising the real shutdown path.
-//!
-//! Guards two bugs found when Noesis moved to the main world (Phase 0):
-//!  1. **Teardown ordering** — `NoesisRenderState::drop` must release every Noesis handle
-//!     *before* the global `shutdown()` (it now owns `shutdown()` for exactly this reason).
-//!  2. **Pipelined-cleanup deadlock** — no `NonSendMut<NoesisRenderState>` system may live in
+//! Guards two bugs:
+//!  1. Teardown ordering: `NoesisRenderState::drop` must release every Noesis handle
+//!     before the global `shutdown()` (it owns `shutdown()` for exactly this reason).
+//!  2. Pipelined-cleanup deadlock: no `NonSendMut<NoesisRenderState>` system may live in
 //!     the render schedule, or Bevy's pipelined render-thread cleanup handshake deadlocks.
 //!
 //! If either regresses, `app.run()` hangs and the outer test timeout fails the run.
@@ -24,7 +18,7 @@ use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
 
 const FRAMES: usize = 30;
 
-// Solid blue Border — no text, so `ensure_scene` builds it without waiting on a font folder.
+// No text element, so the scene builds without a font folder.
 const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     Background="#FF3050FF"/>"##;
 
@@ -47,8 +41,7 @@ fn headless_drive_and_teardown_do_not_hang() {
                 ..default()
             }),
     );
-    // Headless runner — drives frames + processes `AppExit` with the same clean shutdown
-    // handshake as the real app (incl. the pipelined render thread, which stays ENABLED).
+    // Pipelined rendering stays enabled; exercises the deadlock path (bug 2 above).
     app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
     app.add_plugins(NoesisPlugin::default());
 

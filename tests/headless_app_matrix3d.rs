@@ -1,37 +1,25 @@
-//! Bevy-app-level integration test for the **raw 3D matrix transform** path of
-//! the [`NoesisTransform3D`] bridge ([`Matrix3DSpec`] / `MatrixTransform3D`),
-//! exercised end-to-end through the real `NoesisPlugin` pipeline (headless,
-//! pipelined rendering on).
+//! Integration test for the raw 3D matrix transform path of [`NoesisTransform3D`]
+//! ([`Matrix3DSpec`] / `MatrixTransform3D`), run end-to-end through the real
+//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
-//! `MatrixTransform3D` (assigned via `UIElement::SetTransform3D`) is a
-//! post-layout property: it never changes an element's `ActualWidth`/
-//! `ActualHeight`, and its value lives on a nested `MatrixTransform3D` object —
-//! neither reachable through a scalar `NoesisDp` watch. So this bridge ships its
-//! own read-back: after assigning the matrix it reads the element's *live*
-//! `Transform3D` back from Noesis (the 12 `Transform3` coefficients) and emits a
-//! [`NoesisMatrixTransform3DChanged`]. The read-back is element-sourced and gated
-//! on pointer identity with the object we assigned, so it is bluff-resistant:
+//! `MatrixTransform3D` is a post-layout property whose value lives on a nested
+//! object, not reachable through a scalar `NoesisDp` watch. The bridge reads the
+//! element's live `Transform3D` back from Noesis after assignment and emits
+//! [`NoesisMatrixTransform3DChanged`], gated on pointer identity with the assigned
+//! object.
 //!
-//!   * **positive** — assigning a non-trivial affine matrix (scale + shear +
-//!     translate) to `Box` reads those exact 12 floats back. A no-op apply,
-//!     wrong-entity routing, or inverted change-detection leaves `Box` with no
-//!     `Transform3D`, so no message is emitted and the exact-value assertion
-//!     fails.
-//!   * **negative control** — `Other` is never given a transform, so it must
-//!     never appear in any `NoesisMatrixTransform3DChanged`.
+//! Positive: assigning a non-trivial affine matrix to `Box` reads those exact 12
+//! floats back. A no-op apply, wrong-entity routing, or inverted change-detection
+//! leaves `Box` with no `Transform3D`, so no message is emitted and the assertion
+//! fails. Negative: `Other` is never given a transform and must never appear in
+//! any [`NoesisMatrixTransform3DChanged`].
 //!
-//! The component starts empty (no-op) and is filled in *after* the scene is
-//! built, because the apply runs on Bevy change-detection.
+//! The component starts empty and is filled in after the scene is built so
+//! change-detection fires on the real assignment, not on spawn.
 //!
-//! **Scope.** This test asserts the *data-model* bridge (assignment +
-//! element-sourced read-back), which is fully implemented. It does NOT assert the
-//! perspective *pixels*: compositing a `Transform3D` routes through the offscreen
-//! effects/projection render path whose Shadow/Blur effect shaders are not yet
-//! implemented in our wgpu device. To keep the bridge test stable the transformed
-//! element is empty (no background/content); the visual aspect is covered by the
-//! `#[ignore]`d note below.
-//!
-//! Font-free XAML (only transform values are asserted, no glyph rendering).
+//! Visual compositing of `Transform3D` (perspective pixels) is not asserted here:
+//! it routes through the offscreen effects path whose Shadow/Blur shaders are not
+//! yet implemented. The `#[ignore]`d test below gates that aspect.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -54,9 +42,8 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <Border x:Name="Other" Width="20" Height="10"/>
 </Grid>"##;
 
-// A non-trivial affine Transform3: anisotropic scale on the diagonal, an
-// off-diagonal shear, and a translation in row 3. None of these are the identity
-// default, so a missing apply reads back nothing.
+// Non-trivial affine Transform3: anisotropic scale, off-diagonal shear, and
+// translation. A missing apply reads back nothing.
 #[rustfmt::skip]
 const MATRIX: [f32; 12] = [
     2.0, 0.5, 0.0,
@@ -152,7 +139,6 @@ fn matrix_transform3d_bridge_reads_back_assigned_matrix() {
         eprintln!("  {e:?} {name} = {matrix:?}");
     }
 
-    // Negative control: an un-targeted element must never be reported.
     assert!(
         got.iter().all(|(_, name, _)| name != "Other"),
         "an un-transformed element must never emit NoesisMatrixTransform3DChanged",
@@ -171,11 +157,6 @@ fn matrix_transform3d_bridge_reads_back_assigned_matrix() {
     );
 }
 
-/// Visual compositing of a `Transform3D` (the perspective-projected pixels)
-/// requires the offscreen effects/projection render path whose Shadow/Blur effect
-/// shaders our wgpu render device does not implement yet (see CLAUDE.md /
-/// TODO.md). The data-model bridge above is fully exercised; only the rendered
-/// output is gated. Re-enable once the remaining effect shaders land.
 #[test]
 #[ignore = "Transform3D perspective compositing needs the unimplemented Shadow/Blur effect shaders"]
 fn matrix_transform3d_visual_render_is_gated_on_effect_shaders() {}

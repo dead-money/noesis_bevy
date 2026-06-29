@@ -2,21 +2,21 @@
 //! counters as a Bevy resource and route its error handler into Bevy's log.
 //!
 //! Unlike the per-element bridges (visibility, layout, brushes, …) this targets
-//! nothing in the visual tree — it watches the engine itself. The plugin owns:
+//! nothing in the visual tree; it watches the engine itself. The plugin owns:
 //!
-//!   * [`NoesisDiagnostics`] — a resource refreshed every frame from
+//!   * [`NoesisDiagnostics`], a resource refreshed every frame from
 //!     `noesis_runtime::diagnostics::{allocated_memory, allocated_memory_accum,
 //!     allocations_count}`. Absolute values aren't meaningful across builds;
 //!     reason about deltas and monotonicity (`accum` is monotonic
 //!     non-decreasing; the others rise and fall with object lifetimes).
 //!   * an optional process-global error handler ([`route_errors`]) that forwards
 //!     Noesis `NS_ERROR` reports into Bevy `tracing` (`warn!` / `error!`). It is
-//!     installed for the process lifetime (see [`install_error_routing`]).
+//!     installed for the process lifetime (see `install_error_routing`).
 //!
 //! [`route_errors`]: NoesisDiagnosticsPlugin::route_errors
 //!
 //! Both halves need [`crate::NoesisPlugin`] to have called `noesis_runtime::init`
-//! first — which it has, since this plugin is added from inside `NoesisPlugin`
+//! first, which it has, since this plugin is added from inside `NoesisPlugin`
 //! after `init()`.
 
 use bevy::prelude::*;
@@ -51,14 +51,13 @@ pub struct NoesisDiagnostics {
 pub struct NoesisDiagnosticsPlugin {
     /// When `true`, install a process-global Noesis error handler that forwards
     /// reports into Bevy `tracing` (`warn!`, or `error!` for fatal). The handler
-    /// restores its predecessor when the world drops.
+    /// stays installed for the process lifetime (see `install_error_routing`).
     pub route_errors: bool,
 }
 
 impl Default for NoesisDiagnosticsPlugin {
     fn default() -> Self {
-        // Routing engine errors into the app log is the useful default; it only
-        // logs, and any predecessor handler is restored on drop.
+        // Default on: log-only, so it can't break an app that doesn't want it.
         Self { route_errors: true }
     }
 }

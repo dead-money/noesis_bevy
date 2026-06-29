@@ -1,36 +1,26 @@
 //! wgpu-backed [`noesis_runtime::render_device::RenderDevice`] implementation.
 //!
-//! Phase 2 brought up the first triangle on a single hard-coded `Path_Solid`
-//! pipeline. Phase 3.A reorganises the pipeline path:
-//!
-//! - Pipelines live in [`PipelineCache`] keyed on `(shader, render_state,
-//!   vertex_format)` and are built lazily on first `draw_batch` per key.
+//! - Pipelines live in [`PipelineCache`], keyed on `(shader, render_state,
+//!   vertex_format)` and built lazily on first `draw_batch` per key.
 //! - Vertex layouts come from the SDK lookup tables via
 //!   [`crate::render_device::vertex_layout`].
-//! - Shader source is one preprocessed WGSL template
-//!   (`shaders/noesis.wgsl`); the active define set per `Shader::Enum` lives
-//!   in [`crate::render_device::shader_defines`].
-//!
-//! Phase 4.A moves uniform uploads onto ring-buffers with dynamic-offset bind
-//! groups (see [`UniformRing`]), so multi-batch frames no longer collapse onto
-//! the last `write_buffer` call like they did in Phase 3.
-//!
-//! Phase 4.B replaces the texture / render-target stubs with real `wgpu`
-//! resources tracked in [`WgpuRenderDevice::textures`] /
-//! [`WgpuRenderDevice::render_targets`] and wires the offscreen frame phase.
-//! Each `begin_*_render` opens its own encoder, submitted at the matching
-//! `end_*_render`. `draw_batch` renders into the onscreen `target_view` while
-//! the onscreen encoder is active, and into the current RT's color attachment
-//! while the offscreen encoder is active (selected via `set_render_target`).
-//! Sampler binding + `PATH_PATTERN` variants land in 4.B.2 and are not here
-//! yet — scenes that use textures would panic at pipeline build time.
-//!
-//! Phase 4.D.1 removes the redundant `Arc<wgpu::Device>` / `Arc<wgpu::Queue>`
-//! wrappers — wgpu 27's own types are already refcount-cloneable — and makes
-//! the onscreen target optional + set-per-frame via
-//! [`WgpuRenderDevice::set_onscreen_target`]. This matches the render-graph
-//! flow where the target view comes from Bevy's `ViewTarget` / a graph-node
-//! intermediate texture each frame.
+//! - Shader source is one preprocessed WGSL template (`shaders/noesis.wgsl`);
+//!   the active define set per `Shader::Enum` lives in
+//!   [`crate::render_device::shader_defines`].
+//! - Uniform uploads use ring buffers with dynamic-offset bind groups (see
+//!   `UniformRing`), so each batch in a multi-batch frame reads its own slot.
+//! - Textures and render targets are tracked in
+//!   `WgpuRenderDevice::textures` / `WgpuRenderDevice::render_targets` and
+//!   dropped when their handles release.
+//! - Each `begin_*_render` opens its own encoder, submitted at the matching
+//!   `end_*_render`. `draw_batch` renders into the onscreen `target_view`
+//!   while the onscreen encoder is active, and into the current RT's color
+//!   attachment while the offscreen encoder is active (selected via
+//!   `set_render_target`).
+//! - The onscreen target is optional and set per frame via
+//!   [`WgpuRenderDevice::set_onscreen_target`], matching the render-graph flow
+//!   where the target view comes from Bevy's `ViewTarget` or a graph-node
+//!   intermediate texture.
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -73,9 +63,7 @@ const UNIFORM_RING_SLOTS: u32 = 1024;
 
 /// Color format every RT allocates with, and the format the pipeline cache
 /// compiles all pipelines against. Onscreen views handed to
-/// [`WgpuRenderDevice::set_onscreen_target`] must also be this format —
-/// Phase 9 generalizes the cache so the graph node can target `ViewTarget`
-/// directly.
+/// [`WgpuRenderDevice::set_onscreen_target`] must also be this format.
 const RT_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Stencil attachment format for render targets created with `needs_stencil`
@@ -95,11 +83,23 @@ enum FramePhase {
     Onscreen,
 }
 
+/// wgpu-backed implementation of [`noesis_runtime::render_device::RenderDevice`].
+///
+/// Noesis hands this device its draw stream (textures, render targets, and
+/// per-batch geometry) and it translates each call into wgpu work: uploading
+/// vertices and uniforms, building or fetching pipelines from the
+/// [`PipelineCache`], and recording draws into the active encoder. Construct one
+/// with [`WgpuRenderDevice::new`] from a Bevy `wgpu::Device` / `wgpu::Queue`
+/// pair, then point each onscreen frame at its target view with
+/// [`WgpuRenderDevice::set_onscreen_target`].
+///
+/// Lives on the render-app thread alongside the Noesis `Renderer`; the wgpu
+/// handles and resource maps it holds aren't meant to cross the main/render
+/// boundary.
 pub struct WgpuRenderDevice {
     device: wgpu::Device,
     queue: wgpu::Queue,
 
-    // Streaming geometry
     vertex_buffer: wgpu::Buffer,
     vertex_staging: Vec<u8>,
     vertex_mapped_bytes: Option<u32>,
@@ -107,7 +107,7 @@ pub struct WgpuRenderDevice {
     index_staging: Vec<u8>,
     index_mapped_bytes: Option<u32>,
 
-    // Uniforms — ring-buffered with dynamic-offset bind groups so each batch
+    // Uniforms: ring-buffered with dynamic-offset bind groups so each batch
     // reads its own slice instead of racing on a single slot.
     vs_ring: UniformRing,
     vs_uniform_bind_group: wgpu::BindGroup,
@@ -147,10 +147,9 @@ pub struct WgpuRenderDevice {
     dummy_view: wgpu::TextureView,
     dummy_sampler: wgpu::Sampler,
 
-    // Pipelines (lazy)
     pipelines: PipelineCache,
 
-    // Resources — dropped when their handles are released.
+    // Resources: dropped when their handles are released.
     textures: HashMap<TextureHandle, GpuTexture>,
     render_targets: HashMap<RenderTargetHandle, GpuRenderTarget>,
 
@@ -165,7 +164,7 @@ pub struct WgpuRenderDevice {
     onscreen_stencil: Option<GpuStencil>,
     /// Whether the onscreen stencil has been cleared since the current frame's
     /// `begin_onscreen_render`. Stencil starts undefined; Noesis assumes 0, so
-    /// the first onscreen draw clears it (mirrors the GL FBO's 0-init stencil).
+    /// the first onscreen draw clears it.
     onscreen_stencil_cleared: bool,
     /// As above, for the offscreen RT bound by the latest `set_render_target`.
     /// Reset on each `set_render_target` (which the protocol says discards the
@@ -209,9 +208,9 @@ type ImageBindGroupKey = (
 
 /// A texture owned by the render device, reachable from a [`TextureHandle`].
 ///
-/// `view`, `width`, and `height` are cached here for use by the sampler bind
-/// group path in Phase 4.B.2; `texture` is what `update_texture` writes into.
-#[allow(dead_code)] // view/width/height land with sampler binding (4.B.2)
+/// `view`, `width`, and `height` are cached for the sampler bind-group path;
+/// `texture` is what `update_texture` writes into.
+#[allow(dead_code)] // some fields read only on the sampler bind-group path
 struct GpuTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -235,14 +234,14 @@ struct GpuStencil {
 /// [`RenderTargetHandle`]. The associated resolve texture lives in the
 /// parent [`WgpuRenderDevice::textures`] map under `resolve_handle`.
 ///
-/// `resolve_handle` isn't read after construction — the resolve texture is
-/// fetched directly via [`WgpuRenderDevice::texture`] — but it's kept so the
+/// `resolve_handle` isn't read after construction (the resolve texture is
+/// fetched directly via [`WgpuRenderDevice::texture`]), but it's kept so the
 /// resource stays alive for its lifetime. `stencil` (color/stencil texture +
 /// view) is read by `draw_batch` to attach the stencil for clip/mask draws.
 struct GpuRenderTarget {
     /// View rendered into by `draw_batch`. Same underlying texture as the
-    /// resolve texture at `sample_count == 1`; Phase 4.B rejects greater
-    /// counts so this always aliases the resolve.
+    /// resolve texture; `sample_count` is restricted to 1, so this always
+    /// aliases the resolve.
     color_view: wgpu::TextureView,
     #[allow(dead_code)] // kept to own the resolve texture's lifetime
     resolve_handle: TextureHandle,
@@ -257,9 +256,8 @@ impl WgpuRenderDevice {
     /// onscreen frame. Offscreen render targets are allocated on demand by
     /// [`RenderDevice::create_render_target`].
     ///
-    /// All pipelines are compiled against [`RT_COLOR_FORMAT`]
+    /// All pipelines are compiled against `RT_COLOR_FORMAT`
     /// (`Rgba8Unorm`); onscreen views handed in later must match that format.
-    /// Phase 9 generalizes the cache for direct-to-`ViewTarget` rendering.
     #[must_use]
     #[allow(clippy::too_many_lines)] // wgpu setup is linear and hard to split usefully
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
@@ -327,7 +325,7 @@ impl WgpuRenderDevice {
                         },
                         count: None,
                     },
-                    // cbuffer1_ps — only SHADOW / BLUR read it, but the shared
+                    // cbuffer1_ps: only SHADOW / BLUR read it, but the shared
                     // layout always declares it so every pipeline matches.
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
@@ -439,7 +437,7 @@ impl WgpuRenderDevice {
 
         // Dummy 1x1 white texture + default sampler for non-pattern draws.
         // The pipeline layout always has group(2) so every draw must bind
-        // something — the shader just doesn't sample it.
+        // something; the shader just doesn't sample it.
         let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("noesis_runtime dummy pattern"),
             size: wgpu::Extent3d {
@@ -667,7 +665,6 @@ impl WgpuRenderDevice {
             .map(|t| &t.view)
             .expect("image_bind_group_for: unknown image TextureHandle");
         let image_sampler = &self.samplers[&image.1];
-        // Shadow slot: real texture+sampler, or the dummy when unused.
         let (shadow_view, shadow_sampler) = match shadow {
             Some((handle, sstate)) => {
                 let view = self
@@ -704,14 +701,14 @@ impl WgpuRenderDevice {
         self.image_bind_groups.entry(key).or_insert(bg)
     }
 
-    /// Point the onscreen phase at `view`. Used by the Bevy plugin (Phase
-    /// 4.D) so each frame's UI lands in the graph-node-owned intermediate
-    /// texture (later blitted into the camera's `ViewTarget`). The view's
-    /// format must be [`RT_COLOR_FORMAT`]; `wgpu::TextureView` erases format
-    /// so the invariant is only debug-asserted at the call site.
+    /// Point the onscreen phase at `view`. Used by the Bevy plugin so each
+    /// frame's UI lands in the graph-node-owned intermediate texture (later
+    /// blitted into the camera's `ViewTarget`). The view's format must be
+    /// `RT_COLOR_FORMAT`; `wgpu::TextureView` erases format, so the invariant
+    /// is only debug-asserted at the call site.
     ///
     /// Call every frame before driving a frame, or once at setup for
-    /// fixed-target tests — either pattern is fine.
+    /// fixed-target tests; either pattern is fine.
     ///
     /// `width`/`height` are the target's pixel dimensions; the device keeps a
     /// matching `Stencil8` buffer so the Noesis onscreen render can clip with
@@ -721,7 +718,7 @@ impl WgpuRenderDevice {
     /// # Panics
     ///
     /// Panics if called while a frame phase (offscreen or onscreen) is
-    /// active — swap only between `end_*_render` and the next `begin_*_render`.
+    /// active; swap only between `end_*_render` and the next `begin_*_render`.
     pub fn set_onscreen_target(&mut self, view: wgpu::TextureView, width: u32, height: u32) {
         assert_eq!(
             self.phase,
@@ -800,7 +797,7 @@ impl WgpuRenderDevice {
         let ps_offset = self
             .ps_ring
             .write(&self.queue, batch.pixel_uniforms[0].as_bytes());
-        // cbuffer1_ps — only SHADOW / BLUR populate pixel_uniforms[1]; the ring
+        // cbuffer1_ps: only SHADOW / BLUR populate pixel_uniforms[1]; the ring
         // zero-pads, so non-shadow draws still get a valid (zeroed) slot bound.
         let ps1_offset = self
             .ps1_ring
@@ -818,28 +815,28 @@ const fn align_up_u64(n: u64, align: u64) -> u64 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// UniformRing — ring buffer + scratch used to hand each `draw_batch` its own
+// UniformRing: ring buffer + scratch used to hand each `draw_batch` its own
 // slice of a single UNIFORM buffer. The bind group binds a struct-sized window
 // at offset 0; the dynamic offset passed to `set_bind_group` slides that
 // window to the per-batch slot.
 //
 // Reset at the start of each frame (the first `begin_*_render` that opens an
 // encoder). All writes for a frame land in the same submit, so the shader
-// reads whatever the ring held at submission time — distinct per slot.
+// reads whatever the ring held at submission time, distinct per slot.
 // ────────────────────────────────────────────────────────────────────────────
 
 struct UniformRing {
     buffer: wgpu::Buffer,
     /// Bytes the shader actually reads from each slot.
     struct_size: u64,
-    /// Distance between slot starts — `struct_size` rounded up to
+    /// Distance between slot starts: `struct_size` rounded up to
     /// `min_uniform_buffer_offset_alignment`.
     slot_stride: u64,
     slot_capacity: u32,
     next_slot: u32,
     /// Zero-padded scratch sized to `struct_size`. Each `write` copies the
     /// batch-owned uniform bytes into the prefix and zero-fills the tail, then
-    /// ships the whole thing via `queue.write_buffer` — the shader reads a
+    /// ships the whole thing via `queue.write_buffer`; the shader reads a
     /// fully-initialized slot regardless of the Noesis payload length.
     scratch: Vec<u8>,
 }
@@ -920,7 +917,7 @@ const fn wgpu_format_for(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Rgba8 | TextureFormat::Rgbx8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
         // `TextureFormat` is `#[non_exhaustive]`; a format the SDK adds later
-        // defaults to RGBA8. Never panic here — this runs inside a Noesis FFI
+        // defaults to RGBA8. Never panic here: this runs inside a Noesis FFI
         // trampoline, where unwinding into C++ is UB.
         _ => wgpu::TextureFormat::Rgba8Unorm,
     }
@@ -938,8 +935,8 @@ const fn bytes_per_pixel(format: TextureFormat) -> u32 {
 /// True when `shader` reads from a texture at group(2) binding(0). Keep in
 /// sync with [`crate::render_device::shader_defines::defines_for_shader`]:
 /// every variant that sets `HAS_PAINT_TEXTURE` must appear here. The "paint
-/// texture" slot is reused across paint kinds — pattern/ramps/glyphs all
-/// land at the same group(2) binding; the Rust side picks the right
+/// texture" slot is reused across paint kinds: pattern/ramps/glyphs all
+/// land at the same group(2) binding, and the Rust side picks the right
 /// `Batch.*_handle()` based on shader.
 const fn shader_uses_paint_texture(shader: u8) -> bool {
     shader == Shader::PATH_PATTERN.0
@@ -1050,13 +1047,12 @@ const fn shader_uses_shadow_texture(shader: u8) -> bool {
 fn wgpu_wrap_mode(wrap_raw: u8) -> wgpu::AddressMode {
     // ClampToZero (1) has no wgpu equivalent on downlevel defaults (needs a
     // border color); approximate with ClampToEdge. The CLAMP_PATTERN shader
-    // variant (which would care about this) discards out-of-rect samples
-    // in-shader and lands later, so the visible delta is rare in 4.B.
+    // variant discards out-of-rect samples in-shader, so the visible delta
+    // is rare.
     //
     // MirrorU / MirrorV can't be expressed as one `AddressMode` (wgpu sets
-    // per-axis via `address_mode_u/v/w`). Phase 4.B only supports plain
-    // PAINT_PATTERN; pick MirrorRepeat for anything mirrored until the
-    // wrap variants land.
+    // per-axis via `address_mode_u/v/w`); pick MirrorRepeat for anything
+    // mirrored.
     match wrap_raw {
         0 | 1 => wgpu::AddressMode::ClampToEdge,
         2 => wgpu::AddressMode::Repeat,
@@ -1076,7 +1072,7 @@ fn build_sampler(device: &wgpu::Device, state: SamplerState) -> wgpu::Sampler {
         _ => wgpu::FilterMode::Linear,
     };
     let lod_max = match state.mip_filter_raw() {
-        0 => 0.25, // Disabled — restrict to mip 0
+        0 => 0.25, // disabled: restrict to mip 0
         _ => 32.0,
     };
 
@@ -1112,7 +1108,7 @@ impl RenderDevice for WgpuRenderDevice {
             // The SDF_LCD_SOLID subpixel shader + SrcOver_Dual blend are
             // implemented (see noesis.wgsl / pipeline.rs), but reporting
             // `subpixel_rendering = true` makes Noesis emit the SDF_LCD_*
-            // matrix on every device — which requires the wgpu
+            // matrix on every device, which requires the wgpu
             // `DUAL_SOURCE_BLENDING` feature (not in downlevel defaults) and a
             // glyph-orientation-aware coverage that we can't validate against
             // the SDK (it ships no LCD reference). Kept off until the render
@@ -1343,9 +1339,9 @@ impl RenderDevice for WgpuRenderDevice {
 
     fn clone_render_target(&mut self, label: &str, src: RenderTargetHandle) -> RenderTargetBinding {
         // "Clone" here means "give me another RT that reuses the transient
-        // buffers of src" — a Noesis optimization for ping-pong post-process
-        // chains. For Phase 4.B we just allocate a fresh RT at the same
-        // dimensions; the sharing optimization lands later.
+        // buffers of src", a Noesis optimization for ping-pong post-process
+        // chains. We allocate a fresh RT at the same dimensions; the buffer
+        // sharing optimization is not implemented.
         let (width, height, needs_stencil) = {
             let src_rt = self
                 .render_targets
@@ -1470,8 +1466,7 @@ impl RenderDevice for WgpuRenderDevice {
 
     fn resolve_render_target(&mut self, _handle: RenderTargetHandle, _tiles: &[Tile]) {
         // sample_count == 1 → color attachment IS the resolve texture, so
-        // there's nothing to copy. MSAA resolve lands with sample_count > 1
-        // support in a later phase.
+        // there's nothing to copy.
     }
 
     fn map_vertices(&mut self, bytes: u32) -> &mut [u8] {
@@ -1512,7 +1507,7 @@ impl RenderDevice for WgpuRenderDevice {
     fn draw_batch(&mut self, batch: &Batch) {
         // Resolve whether the active target carries a stencil attachment, and
         // whether this is the first draw into it this frame (so we clear the
-        // stencil to 0 once — Noesis assumes a 0-initialized stencil and then
+        // stencil to 0 once; Noesis assumes a 0-initialized stencil and then
         // manages it via Clear/Incr/Decr ops). Done before the pipeline key so
         // `has_stencil` can drive the pipeline's depth_stencil declaration.
         let (has_stencil, clear_stencil) = match self.phase {

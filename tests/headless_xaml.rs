@@ -1,14 +1,8 @@
-//! Phase 4.C end-to-end test: register a `WgpuRenderDevice`, install an
-//! in-memory `XamlProvider`, load a trivial `<Grid Background="Red"/>`
-//! scene, drive the View + Renderer for one frame, read back the onscreen
-//! target, and assert it's solidly red.
+//! End-to-end test: register a `WgpuRenderDevice`, load a `<Grid Background="Red"/>`,
+//! drive one frame, and assert every sampled pixel is solid red.
+//! Verifies that the `XamlProvider` / `IView` / `IRenderer` FFI surface is correctly wired.
 //!
-//! This is the first test where Noesis itself drives our render device —
-//! the earlier Phase 4.A / 4.B tests bypassed Noesis and constructed
-//! batches by hand. If this passes, the FFI surface on the
-//! `XamlProvider` / `IView` / `IRenderer` side is correctly wired.
-//!
-//! Run with `NOESIS_SDK_DIR` set (same as the other integration tests).
+//! Requires `NOESIS_SDK_DIR` to be set.
 
 use std::collections::HashMap;
 
@@ -16,13 +10,11 @@ use noesis_runtime::view::{FrameworkElement, RenderFlag, View};
 use noesis_runtime::xaml_provider::XamlProvider;
 
 const RT_SIZE: u32 = 128;
-const BYTES_PER_ROW: u32 = 512; // 128 * 4 = 512, already COPY_BYTES_PER_ROW_ALIGNMENT-aligned
+const BYTES_PER_ROW: u32 = 512; // 128 * 4, wgpu COPY_BYTES_PER_ROW_ALIGNMENT-aligned
 
 const RED: [u8; 4] = [255, 0, 0, 255];
 
-/// In-memory provider serving a single trivial XAML. The bytes are owned by
-/// `self`, so the returned slice stays valid as long as `Self` does — which
-/// satisfies the "must outlive parsing" contract on `load_xaml`.
+// Owned bytes keep the returned slice valid per the "must outlive parsing" contract on load_xaml.
 struct InMemoryXamlProvider {
     bytes: HashMap<String, Vec<u8>>,
 }
@@ -55,7 +47,6 @@ fn noesis_drives_wgpu_render_device_to_solid_red() {
 
 #[allow(clippy::too_many_lines)]
 async fn run_test() {
-    // ── wgpu init ──────────────────────────────────────────────────────────
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -76,7 +67,6 @@ async fn run_test() {
         })
         .await
         .expect("no wgpu device");
-    // ── Onscreen target the Noesis renderer will write to ─────────────────
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless_xaml target"),
         size: wgpu::Extent3d {
@@ -97,7 +87,6 @@ async fn run_test() {
         noesis_bevy::render_device::WgpuRenderDevice::new(device.clone(), queue.clone());
     render_device.set_onscreen_target(target_view, RT_SIZE, RT_SIZE);
 
-    // ── Register render device + XAML provider with Noesis ────────────────
     let registered_device = noesis_runtime::render_device::register(render_device);
 
     let provider = InMemoryXamlProvider {
@@ -109,12 +98,11 @@ async fn run_test() {
     };
     let _registered_provider = noesis_runtime::xaml_provider::set_xaml_provider(provider);
 
-    // ── Load XAML + build View ────────────────────────────────────────────
     let element = FrameworkElement::load("test.xaml").expect("XAML load failed");
     let mut view = View::create(element);
     view.set_size(RT_SIZE, RT_SIZE);
     view.set_flags(RenderFlag::Ppaa as u32);
-    // Don't call SetProjectionMatrix — Noesis derives the right matrix from
+    // Don't call SetProjectionMatrix: Noesis derives the right matrix from
     // DeviceCaps (clip_space_y_inverted, depth_range_zero_to_one). Supplying
     // an OpenGL-style ortho here makes Noesis's render-tree visibility pass
     // cull child elements; see tests/headless_xaml_nested.rs.
@@ -124,7 +112,6 @@ async fn run_test() {
         renderer.init(&registered_device);
     }
 
-    // ── Drive one frame ───────────────────────────────────────────────────
     let updated = view.update(0.0);
     assert!(updated, "first View::Update should report changes");
 
@@ -136,13 +123,9 @@ async fn run_test() {
         renderer.shutdown();
     }
 
-    // WgpuRenderDevice auto-submits at end_*_render; by this point Noesis
-    // has issued begin_onscreen_render → draw_batch(es) → end_onscreen_render
-    // which in turn called queue.submit.
-
+    // WgpuRenderDevice auto-submits in end_onscreen_render; no explicit queue.submit needed.
     drop(view);
 
-    // ── Readback the target ───────────────────────────────────────────────
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(RT_SIZE),
@@ -199,7 +182,6 @@ async fn run_test() {
         ]
     };
 
-    // A solidly-red Grid should fill every pixel; sample a handful.
     for (x, y) in [
         (0, 0),
         (RT_SIZE / 2, RT_SIZE / 2),

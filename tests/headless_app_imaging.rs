@@ -1,34 +1,20 @@
-//! Bevy-app-level integration test for the per-element **imaging** bridge
-//! ([`NoesisImaging`]), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on).
+//! Integration test for the [`NoesisImaging`] bridge, headless with pipelined rendering.
 //!
-//! # Observable
+//! A `13x7` RGBA8 bitmap staged via [`NoesisImaging`] must drive `Pic.ActualWidth = 13`
+//! and `Pic.ActualHeight = 7`. Noesis sizes `<Image Stretch="None"/>` from the source
+//! pixel dimensions returned by `GetTextureInfo` during layout, so no GPU pass is needed.
 //!
-//! The bridge stages a Rust-provided RGBA8 bitmap into the [`ImageRegistry`]
-//! under a `uri`, and a `<Image x:Name=… Source=uri Stretch="None"/>` resolves
-//! it through the live `Noesis::TextureProvider`. We observe the effect through
-//! the element's resolved layout size, surfaced two independent ways:
+//! Two channels observe the same effect for independent corroboration: [`NoesisImageChanged`]
+//! readback (`actual_size`) and a [`NoesisDp`] watch on `ActualWidth`.
 //!
-//!   * the bridge's own [`NoesisImageChanged`] read-back
-//!     (`readback.actual_size`), and
-//!   * an independent [`NoesisDp`] watch on the element's `ActualWidth`.
+//! A second Image with an unregistered URI (negative control) must stay at `0`, proving the
+//! size came from the staged bytes, not the container or a Stretch default.
 //!
-//! Noesis sizes an `Image` from its source's pixel dimensions, which it obtains
-//! from our provider's `GetTextureInfo` during layout — **no GPU render pass
-//! required**. So a `13x7` staged bitmap drives `ActualWidth = 13`,
-//! `ActualHeight = 7`. The built-in negative control is a second `<Image>` whose
-//! `Source` URI is never registered: it stays `0`. A no-op apply, a wrong `uri`,
-//! or a wrong size all read back differently from `[13, 7]`, so the assertion is
-//! bluff-resistant.
+//! Staging happens at spawn time because Noesis resolves a `BitmapImage` source once at
+//! scene build and does not retry. The bridge stages before the registry→provider sync so a
+//! same-frame spawn lands in time.
 //!
-//! The component is populated at spawn time (alongside `NoesisView`): Noesis
-//! resolves a `BitmapImage` source once at scene build and does not retry, so the
-//! bytes must be staged before the scene exists. The bridge's staging system
-//! runs before the registry→provider sync to make a same-frame spawn land in
-//! time.
-//!
-//! Font-free XAML (only sizes are asserted, no glyph rendering), so the scene
-//! builds with no font gate.
+//! Font-free XAML: only sizes are asserted, no font gate needed.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,10 +33,8 @@ const BMP_W: u32 = 13;
 const BMP_H: u32 = 7;
 const BMP_URI: &str = "dm-bitmap://logo";
 
-// A 64x64 Grid with two Stretch="None", top-left-aligned Images. "Pic" is
-// driven by the bridge; "Empty" references an unregistered URI (negative
-// control). With Stretch="None" each Image measures to its source's pixel size,
-// so ActualWidth/Height reflect the registered bitmap (or 0 when unresolvable).
+// Stretch="None" sizes each Image to its source's pixel dimensions.
+// "Pic" is driven by the bridge; "Empty" uses an unregistered URI (negative control).
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="64" Height="64">
@@ -102,9 +86,8 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
                         size: UVec2::new(64, 64),
                         ..default()
                     },
-                    // Populated at spawn: Noesis resolves the BitmapImage source
-                    // once at scene build, so the bytes must be staged before
-                    // then. The bridge stages ahead of the provider sync.
+                    // At spawn: Noesis resolves BitmapImage source once at scene build, no retry.
+                    // Bridge stages before provider sync so this lands in time.
                     NoesisImaging::new().set(
                         "Pic",
                         BMP_URI,
@@ -168,21 +151,17 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
 
-    // Latest bridge read-back for a watched name on our view.
     let latest_img = |name: &str| -> Option<ImageReadback> {
         img.iter()
             .rfind(|(e, n, _)| *e == view && n == name)
             .map(|(_, _, rb)| *rb)
     };
-    // Latest DP value for a watched (name, property) on our view.
     let latest_dp = |name: &str, prop: &str| -> Option<DpValue> {
         dp.iter()
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // Primary observable: the bridge's own read-back reports the staged bitmap's
-    // exact pixel size on the driven element.
     let pic = latest_img("Pic").expect("expected a NoesisImageChanged for Pic");
     assert!(
         pic.has_source,
@@ -203,9 +182,8 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
         "imaging: Pic.ActualWidth should resolve to the staged bitmap width {BMP_W}",
     );
 
-    // Negative control: an Image whose Source URI is never registered stays 0.
-    // Proves the size came from *our staged bytes*, not the container / a
-    // stretch, and that the bridge touched only its target.
+    // Negative control: unregistered URI stays 0, proving size came from staged bytes
+    // and the bridge only touched its target.
     assert_eq!(
         latest_dp("Empty", "ActualWidth"),
         Some(DpValue::F32(0.0)),

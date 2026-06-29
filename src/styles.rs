@@ -1,9 +1,9 @@
-//! Per-view code-built `Style` bridge — restyle named XAML elements with a
+//! Per-view code-built `Style` bridge: restyle named XAML elements with a
 //! `Noesis::Style` constructed in Rust, no XAML authoring required. The style
 //! counterpart of the [`crate::dp`] / [`crate::brushes`] write bridges.
 //!
 //! Add a [`NoesisStyles`] component to the view's camera entity. Its `styles`
-//! map is the desired [`StyleSpec`] per `x:Name` — built into a fresh
+//! map is the desired [`StyleSpec`] per `x:Name`, built into a fresh
 //! `Noesis::Style` and assigned to that element via
 //! [`FrameworkElement::set_style`](noesis_runtime::view::FrameworkElement::set_style)
 //! whenever the component changes (Bevy change detection). A [`StyleSpec`]
@@ -28,7 +28,7 @@
 //! it pushes the built style into the live view and emits no read-back of its
 //! own. A `Noesis::Style` is *sealed* the first time it is applied, so the
 //! bridge builds a brand-new style on every change rather than mutating a
-//! retained one — re-inserting a changed [`NoesisStyles`] re-styles the element.
+//! retained one. Re-inserting a changed [`NoesisStyles`] re-styles the element.
 //! Observe a setter's effect through a [`NoesisDp`](crate::dp::NoesisDp) watch on
 //! the property the setter drives (the element's default value is the negative
 //! control).
@@ -103,7 +103,7 @@ impl PropertyTrigger {
 /// The binding resolves against the element's `DataContext` by default. Call
 /// [`relative_source_self`](Self::relative_source_self) to instead bind a
 /// property on the styled element itself (`{Binding Path=…,
-/// RelativeSource={RelativeSource Self}}`) — useful for code-only scenes with no
+/// RelativeSource={RelativeSource Self}}`). Useful for code-only scenes with no
 /// view model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataTriggerSpec {
@@ -266,10 +266,6 @@ impl StyleSpec {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Per-view code-built style bridge. Attach to a [`NoesisView`](crate::NoesisView)
 /// entity.
 #[derive(Component, Clone, Default, Debug)]
@@ -282,6 +278,8 @@ pub struct NoesisStyles {
 }
 
 impl NoesisStyles {
+    /// Start with an empty style map. Chain [`apply`](Self::apply) to style
+    /// elements by name.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -295,12 +293,8 @@ impl NoesisStyles {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Reconcile every view's [`NoesisStyles`]: build and apply the desired styles
-/// when the component changed. Write-only — styles are re-applied once per
+/// when the component changed. Write-only: styles are re-applied once per
 /// change.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_styles_bridge(
@@ -316,10 +310,6 @@ pub(crate) fn sync_styles_bridge(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Wires the per-view code-built style bridge. Added transitively by
 /// [`crate::NoesisPlugin`].

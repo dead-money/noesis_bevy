@@ -1,35 +1,17 @@
-//! Bevy-app-level integration test for the **code-built brush** bridge
-//! ([`NoesisBrushes`]), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on).
+//! Integration test for the brush bridge ([`NoesisBrushes`]) through the real
+//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
-//! # Observable
+//! Brush assignment changes no scalar DP on the painted element, so there is no
+//! `NoesisDp` watch to use (the approach the visibility and focus tests take).
+//! The bridge reads the assigned brush back from the element's live DP and emits
+//! [`NoesisBrushChanged`]. A null DP (failed assign, wrong-entity routing, or
+//! inverted change-detection) emits nothing, so those failures stay silent and
+//! fail the assert.
 //!
-//! A brush assignment changes no scalar dependency property on the element it
-//! paints, so there's no derived `NoesisDp` watch to lean on (the trick the
-//! visibility/layout/focus tests use). Instead the bridge itself reads the
-//! assigned brush back: after applying, it polls each painted target's live
-//! brush DP and emits a [`NoesisBrushChanged`] carrying a [`BrushReadback`]:
-//!
-//!   * [`BrushReadback::Solid`] — read off the live `SolidColorBrush` via a
-//!     `DynamicCast` round-trip through the element's `Background`/`Fill`/...
-//!     DP. The color comes *from the element*, not the Rust-side spec, so it
-//!     proves the brush actually landed; the exact value differs from any
-//!     default.
-//!   * [`BrushReadback::NonSolid`] — a live brush is present but is not a
-//!     `SolidColorBrush` (our gradient). Proves the gradient build + assign
-//!     landed even though the runtime exposes no safe per-DP gradient-stop
-//!     read-back to the `unsafe_code = forbid` crate.
-//!   * An **unpainted** / failed-assign target has a null DP, so the read-back
-//!     is *nothing* and no message is emitted — a missing apply / wrong-entity
-//!     routing / inverted change-detection stays silent and fails the assert.
-//!
-//! This test paints all four [`BrushTarget`]s end-to-end (Background, Foreground,
-//! Fill, Stroke), uses distinct-per-channel colors so a swapped/zeroed channel
-//! is caught, and paints two elements (and two targets on one element) with
-//! *different* colors to catch per-key cross-contamination.
-//!
-//! Font-free XAML (only brush state is asserted, no glyph rendering), so the
-//! scene builds with no font gate.
+//! Colors are distinct per-channel to catch swapped or zeroed channels and
+//! cross-key contamination across elements. Gradient landing is confirmed as
+//! [`BrushReadback::NonSolid`]: the runtime exposes no per-DP gradient-stop
+//! read-back to `unsafe_code = forbid` code.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -127,7 +109,6 @@ fn brushes_bridge_paints_and_reads_back() {
             if *frame == SET_AT_FRAME {
                 for mut brushes in &mut q {
                     *brushes = NoesisBrushes::new()
-                        // All four targets, end-to-end, distinct colors.
                         .solid("Panel", BrushTarget::Background, PANEL_BG)
                         .solid("Panel2", BrushTarget::Background, PANEL2_BG)
                         .solid("Label", BrushTarget::Foreground, LABEL_FG)
@@ -172,15 +153,12 @@ fn brushes_bridge_paints_and_reads_back() {
         eprintln!("  {e:?} {name}.{} = {readback:?}", target.property());
     }
 
-    // Latest readback for a given (name, target) on this view, if any was emitted.
     let last = |name: &str, target: BrushTarget| -> Option<BrushReadback> {
         got.iter()
             .rfind(|(e, n, t, _)| *e == view && n == name && *t == target)
             .map(|(_, _, _, r)| *r)
     };
 
-    // Every solid target reads back its OWN exact color. Distinct per-channel
-    // values mean a swapped/zeroed channel or cross-key contamination fails here.
     assert_eq!(
         last("Panel", BrushTarget::Background),
         Some(BrushReadback::Solid(PANEL_BG)),
@@ -211,9 +189,6 @@ fn brushes_bridge_paints_and_reads_back() {
          (Stroke target proven; catches Fill/Stroke contamination on one element)",
     );
 
-    // The gradient Fill landed: a live brush is present but it is not a
-    // SolidColorBrush, so it reports NonSolid (a no-op gradient would leave the
-    // DP null and emit nothing — this fails if the build/assign silently dropped).
     assert_eq!(
         last("Grad", BrushTarget::Fill),
         Some(BrushReadback::NonSolid),
@@ -222,8 +197,7 @@ fn brushes_bridge_paints_and_reads_back() {
          per-DP gradient-stop read-back to this unsafe-free crate)",
     );
 
-    // Negative control: an un-targeted Border must never surface a message — a
-    // "paint everything" regression would light up Other.
+    // Negative control: an un-targeted Border must not emit a message; a "paint everything" regression would light up Other.
     assert!(
         !got.iter().any(|(_, n, _, _)| n == "Other"),
         "an un-targeted element must not emit a brush read-back",

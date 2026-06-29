@@ -1,7 +1,7 @@
 //! Opt-in loader for Noesis's shipped control theme.
 //!
 //! Without a `ControlTemplate`, Noesis paints controls magenta ("no style").
-//! The Native SDK ships a full theme — control templates, brushes, fonts — under
+//! The Native SDK ships a full theme (control templates, brushes, fonts) under
 //! `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`, in color variants
 //! (`DarkBlue`, `DarkEmerald`, `LightOrange`, …). This plugin stages one variant
 //! into the XAML + font registries and installs it as the scene's application
@@ -19,7 +19,7 @@
 //! ```
 //!
 //! Add it **after** [`crate::NoesisPlugin`] (it uses the registries that plugin
-//! installs) and insert your [`NoesisScene`] as usual — the theme patches it in.
+//! installs) and insert your `NoesisScene` as usual; the theme patches it in.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -96,8 +96,8 @@ fn stage_theme(theme: &str) -> StagedTheme {
         return staged;
     }
 
-    // All *.xaml under their bare filename — the theme's nested
-    // `<ResourceDictionary Source="..."/>` references use the same bare form.
+    // Bare filename: the theme's nested `<ResourceDictionary Source="..."/>`
+    // references resolve against the same form.
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "xaml")
@@ -185,7 +185,6 @@ fn apply_theme_to_scene(
         *applied = true;
         return;
     }
-    // Wait for the consumer to spawn at least one view.
     if views.is_empty() {
         return;
     }

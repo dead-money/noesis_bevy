@@ -1,12 +1,12 @@
-//! Bevy plugin for Noesis GUI.
+//! Bevy plugin for the Noesis GUI SDK.
 //!
-//! Drives `libNoesis.so` (via the [`noesis_runtime`] FFI crate) and — in later
-//! phases — implements `Noesis::RenderDevice` on top of Bevy's wgpu device.
-//! UIs render into an offscreen wgpu texture and composite into the Bevy frame.
+//! Drives `libNoesis.so` through the [`noesis_runtime`] FFI crate and implements
+//! `Noesis::RenderDevice` on top of Bevy's wgpu device. UIs render into an
+//! offscreen wgpu texture and composite into the Bevy frame.
 //!
-//! See `CLAUDE.md` for the phase plan. Currently at Phase 0: lifecycle only —
-//! the plugin initializes Noesis at app startup and shuts it down at exit, but
-//! does not yet render anything.
+//! Add [`NoesisPlugin`] to initialize the runtime, then host XAML through a
+//! [`NoesisView`] camera.
+#![warn(missing_docs)]
 
 use bevy::prelude::*;
 
@@ -99,7 +99,7 @@ pub use items::{
 };
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
-/// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
+/// Derive macro for [`NoesisViewModel`]: binds a plain struct's fields by name.
 pub use noesis_bevy_derive::NoesisViewModel;
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
@@ -140,7 +140,9 @@ pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, Xa
 /// Per-developer Indie license credentials.
 #[derive(Clone, Debug)]
 pub struct NoesisLicense {
+    /// Licensee name, as issued with the Indie license.
     pub name: String,
+    /// License key paired with [`name`](Self::name).
     pub key: String,
 }
 
@@ -162,6 +164,9 @@ impl NoesisLicense {
 /// is `None`. Without a license, Noesis runs in trial mode (visible watermark).
 #[derive(Default)]
 pub struct NoesisPlugin {
+    /// License to activate. Leave `None` to fall back to
+    /// [`NoesisLicense::from_env`], or to run in trial mode if the environment
+    /// has no credentials either.
     pub license: Option<NoesisLicense>,
 }
 
@@ -174,20 +179,13 @@ impl Plugin for NoesisPlugin {
 
         info!("Noesis runtime version {}", noesis_runtime::version());
 
-        // Global `shutdown()` is owned by `NoesisRenderState::drop` — it releases
-        // every live Noesis handle and then shuts the engine down, as its final
-        // step, on the main thread. A separate guard can't guarantee it runs
-        // *after* the state (Bevy gives no drop order between two main-world
-        // resources), which is why the old `NoesisShutdownGuard` was removed.
+        // Global `shutdown()` is owned by `NoesisRenderState::drop`: it releases every
+        // live Noesis handle then shuts the engine down, last, on the main thread.
+        // A separate guard can't guarantee it runs after the state (Bevy gives no
+        // drop order between two main-world resources).
 
-        // Sub-plugins: XAML + font assets + the render-graph integration
-        // + input forwarder. Safe to add unconditionally —
-        // NoesisRenderPlugin no-ops if RenderApp isn't present (e.g. a
-        // headless-test setup without a display).
-        // Grouped into tuples kept under Bevy's 15-element `Plugins` impl limit:
-        // asset/render/input infrastructure, then the per-feature Bevy bridges
-        // split into two groups so new bridges have headroom (each new bridge
-        // appends to `bridge_group_b`).
+        // NoesisRenderPlugin no-ops if RenderApp isn't present (headless tests).
+        // Tuples are split to stay under Bevy's 15-element `Plugins` impl limit.
         app.add_plugins((
             xaml::XamlAssetPlugin,
             font::FontAssetPlugin,
@@ -196,7 +194,7 @@ impl Plugin for NoesisPlugin {
             input::NoesisInputPlugin,
             integration::NoesisIntegrationPlugin,
         ));
-        // Bridge group A — the foundational per-element bridges.
+        // Group A: foundational per-element bridges.
         app.add_plugins((
             events::NoesisEventsPlugin,
             routed_events::NoesisRoutedEventsPlugin,
@@ -208,7 +206,7 @@ impl Plugin for NoesisPlugin {
             inlines::NoesisInlinesPlugin,
             geometry::NoesisGeometryPlugin,
         ));
-        // Bridge group B — interaction + data bridges. New bridges append here.
+        // Group B: interaction + data bridges. New bridges append here.
         app.add_plugins((
             focus::NoesisFocusPlugin,
             visual_state::NoesisVisualStatePlugin,
@@ -229,7 +227,7 @@ impl Plugin for NoesisPlugin {
             svg::NoesisSvgPlugin,
             diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
-        // Bridge group C — appended past group B's 15-element `Plugins` limit.
+        // Group C: past group B's 15-element `Plugins` limit.
         app.add_plugins((
             styles::NoesisStylesPlugin,
             shapes::NoesisShapesPlugin,

@@ -1,4 +1,4 @@
-//! Font-asset plumbing for the Bevy plugin (Phase 4.F.2).
+//! Font-asset plumbing for the Bevy plugin.
 //!
 //! Parallels [`crate::xaml`] for font files:
 //!
@@ -6,7 +6,7 @@
 //!   files into Bevy's asset system.
 //! - [`FontRegistry`] indexes loaded fonts by `(folder_uri, filename)`.
 //!   Noesis's `FontFamily="Fonts/#Bitter"` attribute decomposes into a
-//!   folder URI (`"Fonts/"`) and a family name (`"Bitter"`) — the folder
+//!   folder URI (`"Fonts/"`) and a family name (`"Bitter"`). The folder
 //!   URI is what our scan-folder callback sees, and we need to report
 //!   every filename we've loaded for that folder.
 //! - `ExtractResource` mirrors the registry into the render world each
@@ -47,11 +47,12 @@ use noesis_runtime::font_provider::FontProvider;
 /// `FreeType`; we never inspect the bytes on the Rust side.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct FontAsset {
+    /// The whole font file, shared so cloning into the render world stays cheap.
     pub bytes: Arc<Vec<u8>>,
 }
 
 /// Loads `.ttf` / `.otf` / `.ttc` font files into [`FontAsset`]. Reads the
-/// whole file into memory — typical UI fonts are under a megabyte.
+/// whole file into memory; typical UI fonts are under a megabyte.
 #[derive(Default, TypePath)]
 pub struct FontAssetLoader;
 
@@ -79,7 +80,7 @@ impl AssetLoader for FontAssetLoader {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FontRegistry — folder → filename → bytes
+// FontRegistry: folder → filename → bytes
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Flat (`folder_uri`, `filename`) → bytes map, populated by
@@ -121,7 +122,7 @@ impl FontRegistry {
             .map(|(folder, filename)| (folder.as_str(), filename.as_str()))
     }
 
-    /// Register font bytes under a `(folder, filename)` key — bypasses the
+    /// Register font bytes under a `(folder, filename)` key, bypassing the
     /// `AssetServer` flow. Callers are responsible for the folder /
     /// filename matching whatever `FontFamily="Folder/#Family"` the XAML
     /// references.
@@ -138,7 +139,7 @@ impl FontRegistry {
 
 /// Split an asset path like `"Fonts/Bitter-Regular.ttf"` into
 /// `("Fonts", "Bitter-Regular.ttf")`. The folder is returned *without*
-/// a trailing slash — that's the format Noesis's `CachedFontProvider`
+/// a trailing slash: that's the format Noesis's `CachedFontProvider`
 /// hands to `ScanFolder` (it strips the slash when resolving URIs like
 /// `FontFamily="Fonts/#Bitter"`). Paths with no folder return
 /// `("", filename)`.
@@ -156,9 +157,9 @@ fn split_folder_filename(asset_path: &str) -> (String, String) {
 /// arrives here as `"ui/Fonts"`, while the registry is keyed by the bare
 /// `"Fonts"` the fallback chain registers under. Matching on the final segment
 /// lets a rooted family reference resolve regardless of where the document
-/// lives — without it, every explicit `FontFamily` silently misses and falls
-/// through to the fallback chain (the long-standing "explicit fonts don't
-/// work, only fallbacks do" gotcha).
+/// lives. Without it, every explicit `FontFamily` silently misses and falls
+/// through to the fallback chain (the "explicit fonts don't work, only
+/// fallbacks do" gotcha).
 fn folder_basename(uri: &str) -> &str {
     uri.trim_end_matches('/').rsplit('/').next().unwrap_or(uri)
 }
@@ -199,7 +200,7 @@ pub fn update_font_registry(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BevyFontProvider — the render-world FontProvider impl
+// BevyFontProvider: the render-world FontProvider impl
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Shared `(folder, filename)` → bytes map. Render-world-only; the
@@ -210,6 +211,12 @@ pub fn update_font_registry(
 /// [`NoesisRenderState`]: crate::render::NoesisRenderState
 type FontMapEntries = HashMap<(String, String), Arc<Vec<u8>>>;
 
+/// Shared, mutable `(folder, filename)` → bytes map behind an `Arc<Mutex<…>>`.
+///
+/// Lives in the render world. The [`BevyFontProvider`] reads it to answer
+/// Noesis's font scans, and a sync system refreshes it from the extracted
+/// [`FontRegistry`] each frame via [`SharedFontMap::sync_from`]. Cloning the
+/// handle shares the same underlying map.
 #[derive(Clone, Default)]
 pub struct SharedFontMap(pub(crate) Arc<Mutex<FontMapEntries>>);
 
@@ -219,7 +226,7 @@ impl SharedFontMap {
     /// # Panics
     ///
     /// Panics on mutex poisoning, which can only happen if another holder
-    /// panicked mid-modification — a bug, not a runtime condition.
+    /// panicked mid-modification: a bug, not a runtime condition.
     pub fn sync_from(&self, registry: &FontRegistry) {
         let mut guard = self.0.lock().expect("SharedFontMap mutex poisoned");
         guard.clone_from(&registry.entries);
@@ -228,14 +235,15 @@ impl SharedFontMap {
 
 /// Implements [`FontProvider`] against a [`SharedFontMap`].
 ///
-/// `open_font` returns a borrow into `self.current`, rotated on each call
-/// — same pattern as [`crate::xaml::BevyXamlProvider`].
+/// `open_font` returns a borrow into `self.current`, rotated on each call,
+/// the same pattern as [`crate::xaml::BevyXamlProvider`].
 pub struct BevyFontProvider {
     shared: SharedFontMap,
     current: Option<Arc<Vec<u8>>>,
 }
 
 impl BevyFontProvider {
+    /// Build a provider that resolves fonts through the given [`SharedFontMap`].
     #[must_use]
     pub fn from_shared(map: SharedFontMap) -> Self {
         Self {

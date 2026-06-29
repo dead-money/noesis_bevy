@@ -1,21 +1,11 @@
-//! Phase 4.E offscreen-RT diagnostic. Wraps `WgpuRenderDevice` with a
-//! `RecordingDevice` and drives a handful of tile-brush / clipping
-//! scenes, logging the full op sequence Noesis emits.
+//! Wraps `WgpuRenderDevice` with a `RecordingDevice` and drives tile-brush
+//! and clipping scenes, logging the full op sequence Noesis emits.
 //!
-//! Findings so far:
+//! `DrawingBrush` is not implemented by Noesis (no `DrawingBrush.h`); XAML
+//! that uses it silently skips the fill. The drawingbrush scenario is a
+//! negative reference confirming this, not a device bug.
 //!
-//! - **`DrawingBrush` is not implemented by Noesis.** The SDK has no
-//!   `DrawingBrush.h`; only `SolidColorBrush`, `ImageBrush`,
-//!   `VisualBrush`, `LinearGradientBrush`, `RadialGradientBrush`.
-//!   XAML that uses `<DrawingBrush>` (including `09_tiled_pattern.xaml`
-//!   and the tiled pieces of `Data/Styles/Windows.xaml`) silently skips
-//!   the fill. Not an offscreen-RT bug in our device — a missing
-//!   Noesis feature, nothing to chase here.
-//!
-//! The remaining offscreen observations (e.g. `03_scroll.xaml` content
-//! viewport blank under a theme) are different bugs — still open.
-//!
-//! Runs via `cargo test -- --nocapture` to print the trace to stderr.
+//! Run with `cargo test -- --nocapture` to print the trace to stderr.
 
 #![allow(clippy::too_many_lines)]
 
@@ -333,9 +323,6 @@ fn drawingbrush_tile_offscreen_trace() {
     }
     noesis_runtime::init();
 
-    // (scenario_name, xaml, ticks). Baselines first, then zoom in on
-    // ScrollViewer — the only real offscreen case we still need to
-    // explain (blank content viewport with theme loaded).
     let scenarios: &[(&str, &[u8], u32)] = &[
         // Baseline: solid fill confirms layout + basic path works.
         (
@@ -347,8 +334,7 @@ fn drawingbrush_tile_offscreen_trace() {
             </Grid>"##,
             1,
         ),
-        // DrawingBrush — confirmed no-op because Noesis has no
-        // `DrawingBrush.h`. Kept as the negative reference.
+        // Noesis has no DrawingBrush.h; XAML silently skips the fill. Negative reference.
         (
             "drawingbrush-unsupported",
             br##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -370,8 +356,7 @@ fn drawingbrush_tile_offscreen_trace() {
             </Grid>"##,
             1,
         ),
-        // VisualBrush — existence confirmed in `NsGui/VisualBrush.h`.
-        // Should round-trip into an offscreen RT + pattern draw.
+        // VisualBrush should round-trip into an offscreen RT and pattern draw.
         (
             "visualbrush-rectangle",
             br##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -391,11 +376,7 @@ fn drawingbrush_tile_offscreen_trace() {
             </Grid>"##,
             1,
         ),
-        // ScrollViewer — the real remaining mystery. No custom Style:
-        // if a theme isn't loaded the ScrollViewer template resolves
-        // to nothing and we probably see no clip-induced offscreen at
-        // all; if one IS loaded (see `-with-theme` scenario below)
-        // we'd expect offscreen draws for the content clip.
+        // No theme: ScrollViewer template resolves to nothing, so no clip-induced offscreen expected.
         (
             "scrollviewer-no-theme",
             br##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

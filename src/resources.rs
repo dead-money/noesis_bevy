@@ -1,4 +1,4 @@
-//! App-level application-resources bridge — register Rust-built resources
+//! App-level application-resources bridge. Registers Rust-built resources
 //! (code-built brushes, scalar values) and merged `<ResourceDictionary>` XAML
 //! into the process-global application resources, so XAML
 //! `{StaticResource Key}` references resolve them without authoring a theme
@@ -12,7 +12,7 @@
 //! injection point that a freshly-loaded scene's `{StaticResource}` can see is
 //! the application resources. So this bridge is an **app-level Bevy
 //! [`Resource`]**, not a per-entity component, and its reconcile system runs in
-//! [`NoesisSet::Sync`] — *before* `Ensure` — so the resources are installed
+//! [`NoesisSet::Sync`] (before `Ensure`) so the resources are installed
 //! before any view parses.
 //!
 //! ```ignore
@@ -35,12 +35,12 @@
 //!
 //! After installing, it confirms which declared keys are resolvable through the
 //! live application resources (`GUI::GetApplicationResources` ➜ `contains`) and
-//! emits a [`NoesisResourcesInstalled`] message listing them — the "look up"
+//! emits a [`NoesisResourcesInstalled`] message listing them: the "look up"
 //! half of register/look-up.
 //!
-//! # Relationship to [`NoesisView::application_resources`]
+//! # Relationship to `NoesisView::application_resources`
 //!
-//! [`NoesisView::application_resources`](crate::NoesisView::application_resources)
+//! `NoesisView::application_resources`
 //! installs a chain of on-disk `ResourceDictionary` *URIs* during `Ensure`. That
 //! also calls `SetApplicationResources`, so the two paths are mutually exclusive:
 //! whichever installs last wins, and `Ensure` runs after `Sync`. Use one or the
@@ -55,10 +55,6 @@ use bevy::prelude::*;
 use crate::brushes::BrushSpec;
 use crate::dp::DpValue;
 use crate::render::{NoesisRenderState, NoesisSet};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Spec
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// One application-resource entry, declarative side. Resolved into a live
 /// `Noesis::BaseComponent` only at install time (on the Noesis thread), so the
@@ -75,16 +71,12 @@ pub enum ResourceEntry {
     /// A boxed scalar value (string / number / bool). Resolves a
     /// `{StaticResource Key}` used where a plain value is expected (e.g. a
     /// `Single` `Width`, a `String` `Text`). The boxed variant must match the
-    /// target property's runtime type exactly — a `Double` won't satisfy a
-    /// `Single` `Width` — exactly as for
-    /// [`DpValue`](crate::dp::DpValue) writes (see the `dp` module docs on `f32`
+    /// target property's runtime type exactly (a `Double` won't satisfy a
+    /// `Single` `Width`), exactly as for
+    /// [`DpValue`] writes (see the `dp` module docs on `f32`
     /// vs `f64`).
     Value(DpValue),
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Resource
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// App-level application-resources bridge. Insert as a Bevy [`Resource`] (not a
 /// per-entity component): the resources it installs are process-global and must
@@ -102,6 +94,9 @@ pub struct NoesisResources {
 }
 
 impl NoesisResources {
+    /// Starts an empty resource set. Chain the builders
+    /// ([`solid`](Self::solid), [`value`](Self::value), [`merged`](Self::merged),
+    /// ...) to declare entries, then insert it as a Bevy [`Resource`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -142,10 +137,6 @@ impl NoesisResources {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back message
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Emitted after the bridge (re)installs the application resources, listing the
 /// declared [`entries`](NoesisResources::entries) keys confirmed resolvable
 /// through the live application resources (`GUI::GetApplicationResources` ➜
@@ -158,10 +149,6 @@ pub struct NoesisResourcesInstalled {
     /// resources, sorted.
     pub present: Vec<String>,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// System
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Reconcile [`NoesisResources`]: when it changed, build a fresh
 /// `ResourceDictionary` and install it as the process-global application
@@ -188,10 +175,6 @@ pub(crate) fn sync_resources_bridge(
     let present = state.install_app_resources_from(&resources.entries, &resources.merged_xaml);
     installed.write(NoesisResourcesInstalled { present });
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Wires the app-level application-resources bridge. Added transitively by
 /// [`crate::NoesisPlugin`]. Does not insert a default [`NoesisResources`]; the

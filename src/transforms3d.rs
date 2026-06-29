@@ -1,4 +1,4 @@
-//! Per-view **3D transform** writes against named XAML elements — the
+//! Per-view **3D transform** writes against named XAML elements: the
 //! `UIElement.Transform3D` attached behaviour (WinUI/Noesis) that rotates,
 //! scales and translates an element in 3D space about a center, with the
 //! implicit projection camera supplying perspective. Distinct from the 2D
@@ -15,7 +15,7 @@
 //! bounds, so it can't reflow surrounding layout.
 //!
 //! Add a [`NoesisTransform3D`] component to the view's camera entity. Its
-//! `transforms` map is the desired [`Transform3DSpec`] per `x:Name` — applied to
+//! `transforms` map is the desired [`Transform3DSpec`] per `x:Name`, applied to
 //! the view's elements whenever the component changes (Bevy change detection).
 //!
 //! ```ignore
@@ -36,16 +36,15 @@
 //! write leaves the element with no `Transform3D` and emits nothing.
 //!
 //! **Rendering caveat.** Assigning a `Transform3D` (this bridge) is a pure
-//! data-model operation and is fully implemented + tested here. *Compositing*
-//! the resulting perspective image, however, routes through the offscreen
-//! effects/projection render path, parts of which (Downsample/Upsample and the
-//! effect shaders) are not yet implemented in our wgpu render device. A scene
-//! that needs that path can panic at render time — see `TODO.md`. The bridge
-//! itself does not require it; only the final visual does.
+//! data-model operation. *Compositing* the resulting perspective image, however,
+//! routes through the offscreen effects/projection render path, parts of which
+//! (Downsample/Upsample and the effect shaders) are not yet implemented in our
+//! wgpu render device. A scene that needs that path can panic at render time. The
+//! bridge itself does not require it; only the final visual does.
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies + polls against
-//! that view's live scene — no cross-world queues.
+//! that view's live scene; no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -112,7 +111,7 @@ impl Transform3DSpec {
     }
 
     /// Rebuild a spec from the runtime's [`Composite3DFields`] read back off a
-    /// live element — the inverse of [`Self::to_fields`].
+    /// live element; the inverse of [`Self::to_fields`].
     #[must_use]
     pub(crate) fn from_fields(f: Composite3DFields) -> Self {
         Self {
@@ -124,7 +123,7 @@ impl Transform3DSpec {
     }
 }
 
-/// A raw 3D matrix transform — the arbitrary-affine alternative to
+/// A raw 3D matrix transform: the arbitrary-affine alternative to
 /// [`Transform3DSpec`], mirroring XAML's `MatrixTransform3D`. Where
 /// `Transform3DSpec` decomposes into center/rotation/scale/translate, this
 /// carries the bare 12 coefficients of a Noesis `Transform3`: four rows of a
@@ -165,8 +164,8 @@ impl Matrix3DSpec {
 
     /// Build from a **row-major** 4×4 affine matrix, dropping the projective 4th
     /// column. For an affine transform that column is `[0, 0, 0, 1]ᵀ`, so the
-    /// `Transform3` is exactly `rows[r][0..3]` for each row `r` — translation in
-    /// row 3. This matches Noesis's row-vector convention; a column-vector matrix
+    /// `Transform3` is exactly `rows[r][0..3]` for each row `r`, with translation
+    /// in row 3. This matches Noesis's row-vector convention; a column-vector matrix
     /// must be transposed by the caller first.
     #[must_use]
     pub fn from_mat4(m: [[f32; 4]; 4]) -> Self {
@@ -196,12 +195,16 @@ pub struct NoesisTransform3D {
     pub transforms: HashMap<String, Transform3DSpec>,
     /// Desired [`Matrix3DSpec`] (raw `MatrixTransform3D`) per element `x:Name`.
     /// Both maps drive the single `UIElement::Transform3D` DP, so a name should
-    /// appear in *one* of them — if it appears in both, the later-applied kind
+    /// appear in *one* of them. If it appears in both, the later-applied kind
     /// wins on the element and the other's read-back stays silent.
     pub matrices: HashMap<String, Matrix3DSpec>,
 }
 
 impl NoesisTransform3D {
+    /// An empty bridge with no queued transforms. Chain the builder methods
+    /// ([`set`](Self::set), [`translate`](Self::translate),
+    /// [`rotate_y`](Self::rotate_y), [`matrix`](Self::matrix), ...) to populate
+    /// it, then insert it on the [`NoesisView`](crate::NoesisView) camera.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -404,15 +407,13 @@ mod tests {
         let a = t.transforms.get("A").copied().unwrap();
         assert_eq!(a.translate, [10.0, 20.0, 30.0]);
         assert_eq!(a.scale, [2.0, 3.0, 4.0]);
-        // rotate_x/rotate_y are independent and merge into the same vector.
         assert_eq!(a.rotation, [15.0, 45.0, 0.0]);
-        // Untouched fields keep their identity defaults.
         assert_eq!(a.center, [0.0, 0.0, 0.0]);
 
         let b = t.transforms.get("B").copied().unwrap();
         assert_eq!(b.translate, [1.0, 2.0, 3.0]);
-        assert_eq!(b.scale, [1.0, 1.0, 1.0]); // default
-        assert_eq!(b.rotation, [0.0, 0.0, 0.0]); // default
+        assert_eq!(b.scale, [1.0, 1.0, 1.0]);
+        assert_eq!(b.rotation, [0.0, 0.0, 0.0]);
     }
 
     #[test]

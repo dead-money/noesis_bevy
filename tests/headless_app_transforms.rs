@@ -1,29 +1,15 @@
-//! Bevy-app-level integration test for the **render-transform** bridge
-//! ([`NoesisTransform`]), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on).
+//! Integration tests for the [`NoesisTransform`] bridge, run headless through the real `NoesisPlugin`.
 //!
-//! `RenderTransform` is a post-layout property: it never changes an element's
-//! `ActualWidth`/`ActualHeight`, and its value lives on a nested
-//! `CompositeTransform` object — neither reachable through a scalar `NoesisDp`
-//! watch. So this bridge ships its own read-back: after assigning the transform
-//! it reads the element's *live* `RenderTransform` back from Noesis and emits a
-//! [`NoesisTransformChanged`]. The read-back is element-sourced and gated on
-//! pointer identity with the object we assigned, so it is bluff-resistant:
+//! `RenderTransform` is post-layout (no `ActualWidth`/`ActualHeight` change) and lives on a nested
+//! `CompositeTransform` object, not reachable through `NoesisDp`. The bridge reads the element's
+//! live `RenderTransform` back from Noesis after assigning it, gated on pointer identity.
 //!
-//!   * **positive** — assigning `translate (50,30) · scale (2,3) · rotate 45` to
-//!     `Box` reads those exact values back. A no-op apply, wrong-entity routing,
-//!     or inverted change-detection leaves `Box` with no `RenderTransform`, so
-//!     no message is emitted and the exact-value assertion fails.
-//!   * **negative control** — `Other` is never given a transform, so it must
-//!     never appear in any `NoesisTransformChanged` (a "transform everything"
-//!     regression would surface it).
+//! Positive: assigns translate(50,30)/scale(2,3)/rotate(45) to `Box` and asserts exact values
+//! round-trip through [`NoesisTransformChanged`].
+//! Negative: `Other` receives no transform and must never appear in any change event.
 //!
-//! The component starts empty (no-op) and is filled in *after* the scene is
-//! built, because the apply runs on Bevy change-detection — mutating it before
-//! the view exists would drop the one-shot apply.
-//!
-//! Font-free XAML (only transform values are asserted, no glyph rendering), so
-//! the scene builds with no font gate.
+//! `NoesisTransform` starts empty and is assigned at frame `SET_AT_FRAME`, after the scene exists.
+//! Assigning before the view is live drops the one-shot change-detection apply.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -136,7 +122,6 @@ fn render_transform_bridge_reads_back_assigned_transform() {
         eprintln!("  {e:?} {name} = {spec:?}");
     }
 
-    // Negative control: an un-targeted element must never be reported.
     assert!(
         got.iter().all(|(_, name, _)| name != "Other"),
         "an un-transformed element must never emit NoesisTransformChanged",

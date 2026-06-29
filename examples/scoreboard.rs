@@ -4,7 +4,7 @@
 //! Unlike the other example ports, this one is a **conformance** test: it renders
 //! the genuine reference UI. The sample's real `MainWindow.xaml` and its two
 //! fonts are read **at runtime** from `$NOESIS_SDK_DIR` (the SDK is per-developer
-//! licensed and is never vendored into this repo — same rule as `assets/Data`).
+//! licensed and is never vendored into this repo, the same rule as `assets/Data`).
 //! Nothing here is a simplified re-creation of the layout: the emblem geometries,
 //! gradient/radial brushes, `ComboBox`/`ScrollViewer` control templates, the
 //! per-player `DataTemplate` with its `DataTrigger`s, and the `b:Interaction`
@@ -13,7 +13,7 @@
 //! The reference C++ sample exposes a `Game` view model (`Name`, `ElapsedTime`,
 //! `AllianceScore`, `HordeScore`, `SelectedTeam`, a `Players` collection and a
 //! `VisibleTeams` collection) reflected to XAML. This port reproduces that data
-//! through the crate's safe bridges — never raw FFI:
+//! through the crate's safe bridges, never raw FFI:
 //!
 //!   * [`NoesisVm`] attaches a DO-backed `Scoreboard.Game` instance as the view
 //!     root `DataContext`, supplying the scalar bindings (`{Binding Name}`,
@@ -23,7 +23,7 @@
 //!     ten **bindable object** items (one Rust-backed Noesis class per row), so
 //!     the per-player `DataTemplate` bindings (`{Binding Name}`, `{Binding Score}`,
 //!     `{Binding Kills}`, `{Binding Team}`, `{Binding Class}`, ...) resolve and
-//!     the team/class `DataTrigger`s fire — matching the reference exactly.
+//!     the team/class `DataTrigger`s fire, matching the reference exactly.
 //!   * [`NoesisItems::with`] supplies the `VisibleTeam` `ComboBox` with the three
 //!     team strings; its `SelectedIndex` binds to `Game.SelectedTeam`.
 //!
@@ -200,7 +200,7 @@ const SAMPLE_PLAYERS: [PlayerSeed; 10] = [
 pub const GAME_NAME: &str = "Silvershard Mines";
 pub const ELAPSED_MINUTES: i32 = 16;
 
-/// `Game.SelectedTeam` seed — index into `["Overall", "Alliance", "Horde"]`.
+/// `Game.SelectedTeam` seed: index into `["Overall", "Alliance", "Horde"]`.
 /// "Overall" (0) shows every player, matching the reference's default.
 pub const SELECTED_TEAM: i32 = 0;
 
@@ -257,7 +257,7 @@ pub fn sample_data_dir() -> Option<PathBuf> {
 
 /// Read the SDK's real `MainWindow.xaml` + its two fonts at runtime and register
 /// them. Returns `true` on success; `false` (with a warning) when the SDK isn't
-/// reachable — callers should then skip spawning. No SDK bytes are vendored.
+/// reachable, so callers should then skip spawning. No SDK bytes are vendored.
 #[must_use]
 pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
     let Some(data) = sample_data_dir() else {
@@ -280,7 +280,7 @@ pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
 
     // The two sample fonts, read from the SDK at runtime (never vendored).
     // Family names embedded in the files: "Cheboygan" (Cheboyga.ttf) and
-    // "PerryGothic" (PERRYGOT.TTF) — matched by the XAML's FontFamily refs.
+    // "PerryGothic" (PERRYGOT.TTF), matched by the XAML's FontFamily refs.
     let mut staged_any = false;
     for filename in ["Cheboyga.ttf", "PERRYGOT.TTF"] {
         let path = data.join("Fonts").join(filename);
@@ -302,7 +302,6 @@ pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
 /// bindable player items, the team `ComboBox` items, and a DP watch on the
 /// combo's `SelectedIndex` (proving `Game.SelectedTeam` reached a named element).
 pub fn spawn_scoreboard(commands: &mut Commands) -> Entity {
-    // DO-backed Game view model: scalar bindings the reference exposes.
     let mut game = NoesisVm::new(
         ViewModelDef::new(GAME_CLASS)
             .property("Name", PropType::String)
@@ -342,7 +341,6 @@ pub fn spawn_scoreboard(commands: &mut Commands) -> Entity {
             NoesisItems::new()
                 .with_objects(PLAYERS_NAME, PLAYER_CLASS, player_rows())
                 .with(VISIBLE_TEAM_NAME, ["Overall", "Alliance", "Horde"]),
-            // Read back the bound SelectedIndex on the named combo.
             NoesisDp::new().watch(VISIBLE_TEAM_NAME, "SelectedIndex", DpKind::I32),
         ))
         .id()

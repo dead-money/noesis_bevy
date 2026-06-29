@@ -1,15 +1,9 @@
-//! Phase 4.E regression test: `PATH_RADIAL` + `PATH_AA_RADIAL` both compile,
-//! bind the `ramps` texture at group(2), and compute the radial `u` parameter
-//! correctly from `uv0`.
+//! Verifies `PATH_RADIAL` and `PATH_AA_RADIAL`: both compile, bind the ramps texture
+//! at group(2), and compute `u = sqrt(uv0.x² + uv0.y²)` correctly.
 //!
-//! Strategy — drive `WgpuRenderDevice` directly (no Noesis), with uniforms
-//! picked so `u = sqrt(uv0.x² + uv0.y²)`. Render a full-screen quad whose
-//! `uv0` attribute copies clip-space `pos`, then sample a 256×1 ramp where
-//! texel R equals its index. The output R channel at each pixel becomes a
-//! direct encoding of `u * 255` — easy to pixel-assert.
-//!
-//! Pipeline shared with `PATH_LINEAR`; the distinguishing bit is the
-//! `PAINT_RADIAL` fragment branch we just ported.
+//! Drives `WgpuRenderDevice` directly. A full-screen quad copies clip-space `pos` into
+//! `uv0`; a 256×1 ramp has texel R equal to its index, so output R encodes `u * 255`
+//! and the pixel assertions can be exact.
 
 use std::ffi::c_void;
 
@@ -43,7 +37,6 @@ fn radial_variants_sample_ramp_at_computed_radius() {
 
 #[allow(clippy::too_many_lines)]
 async fn run_test() {
-    // ── wgpu init ──────────────────────────────────────────────────────────
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -65,7 +58,6 @@ async fn run_test() {
         .await
         .expect("no wgpu device available");
 
-    // ── Target + pre-clear ─────────────────────────────────────────────────
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("radial target"),
         size: wgpu::Extent3d {
@@ -112,15 +104,13 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // ── 256×1 ramp: R channel = texel index, full alpha. ───────────────────
-    // Sampling with NEAREST at u ∈ [0, 1] picks texel floor(u * 256), so
-    // output R ≈ round(u * 255) for u ∈ [0, 1]; clamped beyond.
+    // NEAREST sampling at u ∈ [0,1] picks texel floor(u * 256), so output R ≈ round(u * 255); clamped beyond.
     let mut ramp_texels = Vec::with_capacity(RAMP_W as usize * 4);
     for i in 0..RAMP_W {
-        ramp_texels.push(i as u8); // R
-        ramp_texels.push(0); // G
-        ramp_texels.push(0); // B
-        ramp_texels.push(255); // A
+        ramp_texels.push(i as u8);
+        ramp_texels.push(0);
+        ramp_texels.push(0);
+        ramp_texels.push(255);
     }
     let level_data = [&ramp_texels[..]];
     let ramp_binding = rd.create_texture(TextureDesc {
@@ -132,13 +122,7 @@ async fn run_test() {
         data: Some(&level_data),
     });
 
-    // ── Geometry: one full-screen PosTex0 quad for PATH_RADIAL, plus a
-    //    smaller PosTex0Coverage quad for PATH_AA_RADIAL so both variants
-    //    exercise their pipelines. ────────────────────────────────────────
-    //
-    // uv0 copies clip-space xy so the radial math reduces to
-    //   u = sqrt(uv0.x² + uv0.y²) = distance-from-screen-centre in clip units.
-    //
+    // uv0 = clip-space xy, so u = sqrt(uv0.x² + uv0.y²) (distance from screen centre).
     // PosTex0 layout: pos.xy (F32x2, 8B) + tex0.xy (F32x2, 8B) = 16B
     let full_quad: [f32; 4 * 4] = [
         -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
@@ -159,10 +143,8 @@ async fn run_test() {
     for v in aa_quad {
         vb.extend_from_slice(&v.to_le_bytes());
     }
-    // 4 vertices × 20 bytes = 80
     assert_eq!(vb.len(), 64 + 80);
 
-    // Indices — two triangle-list quads share the same [0,1,2, 1,3,2] layout.
     let quad_idx = [0u16, 1, 2, 1, 3, 2];
     let mut ib = Vec::with_capacity(24);
     for _ in 0..2 {
@@ -171,7 +153,6 @@ async fn run_test() {
         }
     }
 
-    // ── Uniforms. ──────────────────────────────────────────────────────────
     // Identity projection: pos.xy → clip.xy (wgpu's internal clip space).
     let identity_mat: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, //
@@ -180,8 +161,8 @@ async fn run_test() {
         0.0, 0.0, 0.0, 1.0,
     ];
     // ps_uniforms0 layout (matches WGSL `values: array<vec4, 2>`):
-    //   values[0] = (cb[0], cb[1], cb[2], cb[3]) — u coefs, opacity
-    //   values[1] = (cb[4], cb[5], cb[6], _)     — dd coefs, ramp row
+    //   values[0] = (cb[0], cb[1], cb[2], cb[3]): u coefs, opacity
+    //   values[1] = (cb[4], cb[5], cb[6], _):     dd coefs, ramp row
     //
     // With cb[0..2] = (0, 0, 1) and cb[4..5] = (0, 0), `u` collapses to
     //   u = sqrt(uv0.x² + uv0.y²)
@@ -189,7 +170,7 @@ async fn run_test() {
     // atlas (NEAREST / 1-row texture → picks the only row either way).
     let ps_uniform0: [f32; 8] = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.5, 0.0];
 
-    // Nearest / clamp / no mips — so we can pin down the sampled R value.
+    // Nearest / clamp / no mips: pins the sampled R value for exact assertions.
     let sampler_state = SamplerState::new(
         WrapMode::ClampToEdge,
         MinMagFilter::Nearest,
@@ -197,7 +178,6 @@ async fn run_test() {
     );
     rd.test_set_forced_pattern(Some((ramp_binding.handle, sampler_state)));
 
-    // ── Drive the device. ──────────────────────────────────────────────────
     rd.begin_onscreen_render();
 
     rd.map_vertices(vb.len() as u32).copy_from_slice(&vb);
@@ -207,10 +187,10 @@ async fn run_test() {
 
     let radial = make_radial_batch(
         Shader::PATH_RADIAL,
-        /* vertex_offset */ 0,
-        /* start_index */ 0,
-        /* num_vertices */ 4,
-        /* num_indices */ 6,
+        0,
+        0,
+        4,
+        6,
         &identity_mat,
         &ps_uniform0,
         sampler_state,
@@ -219,10 +199,10 @@ async fn run_test() {
 
     let aa_radial = make_radial_batch(
         Shader::PATH_AA_RADIAL,
-        /* vertex_offset */ 64,
-        /* start_index */ 6,
-        /* num_vertices */ 4,
-        /* num_indices */ 6,
+        64,
+        6,
+        4,
+        6,
         &identity_mat,
         &ps_uniform0,
         sampler_state,
@@ -232,7 +212,6 @@ async fn run_test() {
     rd.end_onscreen_render();
     rd.test_set_forced_pattern(None);
 
-    // ── Read back. ─────────────────────────────────────────────────────────
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(TARGET_H),

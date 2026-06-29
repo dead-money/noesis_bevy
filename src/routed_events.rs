@@ -1,6 +1,6 @@
-//! Per-view **generic routed-event** bridge — surface any `RoutedEvent` (mouse,
+//! Per-view **generic routed-event** bridge: surface any `RoutedEvent` (mouse,
 //! key, focus, drag, manipulation, lifecycle bubbling, …) from named elements
-//! of a single [`NoesisView`] as Bevy messages.
+//! of a single [`crate::NoesisView`] as Bevy messages.
 //!
 //! This is the general case of the [`crate::events`] click/keydown bridge: where
 //! `NoesisClickWatch` hard-codes `BaseButton::Click` and `NoesisKeyDownWatch`
@@ -37,8 +37,8 @@
 //! driven (on whatever thread drains [`crate::input::NoesisInputQueue`] onto the
 //! `View`); they push `(view, name, event, snapshot)` onto a small `Arc<Mutex>`
 //! queue that the `PreUpdate` drain turns into messages the next frame. Every
-//! fire emits one message — there is no per-frame dedupe (unlike the read-watch
-//! text/dp bridges); a routed event *is* the change.
+//! fire emits one message; there is no per-frame dedupe (unlike the read-watch
+//! text/dp bridges). A routed event *is* the change.
 
 use std::sync::{Arc, Mutex};
 
@@ -57,9 +57,6 @@ use crate::render::{NoesisRenderState, NoesisSet};
 /// is `None` for events that don't carry it (e.g. a `MouseEnter` has a
 /// `position` but no `key`); the un-applied default is therefore "all `None`",
 /// which makes a captured snapshot trivially distinguishable from a missing one.
-///
-/// Mirrors the typed accessors on [`EventArgs`]; add a field here (and a line in
-/// [`Self::capture`]) when a new accessor earns surfacing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoutedEventSnapshot {
     /// Pointer position in the source element's coordinate space (mouse /
@@ -80,7 +77,7 @@ pub struct RoutedEventSnapshot {
 impl RoutedEventSnapshot {
     /// Read every typed accessor off the borrowed live args into an owned,
     /// `Send` snapshot. Called from the routed-event callback while `args` is
-    /// still valid. Pure reads — never retains the borrow or any raw pointer.
+    /// still valid. Pure reads; never retains the borrow or any raw pointer.
     #[must_use]
     pub(crate) fn capture(args: &EventArgs) -> Self {
         Self {
@@ -115,18 +112,23 @@ pub struct NoesisRoutedEvent {
 /// One entry in [`NoesisEventWatch`]: an element `x:Name`, the [`RoutedEvent`] to
 /// subscribe, and two routing flags.
 ///
-/// * `mark_handled` — when `true`, the callback returns `handled = true`,
+/// * `mark_handled`: when `true`, the callback returns `handled = true`,
 ///   marking the routed event handled and stopping bubbling/tunneling past this
 ///   element (e.g. swallow a `PreviewKeyDown` so it never reaches a `TextBox`).
 ///   Default `false`: observe without consuming.
-/// * `handled_too` — forwarded to `subscribe_event`; when `true`, this handler
+/// * `handled_too`: forwarded to `subscribe_event`; when `true`, this handler
 ///   still runs even if a prior handler on the *same* element already marked the
 ///   event handled. Default `false`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventWatchEntry {
+    /// `x:Name` of the element to attach the handler to.
     pub name: String,
+    /// Routed event to subscribe on that element.
     pub event: RoutedEvent,
+    /// Whether the callback marks the event handled, stopping further routing.
     pub mark_handled: bool,
+    /// Whether the handler runs even after a prior same-element handler marked
+    /// the event handled.
     pub handled_too: bool,
 }
 
@@ -141,14 +143,14 @@ impl EventWatchEntry {
         }
     }
 
-    /// Builder — mark the event handled when it fires (stops further routing).
+    /// Builder: mark the event handled when it fires (stops further routing).
     #[must_use]
     pub fn mark_handled(mut self) -> Self {
         self.mark_handled = true;
         self
     }
 
-    /// Builder — also run when a prior same-element handler already marked the
+    /// Builder: also run when a prior same-element handler already marked the
     /// event handled.
     #[must_use]
     pub fn handled_too(mut self) -> Self {
@@ -159,15 +161,17 @@ impl EventWatchEntry {
 
 /// Per-view component: `(x:Name, RoutedEvent)` pairs to subscribe routed-event
 /// handlers against. Add to a [`NoesisView`](crate::NoesisView) entity. Entries
-/// are diff-synced each frame — adding installs a subscription, removing tears
-/// it down; changing an entry's `mark_handled`/`handled_too` re-binds it (the
+/// are diff-synced each frame: adding installs a subscription, removing tears
+/// it down. Changing an entry's `mark_handled`/`handled_too` re-binds it (the
 /// flags are captured by the callback at subscription time).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisEventWatch {
+    /// The `(x:Name, RoutedEvent)` pairs to keep subscribed for this view.
     pub entries: Vec<EventWatchEntry>,
 }
 
 impl NoesisEventWatch {
+    /// Build a watch from a list of [`EventWatchEntry`] values.
     pub fn new(entries: impl IntoIterator<Item = EventWatchEntry>) -> Self {
         Self {
             entries: entries.into_iter().collect(),

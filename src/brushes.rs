@@ -1,9 +1,9 @@
-//! Per-view code-built brush bridge — paint named XAML elements with brushes
+//! Per-view code-built brush bridge: paint named XAML elements with brushes
 //! constructed in Rust, no XAML authoring required. The brush counterpart of the
 //! [`crate::dp`] / [`crate::geometry`] write bridges.
 //!
 //! Add a [`NoesisBrushes`] component to the view's camera entity. Its `brushes`
-//! map is the desired brush per `(x:Name, target)` — applied to the view's
+//! map is the desired brush per `(x:Name, target)`, applied to the view's
 //! elements whenever the component changes (Bevy change detection). Each spec
 //! becomes a freshly-built Noesis `Brush` (a `SolidColorBrush` or a
 //! `LinearGradientBrush`) assigned through the element's typed brush sugar
@@ -19,7 +19,7 @@
 //!
 //! Unlike the purely write-only bridges, this one also *polls back* the brush
 //! that actually landed on each target and emits a [`NoesisBrushChanged`]
-//! message — a read-back that proves the assignment took. A solid spec reports
+//! message, a read-back that proves the assignment took. A solid spec reports
 //! [`BrushReadback::Solid`] with the exact color read off the live brush; a
 //! gradient reports [`BrushReadback::NonSolid`] (the runtime exposes no safe
 //! per-DP gradient-stop read-back, so the bridge can only prove a non-solid
@@ -29,7 +29,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component, applies the brush writes,
-//! polls the read-back, and emits messages directly — no cross-world queues.
+//! polls the read-back, and emits messages directly, no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -42,8 +42,8 @@ use crate::render::{NoesisRenderState, NoesisSet};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Which Brush-typed dependency property a spec paints. Each maps to the
-/// element's typed, safe brush sugar — so the bridge never touches the generic
-/// (unsafe) `set_component` path, and a non-brush element simply reports a failed
+/// element's typed, safe brush sugar, so the bridge never touches the generic
+/// (unsafe) `set_component` path, and a non-brush element reports a failed
 /// assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BrushTarget {
@@ -119,6 +119,9 @@ pub struct NoesisBrushes {
 }
 
 impl NoesisBrushes {
+    /// Creates an empty bridge with no painted targets. Chain [`solid`](Self::solid)
+    /// and [`linear_gradient`](Self::linear_gradient) to populate it before
+    /// inserting on the view camera.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -156,7 +159,7 @@ impl NoesisBrushes {
 // Read-back message
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// What was read back from a painted target's live brush DP — the observable
+/// What was read back from a painted target's live brush DP: the observable
 /// proof an assignment actually landed on the element (not just on the Rust-side
 /// spec). The two variants are mutually exclusive and both distinguish a real
 /// assignment from the unpainted default (which reads as *no brush* and emits
@@ -169,7 +172,7 @@ pub enum BrushReadback {
     Solid([f32; 4]),
     /// A live brush is present but is *not* a `SolidColorBrush` (e.g. a
     /// `LinearGradientBrush`), so it has no single read-back color. Proves a
-    /// non-solid [`BrushSpec`] (a gradient) landed — the strongest signal the
+    /// non-solid [`BrushSpec`] (a gradient) landed: the strongest signal the
     /// `unsafe_code = forbid` crate can read for a gradient, since the runtime
     /// exposes no safe per-DP gradient-stop read-back (see module note).
     NonSolid,

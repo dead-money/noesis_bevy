@@ -1,38 +1,17 @@
-//! Bevy-app-level integration test for the **formatted-text** `NoesisInlines`
-//! bridge, exercised end-to-end through the real `NoesisPlugin` pipeline
-//! (headless, pipelined rendering on).
+//! Integration test for the `NoesisInlines` bridge exercised through `NoesisPlugin` (headless).
 //!
-//! The bridge builds a `TextBlock`'s rich `Inlines` from a declarative
-//! [`InlineSpec`] tree. This test drives a representative tree on one `TextBlock`
-//! that touches every builder arm — `Run`, `Bold`, `Italic`, `Underline`, `Span`,
-//! `LineBreak`, and `Hyperlink` (with a `NavigateUri`) — including a nested span,
-//! then reads the resulting **live** structure back via `NoesisInlinesChanged`.
+//! Drives a representative inline tree on one `TextBlock` covering every builder arm
+//! (Run, Bold, Italic, Underline, Span, `LineBreak`, Hyperlink with `NavigateUri`), reads
+//! the live structure back via `NoesisInlinesChanged`, and asserts four axes:
+//! `count` (top-level inline count), `text` (depth-first Run concatenation),
+//! `matched` (pointer identity of each built inline), `hyperlink_uris` (live `NavigateUri`).
 //!
-//! The read-back is bluff-resistant on three independent axes, all re-read from
-//! live Noesis objects (not echoed from the Rust spec):
+//! `Other` is the negative control: a `TextBlock` the bridge never touches; its count must stay 0.
 //!
-//!   * **`count`** — the number of *top-level* inlines actually in
-//!     `TextBlock.Inlines`. A no-op / dropped apply leaves this at 0.
-//!   * **`text`** — the depth-first concatenation of every live `Run`'s text.
-//!     This catches wrong/empty runs and proves nesting (the bold/italic/span
-//!     children's text only appears if their sub-collections were populated).
-//!   * **`matched`** — every top-level inline the bridge built is present, *by
-//!     pointer identity*, at its expected index in the live collection. This is
-//!     the bluff-killer: it proves the exact objects we created are this
-//!     `TextBlock`'s content, not some look-alike.
-//!   * **`hyperlink_uris`** — the live `NavigateUri` of the `Hyperlink`, proving
-//!     the URI write landed.
+//! The bridge component starts empty and is populated after the scene is built so
+//! change-detection fires on the first mutation rather than being lost before the view exists.
 //!
-//! `Other` is the negative control: an authored `TextBlock` the bridge never
-//! touches. Its read-back must stay empty (`count == 0`), proving the bridge
-//! writes only its target.
-//!
-//! The bridge component starts empty (no-op) and is filled in *after* the scene
-//! is built, because it applies only on Bevy change-detection — mutating it
-//! before the view exists would drop the one-shot apply.
-//!
-//! Font-free: only inline structure / text DPs are read, no glyph rendering, so
-//! the scene builds with no font gate.
+//! Font-free: only inline structure and text DPs are read, no glyph rendering.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -58,8 +37,7 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 
 type Observed = Vec<(Entity, String, InlinesReadback)>;
 
-// The inline tree under test: Run, Bold(Run), Italic(Run), nested Span(Run, Bold(Run)),
-// LineBreak, Hyperlink(uri, Run), Underline(Run). Seven top-level inlines.
+// Covers every builder arm; seven top-level inlines.
 fn inline_tree() -> Vec<InlineSpec> {
     vec![
         InlineSpec::run("Hello "),
@@ -168,7 +146,6 @@ fn inlines_bridge_builds_textblock_content() {
         eprintln!("  {e:?} {name} = {value:?}");
     }
 
-    // Latest read-back for a watched name on our view.
     let latest = |name: &str| -> Option<InlinesReadback> {
         got.iter()
             .rfind(|(e, n, _)| *e == view && n == name)
@@ -177,33 +154,28 @@ fn inlines_bridge_builds_textblock_content() {
 
     let body = latest("Body").expect("Body read-back observed");
 
-    // ── count: the live top-level inline count ───────────────────────────────
     assert_eq!(
         body.count, EXPECTED_TOP_LEVEL,
         "Body should have {EXPECTED_TOP_LEVEL} top-level inlines, got {}",
         body.count,
     );
 
-    // ── text: flattened live Run text across all nesting levels ──────────────
     assert_eq!(
         body.text, EXPECTED_TEXT,
         "Body flattened inline text mismatch (proves runs + nested spans landed)",
     );
 
-    // ── matched: pointer identity of every top-level inline (bluff-killer) ───
     assert!(
         body.matched,
         "every built top-level inline must be present by identity in the live TextBlock",
     );
 
-    // ── hyperlink_uris: the live NavigateUri ─────────────────────────────────
     assert_eq!(
         body.hyperlink_uris,
         vec!["https://noesisengine.com/".to_string()],
         "the Hyperlink's NavigateUri should read back from the live object",
     );
 
-    // ── negative control: the un-bridged TextBlock stays empty ───────────────
     let other = latest("Other").expect("Other read-back observed");
     assert_eq!(
         other.count, 0,

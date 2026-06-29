@@ -1,25 +1,25 @@
 //! Per-view generic dependency-property get/set bridge, keyed by
 //! `(x:Name, property)`.
 //!
-//! A near-mechanical generalization of [`crate::text`]: where the text bridge
-//! reads/writes the one fixed `Text` property, this reads/writes *any* named
-//! dependency property by name and value type. It's the binding-free fallback —
-//! poke `Slider.Value`, read `CheckBox.IsChecked`, flip `Button.IsEnabled` —
-//! when wiring a full [`ViewModel`](crate::viewmodel) would be overkill.
+//! Where [`crate::text`] reads and writes the one fixed `Text` property, this
+//! reads and writes *any* named dependency property by name and value type. It's
+//! the binding-free fallback (poke `Slider.Value`, read `CheckBox.IsChecked`,
+//! flip `Button.IsEnabled`) for when wiring a full
+//! [`ViewModel`](crate::viewmodel) would be overkill.
 //!
 //! Add a [`NoesisDp`] component to the view's camera entity. Its `set` map is the
-//! desired value per `(x:Name, property)` — applied to the view's elements
+//! desired value per `(x:Name, property)`, applied to the view's elements
 //! whenever the component changes (Bevy change detection). Its `watch` list names
 //! `(x:Name, property)` pairs to observe; changes surface as a
 //! [`NoesisDpChanged`] message carrying the originating `view` entity.
 //!
 //! # Value types
 //!
-//! Noesis is a float engine — many "numeric" properties (`Slider.Value`,
+//! Noesis is a float engine: many "numeric" properties (`Slider.Value`,
 //! `Width`, `Opacity`) are **`f32`**, not `f64`, so reach for [`DpKind::F32`] /
 //! [`NoesisDp::set_f32`] there; a `get_f64` against an `f32` property
 //! type-mismatches and reads nothing. `CheckBox.IsChecked` is `Nullable<bool>`
-//! and is *not* reachable through [`DpKind::Bool`] — bind it through a
+//! and is *not* reachable through [`DpKind::Bool`]; bind it through a
 //! [`ViewModel`](crate::viewmodel) instead.
 //!
 //! ```ignore
@@ -38,8 +38,8 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component, applies writes + polls the
-//! watch list against that view's live scene, and emits messages directly — no
-//! cross-world queues.
+//! watch list against that view's live scene, and emits messages directly, with
+//! no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -57,10 +57,15 @@ use crate::render::{NoesisRenderState, NoesisSet};
 /// property's actual Noesis type (see the module docs on `f32` vs `f64`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DpValue {
+    /// A 32-bit float, for Noesis's float-typed properties (`Slider.Value`, `Width`, `Opacity`).
     F32(f32),
+    /// A 64-bit `Double`.
     F64(f64),
+    /// A 32-bit signed integer (`Int32`).
     I32(i32),
+    /// A plain `Boolean` (not the `Nullable<bool>` of `CheckBox.IsChecked`).
     Bool(bool),
+    /// A UTF-8 string.
     Str(String),
 }
 
@@ -95,13 +100,18 @@ impl DpValue {
     }
 }
 
-/// Which value type to read a watched property as — picks the runtime getter.
+/// Which value type to read a watched property as. Picks the runtime getter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DpKind {
+    /// Read as a 32-bit float, yielding [`DpValue::F32`].
     F32,
+    /// Read as a 64-bit `Double`, yielding [`DpValue::F64`].
     F64,
+    /// Read as a 32-bit signed integer, yielding [`DpValue::I32`].
     I32,
+    /// Read as a plain `Boolean`, yielding [`DpValue::Bool`].
     Bool,
+    /// Read as a string, yielding [`DpValue::Str`].
     Str,
 }
 
@@ -128,12 +138,16 @@ impl DpKind {
 /// [`DpKind`] to read it as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpWatch {
+    /// `x:Name` of the element to observe.
     pub name: String,
+    /// The dependency property on that element to read.
     pub property: String,
+    /// The value type to read the property as.
     pub kind: DpKind,
 }
 
 impl DpWatch {
+    /// Builds a watch on `name`'s `property`, read as `kind`.
     pub fn new(name: impl Into<String>, property: impl Into<String>, kind: DpKind) -> Self {
         Self {
             name: name.into(),
@@ -161,12 +175,14 @@ pub struct NoesisDp {
 }
 
 impl NoesisDp {
+    /// Creates an empty bridge with no writes or watches queued. Chain the
+    /// `set_*` and [`watch`](Self::watch) builders to populate it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: queue an `f32` write — the right choice for Noesis's float-typed
+    /// Builder: queue an `f32` write, the right choice for Noesis's float-typed
     /// properties (`Slider.Value`, `Width`, `Opacity`, …).
     #[must_use]
     pub fn set_f32(self, name: impl Into<String>, property: impl Into<String>, value: f32) -> Self {

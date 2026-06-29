@@ -1,9 +1,9 @@
-//! Per-view geometry bridge — imperative vector polyline writes against named
+//! Per-view geometry bridge: imperative vector polyline writes against named
 //! XAML `Path` elements on a single [`NoesisView`](crate::NoesisView). The
 //! geometry counterpart of [`crate::text`].
 //!
 //! Add a [`NoesisGeometry`] component to the view's camera entity. Its `paths`
-//! map is the desired geometry per `x:Name` — applied to the view's `Path`
+//! map is the desired geometry per `x:Name`, applied to the view's `Path`
 //! elements whenever the component changes (Bevy change detection). Each set of
 //! points becomes a Noesis `StreamGeometry` assigned as the `Path`'s `Data`, so
 //! a live oscilloscope (or any Rust-driven graph) draws a genuine line instead
@@ -18,7 +18,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies the writes
-//! against that view's live scene — no cross-world queues.
+//! against that view's live scene. No cross-world queues.
 
 use std::collections::HashMap;
 
@@ -39,6 +39,8 @@ pub struct NoesisGeometry {
 }
 
 impl NoesisGeometry {
+    /// Creates an empty bridge with no paths. Chain [`path`](Self::path) to add
+    /// geometry before inserting it on the [`NoesisView`](crate::NoesisView) camera.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

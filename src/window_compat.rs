@@ -1,7 +1,7 @@
 //! `Window` root-element compatibility shim.
 //!
 //! Noesis's `Window` type lives in the **App framework** (`NsApp`), which this
-//! crate deliberately does not link — we drive only the core + GUI of
+//! crate deliberately does not link. We drive only the core + GUI of
 //! `libNoesis.so` and host the result inside a Bevy `View`. As a result the XAML
 //! parser doesn't know the `<Window>` element, and any scene authored with a
 //! `<Window>` root (as most of the SDK *Samples* are) fails to load with
@@ -12,8 +12,8 @@
 //! `UserControl` (so it carries `Content`, `Resources`, `FontFamily`, and renders
 //! its content through `UserControl`'s default template) plus the handful of
 //! `Window`-only properties samples set as attributes (`Title`, `WindowStyle`,
-//! `WindowStartupLocation`, ...). The stand-in has no OS-window behaviour — it is
-//! purely a content host — which is exactly what an embedded Bevy view needs.
+//! `WindowStartupLocation`, ...). The stand-in has no OS-window behaviour; it is
+//! purely a content host, which is exactly what an embedded Bevy view needs.
 //!
 //! Add the plugin after [`crate::NoesisPlugin`]; it registers the type once at
 //! startup (held for the app's lifetime in [`NoesisClassRegistry`]). It is
@@ -31,7 +31,7 @@ use noesis_runtime::ffi::{ClassBase, PropType};
 
 use crate::classes::NoesisClassRegistry;
 
-/// The Noesis class name the stand-in registers under — the bare `Window` the
+/// The Noesis class name the stand-in registers under: the bare `Window` the
 /// XAML parser resolves a `<Window>` root against.
 pub const WINDOW_CLASS: &str = "Window";
 
@@ -83,8 +83,7 @@ pub struct NoesisWindowCompatPlugin;
 
 impl Plugin for NoesisWindowCompatPlugin {
     fn build(&self, app: &mut App) {
-        // Reuse the shared class registry (installed by NoesisClassPlugin via
-        // NoesisPlugin) to hold the registration for the app's lifetime.
+        // Registry comes from NoesisPlugin; it keeps the registration alive for the app's lifetime.
         app.add_systems(Startup, install_window_type.run_if(run_once));
     }
 }

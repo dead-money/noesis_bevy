@@ -1,31 +1,12 @@
-//! Bevy-app-level integration test for the code-built `Style` bridge
-//! ([`NoesisStyles`]), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on). Mirrors `headless_app_props.rs`.
+//! Integration test for the `NoesisStyles` bridge (headless, pipelined rendering on).
 //!
-//! `NoesisStyles` is write-only (it pushes a built `Noesis::Style` into the live
-//! view and emits no read-back of its own), so — exactly like the other
-//! write-only bridges — the assertion observes the style's *actual effect*
-//! through a [`NoesisDp`] watch and asserts the exact value. The element's
-//! *default* value is the built-in negative control: a missing apply / wrong
-//! target type / wrong-entity routing reads back the default and fails.
+//! Asserts via [`NoesisDp`] watches:
+//!   - `Styled.Opacity`: Style Setter Opacity=0.5 drives it from the default 1.0 to 0.5.
+//!   - `Styled.Width`: Style Setter Width=40 drives it from unset to 40.
+//!   - `Plain.Opacity`: unstyled sibling stays at 1.0 (negative control for wrong-entity routing).
 //!
-//!   * **setter** → `Opacity` (`f32`): a `Style` targeting `Border` with a
-//!     `Setter Opacity=0.5` drives `Styled.Opacity` to `0.5`, not the default
-//!     `1.0`.
-//!   * **setter** → `Width` (`f32`): the same style's `Setter Width=40` drives
-//!     `Styled.Width` to `40`. The element authors no local `Width`, so the
-//!     style is the only value source; a no-op apply leaves it `NaN`/unset.
-//!   * **negative control** → `Plain.Opacity` (`f32`): an unstyled sibling stays
-//!     at the default `1.0`. A "style everything" / wrong-entity regression
-//!     would pull it to `0.5` too.
-//!
-//! The component starts empty (no-op) and is filled in *after* the scene is
-//! built, because `set_style` applies only on Bevy change-detection — mutating
-//! it before the view exists would drop the one-shot apply (and a style is
-//! sealed on first apply).
-//!
-//! Font-free XAML (only DP values are asserted, no glyph rendering), so the scene
-//! builds with no font gate.
+//! `NoesisStyles` starts empty and is filled at frame 10, after the scene exists.
+//! `set_style` applies only on change-detection; a style is sealed on first apply.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -99,7 +80,6 @@ fn code_built_style_applies_to_named_element() {
                     // Starts empty (no-op); filled in after the scene exists so
                     // the one-shot style apply isn't lost.
                     NoesisStyles::new(),
-                    // The DP watcher polls every frame regardless of changes.
                     watcher(),
                 ))
                 .id();
@@ -151,7 +131,6 @@ fn code_built_style_applies_to_named_element() {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
 
-    // Latest value seen for a watched (name, property) on our view.
     let latest = |name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
@@ -168,8 +147,8 @@ fn code_built_style_applies_to_named_element() {
         Some(DpValue::F32(40.0)),
         "setter: a Style with Setter Width=40 should drive Styled.Width to 40 (no local value)",
     );
-    // Negative control: the style targets one element only — a "style everything"
-    // or wrong-entity-routing regression would flip Plain too.
+    // Negative control: the style targets one element only; a wrong-entity-routing
+    // regression would flip Plain too.
     assert_eq!(
         latest("Plain", "Opacity"),
         Some(DpValue::F32(1.0)),

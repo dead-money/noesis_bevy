@@ -1,4 +1,4 @@
-//! Per-view Rust-owned `ICommand` bridge (TODO §3).
+//! Per-view Rust-owned `ICommand` bridge.
 //!
 //! Lets XAML `Command="{Binding Name}"` controls (a `Button`, a `MenuItem`, an
 //! `InputBinding`/`MouseBinding`, …) invoke Rust logic without touching Noesis
@@ -6,7 +6,7 @@
 //! declares the named commands (a [`CommandsDef`]); the bridge registers a
 //! Noesis class whose dependency properties are each a
 //! [`PropType::BaseComponent`] holding a Rust-backed
-//! [`Command`](noesis_runtime::commands::Command), creates an instance, and
+//! [`Command`], creates an instance, and
 //! attaches it as the view's (or a named element's) `DataContext`. Authoring
 //! `Command="{Binding Fire}"` then resolves `Fire` to that command.
 //!
@@ -15,10 +15,10 @@
 //! message carrying the originating `view` entity and the command `name`.
 //!
 //! This is the read-watch counterpart of the write-only
-//! [`viewmodel`](crate::viewmodel) bridge, and it deliberately mirrors its
-//! shape: a declarative per-view component + a render-state entry attached as a
-//! `DataContext`. The difference is the DP payload — a `BaseComponent` command
-//! object rather than a scalar value — and the direction of flow (UI → Rust).
+//! [`viewmodel`](crate::viewmodel) bridge: a declarative per-view component plus
+//! a render-state entry attached as a `DataContext`. The payload is a
+//! `BaseComponent` command object rather than a scalar value, and flow runs from
+//! UI to Rust.
 //!
 //! ```ignore
 //! use noesis_bevy::commands::{NoesisCommands, CommandsDef, NoesisCommandInvoked};
@@ -49,10 +49,7 @@
 //! [`Instance::set_command`](noesis_runtime::classes::Instance::set_command) sets
 //! a `BaseComponent`-typed DP to a Rust [`Command`] (whose runtime type is an
 //! `ICommand`). A control bound `Command="{Binding Fire}"` against that instance
-//! as its `DataContext` reads the DP and invokes it on activation. This is the
-//! exact path the runtime's `commands` module documents (steps 1–4 of its
-//! module docs). Confidence is high; see `NOTES.md` for the one open gap
-//! (decoding the command *parameter*).
+//! as its `DataContext` reads the DP and invokes it on activation.
 //!
 //! # Threading & lifetime
 //!
@@ -73,12 +70,10 @@ use noesis_runtime::commands::{Command, CommandHandler, CommandParameterValue};
 use noesis_runtime::ffi::{ClassBase, PropType};
 
 use crate::render::{NoesisRenderState, NoesisSet};
-// Reuse the viewmodel bridge's attach-target enum verbatim — a command host is
-// attached as a `DataContext` exactly like a view model.
 use crate::viewmodel::AttachTarget;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CommandsDef — declarative recipe
+// CommandsDef: declarative recipe
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A declarative recipe for a view's commands: a Noesis class name, the ordered
@@ -96,7 +91,7 @@ pub struct CommandsDef {
 
 impl CommandsDef {
     /// Begin a def for the Noesis class `class_name`. Defaults to attaching at
-    /// the view root — override with [`Self::attach_to`].
+    /// the view root; override with [`Self::attach_to`].
     ///
     /// `class_name` must be globally unique: Noesis class registration is keyed
     /// by name, so two views needing the same commands must use distinct class
@@ -182,12 +177,12 @@ impl NoesisCommands {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Invocation side — shared queue + message + forwarding handler
+// Invocation: shared queue, message, forwarding handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Queue between the (main-thread) [`CommandForwarder`] callbacks and the drain
 /// system. Entries carry the originating view entity, the command name, and the
-/// (currently always-`None`) decoded parameter — see `NOTES.md`.
+/// decoded command parameter.
 #[derive(Resource, Clone, Default)]
 pub struct SharedCommandQueue(Arc<Mutex<Vec<(Entity, String, Option<String>)>>>);
 
@@ -224,7 +219,7 @@ pub struct NoesisCommandInvoked {
     /// (the usual XAML `CommandParameter="..."` literal). `None` when no
     /// parameter was supplied. Non-string boxed parameters (`i32`/`f64`/`bool`)
     /// are stringified; an unsupported boxed type also yields `None`. Decoded
-    /// via [`CommandParameterValue`](noesis_runtime::commands::CommandParameterValue).
+    /// via [`CommandParameterValue`].
     pub parameter: Option<String>,
 }
 
@@ -296,7 +291,7 @@ fn decode_command_param(param: &CommandParameterValue) -> Option<String> {
 
 /// No-op [`PropertyChangeHandler`] for the command-host class. Command DPs are
 /// set once at build time and never written from XAML, so there's nothing to
-/// observe — but [`ClassBuilder::new`] requires a handler.
+/// observe, but [`ClassBuilder::new`] requires a handler.
 struct NoCommandChanges;
 
 impl PropertyChangeHandler for NoCommandChanges {
@@ -304,7 +299,7 @@ impl PropertyChangeHandler for NoCommandChanges {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render-world entry — CommandEntry
+// Render-world entry: CommandEntry
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One live command host, owned per-view by [`NoesisRenderState`]. Field order
@@ -390,7 +385,6 @@ impl CommandEntry {
             return false;
         };
         self.enabled[idx].store(value, Ordering::Relaxed);
-        // Tell bound controls to re-query `CanExecute` (re-evaluate `IsEnabled`).
         self.commands[idx].raise_can_execute_changed();
         true
     }

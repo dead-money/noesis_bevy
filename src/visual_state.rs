@@ -1,4 +1,4 @@
-//! Per-view `VisualStateManager::GoToState` writes against named XAML controls —
+//! Per-view `VisualStateManager::GoToState` writes against named XAML controls:
 //! the code-driven counterpart to a `ControlTemplate`'s trigger-driven visual
 //! states (e.g. a control's `CommonStates`: `Normal` / `MouseOver` / `Pressed`
 //! / `Disabled`, or app-authored groups).
@@ -11,7 +11,7 @@
 //! "Alert" or a button to "Pressed" without routing a fake input event.
 //!
 //! Add a [`NoesisVisualState`] component to the view's camera entity. Its
-//! `states` map is the desired `(state name, use_transitions)` per `x:Name` —
+//! `states` map is the desired `(state name, use_transitions)` per `x:Name`,
 //! applied to the view's controls whenever the component changes (Bevy change
 //! detection). `use_transitions = true` runs the state's `VisualTransition`
 //! (animated change); `false` snaps straight to the target state. This is a
@@ -30,7 +30,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies the state
-//! transitions against that view's live scene — no cross-world queues.
+//! transitions against that view's live scene, with no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -53,6 +53,8 @@ pub struct NoesisVisualState {
 }
 
 impl NoesisVisualState {
+    /// An empty bridge with no requested transitions. Chain [`state`](Self::state)
+    /// to fill in the per-`x:Name` targets.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -75,7 +77,7 @@ impl NoesisVisualState {
 }
 
 /// Reconcile every view's [`NoesisVisualState`]: apply desired state transitions
-/// when the component changed. Write-only — no read-back message.
+/// when the component changed. Write-only, with no read-back message.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_visual_state_bridge(
     views: Query<(Entity, Ref<NoesisVisualState>)>,
@@ -90,10 +92,6 @@ pub(crate) fn sync_visual_state_bridge(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Wires the per-view visual-state bridge. Added transitively by
 /// [`crate::NoesisPlugin`].

@@ -1,24 +1,9 @@
-//! Bevy-app-level integration test for the **generic routed-event** bridge,
-//! exercised end-to-end through the real `NoesisPlugin` pipeline (headless,
-//! pipelined rendering on).
+//! Integration test for the routed-event bridge, end-to-end through the real `NoesisPlugin` (headless).
 //!
-//! Bluff-resistance: a routed-event watch reports *nothing* until a real event
-//! fires, so the un-applied default is an empty message stream AND an all-`None`
-//! arg snapshot. We provoke a genuine `UIElement.MouseDown` by injecting a
-//! left-button press over a hit-testable `Border` directly into the
-//! [`NoesisInputQueue`] (the same path the Bevy input forwarders feed), then
-//! assert a [`NoesisRoutedEvent`] comes back that:
-//!
-//!   * carries OUR view entity (per-entity routing), and
-//!   * carries `event == RoutedEvent::MouseDown`, and
-//!   * carries a non-default arg snapshot: `mouse_button == Some(Left)` and a
-//!     `position` near the injected press point.
-//!
-//! A broken subscribe/reconcile, wrong-entity tag, or a snapshot that wasn't
-//! actually read off the live args (the all-`None` default) each fail it.
-//!
-//! Font-free XAML (no glyph rendering asserted), so the scene builds with no
-//! font gate.
+//! Injects `MouseDown` via [`NoesisInputQueue`] and asserts that the resulting [`NoesisRoutedEvent`]
+//! carries the correct view entity, `RoutedEvent::MouseDown`, and a non-default arg snapshot
+//! (button + position). An all-`None` snapshot (never read from live args) would fail the arg
+//! assertions, catching a broken subscribe/reconcile or snapshot path.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -89,9 +74,7 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Watch is not change-detection gated: it reconciles every
-                    // frame and binds once the scene + content exist, so it is
-                    // safe to attach at spawn.
+                    // Reconciles every frame once the scene exists; safe to attach at spawn.
                     NoesisEventWatch::new([EventWatchEntry::new("Target", RoutedEvent::MouseDown)]),
                 ))
                 .id();
@@ -108,11 +91,8 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
               mut exit: MessageWriter<AppExit>| {
             *frame += 1;
 
-            // Inject a press over the Border's centre once the scene + the
-            // routed-event subscription are live. Pushed in Update so it
-            // survives PreUpdate's queue reset and is extracted to the render
-            // world this same frame. MouseMove first: Noesis hit-tests on the
-            // last known pointer position.
+            // Pushed in Update so it survives PreUpdate's queue reset and is extracted this same frame.
+            // MouseMove first: Noesis hit-tests on the last known pointer position.
             if *frame == INJECT_AT_FRAME {
                 input.push(NoesisInputEvent::MouseMove { x: 32, y: 16 });
                 input.push(NoesisInputEvent::MouseButton {
@@ -155,8 +135,7 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
         })
         .expect("expected a MouseDown routed event on Target tagged with our view");
 
-    // Non-default arg snapshot: the all-`None` default (a snapshot that was never
-    // read off the live args) would fail both of these.
+    // all-`None` default (snapshot never read from live args) would fail both.
     assert_eq!(
         hit.3,
         Some(MouseButton::Left),

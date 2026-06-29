@@ -1,5 +1,5 @@
-//! Per-view routed-event bridge — surface `BaseButton::Click` and
-//! `UIElement::KeyDown` from named elements of a single [`NoesisView`] as Bevy
+//! Per-view routed-event bridge: surface `BaseButton::Click` and
+//! `UIElement::KeyDown` from named elements of a single [`crate::NoesisView`] as Bevy
 //! messages.
 //!
 //! Add a [`NoesisClickWatch`] / [`NoesisKeyDownWatch`] component to the view's
@@ -45,13 +45,15 @@ pub struct NoesisClicked {
 
 /// Per-view component: element `x:Name`s to subscribe a `Click` handler against.
 /// Add to a [`NoesisView`](crate::NoesisView) entity. Names are diff-synced each
-/// frame — adding installs a subscription, removing tears it down.
+/// frame: adding installs a subscription, removing tears it down.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisClickWatch {
+    /// `x:Name`s to subscribe a `Click` handler against.
     pub names: Vec<String>,
 }
 
 impl NoesisClickWatch {
+    /// Builds a watch over the given element `x:Name`s.
     pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             names: names.into_iter().map(Into::into).collect(),
@@ -124,14 +126,17 @@ pub struct NoesisKeyDown {
 /// One entry in [`NoesisKeyDownWatch`]: an element `x:Name` plus the per-name
 /// swallow set. Keys in `swallow` are marked handled by the C++ trampoline,
 /// stopping further routing (e.g. swallow `Return` so a submit doesn't append a
-/// newline). Empty by default — every key propagates, none are swallowed.
+/// newline). Empty by default: every key propagates, none are swallowed.
 #[derive(Clone, Debug)]
 pub struct KeyDownWatchEntry {
+    /// `x:Name` of the element to watch for `UIElement::KeyDown`.
     pub name: String,
+    /// Keys marked handled by the C++ trampoline, stopping further routing.
     pub swallow: Vec<Key>,
 }
 
 impl KeyDownWatchEntry {
+    /// Builds an entry watching `name`, with an empty swallow set.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -139,14 +144,14 @@ impl KeyDownWatchEntry {
         }
     }
 
-    /// Builder — append `key` to the swallow set.
+    /// Builder: append `key` to the swallow set.
     #[must_use]
     pub fn swallow(mut self, key: Key) -> Self {
         self.swallow.push(key);
         self
     }
 
-    /// Builder — append every key in `keys` to the swallow set.
+    /// Builder: append every key in `keys` to the swallow set.
     #[must_use]
     pub fn swallow_all<I>(mut self, keys: I) -> Self
     where
@@ -161,10 +166,12 @@ impl KeyDownWatchEntry {
 /// `UIElement::KeyDown`. Add to a [`NoesisView`](crate::NoesisView) entity.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisKeyDownWatch {
+    /// Per-element watch entries, each pairing an `x:Name` with its swallow set.
     pub entries: Vec<KeyDownWatchEntry>,
 }
 
 impl NoesisKeyDownWatch {
+    /// Builds a watch from the given [`KeyDownWatchEntry`] list.
     pub fn new(entries: impl IntoIterator<Item = KeyDownWatchEntry>) -> Self {
         Self {
             entries: entries.into_iter().collect(),

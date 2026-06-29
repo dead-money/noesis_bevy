@@ -1,4 +1,4 @@
-//! Per-view code-built imaging bridge — drive a named `<Image>`'s pixels from a
+//! Per-view code-built imaging bridge: drive a named `<Image>`'s pixels from a
 //! Rust-provided bitmap (RGBA8 + size), no image file on disk required. The
 //! imaging counterpart of the [`crate::brushes`] / [`crate::geometry`] write
 //! bridges.
@@ -8,8 +8,8 @@
 //! pixels, the bitmap's pixel size, and the `uri` the element's XAML `Source`
 //! references. On change the bridge stages those pixels into the shared
 //! [`crate::ImageRegistry`] under `uri`, so the live `Noesis::TextureProvider`
-//! resolves `<Image Source="uri"/>` to the Rust bytes — the same path a `.png`
-//! asset takes, but fed from memory.
+//! resolves `<Image Source="uri"/>` to the Rust bytes (the same path a `.png`
+//! asset takes, but fed from memory).
 //!
 //! ```ignore
 //! // XAML: <Image x:Name="Pic" Source="dm-bitmap://logo" Stretch="None"/>
@@ -23,7 +23,7 @@
 //!
 //! Noesis resolves a `<Image>`'s `BitmapImage` source from the texture provider
 //! **once, when the scene is first laid out**, and does not retry a miss. So the
-//! bytes must be staged *before* the view's scene is built — attach
+//! bytes must be staged *before* the view's scene is built. Attach
 //! [`NoesisImaging`] (populated) at spawn time, alongside the
 //! [`NoesisView`](crate::NoesisView), rather than filling it in a later frame.
 //! The staging system runs before the per-frame registry→provider sync precisely
@@ -43,7 +43,7 @@
 //! The bridge *polls back* the live element and emits [`NoesisImageChanged`] when
 //! a watched `<Image>`'s resolved size changes. Noesis sizes an `Image` from its
 //! source's pixel dimensions, which it obtains from our texture provider's
-//! `GetTextureInfo` during the layout pass — so a Rust-registered `13x7` bitmap
+//! `GetTextureInfo` during the layout pass, so a Rust-registered `13x7` bitmap
 //! drives the element's `ActualWidth`/`ActualHeight` to `13`/`7` (with the
 //! element authored `Stretch="None"`), with **no GPU render pass required**. An
 //! unresolvable `Source` (nothing registered for its `uri`) measures to `0`, the
@@ -52,7 +52,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system stages each view's bytes into the registry, polls the
-//! element read-back, and emits messages directly — no cross-world queues.
+//! element read-back, and emits messages directly. No cross-world queues.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,10 +61,6 @@ use bevy::prelude::*;
 
 use crate::image::ImageRegistry;
 use crate::render::{NoesisRenderState, NoesisSet};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Bitmap spec
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A Rust-provided bitmap, declarative side: tightly-packed RGBA8 pixels plus
 /// the `uri` the target element's `Source` references. Staged into the shared
@@ -83,10 +79,6 @@ pub struct ImageBitmap {
     pub bytes: Arc<Vec<u8>>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Per-view imaging bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisImaging {
@@ -96,13 +88,15 @@ pub struct NoesisImaging {
 }
 
 impl NoesisImaging {
+    /// An empty bridge with no bitmaps. Chain [`set`](Self::set) to add the
+    /// element bitmaps you want staged.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Builder: drive element `name`'s `<Image>` from `bytes` (tightly-packed
-    /// RGBA8, `width * height * 4` long), staged under `uri` — which must match
+    /// RGBA8, `width * height * 4` long), staged under `uri`, which must match
     /// the element's authored `Source`.
     #[must_use]
     pub fn set(
@@ -126,11 +120,7 @@ impl NoesisImaging {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back message
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// What was read back from a watched `<Image>` element after layout — the
+/// What was read back from a watched `<Image>` element after layout: the
 /// observable proof a Rust-provided bitmap actually reached the live element. A
 /// `Source` that resolved to our registered bytes carries the bitmap's pixel
 /// dimensions in [`actual_size`](Self::actual_size); an unresolvable source
@@ -159,14 +149,10 @@ pub struct NoesisImageChanged {
     pub readback: ImageReadback,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Stage every changed [`NoesisImaging`]'s bitmaps into the [`ImageRegistry`].
 /// Runs before the registry→provider sync (and thus before scene build) so a
 /// same-frame spawn lands the bytes ahead of Noesis's one-shot source
-/// resolution. Independent of [`NoesisRenderState`] — a plain resource write.
+/// resolution. Independent of [`NoesisRenderState`]: a plain resource write.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn stage_imaging_bitmaps(
     views: Query<Ref<NoesisImaging>>,
@@ -209,10 +195,6 @@ pub(crate) fn poll_imaging_reads(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Wires the per-view imaging bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisImagingPlugin;

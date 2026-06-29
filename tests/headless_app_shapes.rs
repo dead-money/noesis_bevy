@@ -1,21 +1,9 @@
-//! Bevy-app-level integration test for the **write-only** per-view shapes
-//! bridge ([`NoesisShapes`]), exercised end-to-end through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for [`NoesisShapes`] through the real `NoesisPlugin` pipeline (headless).
 //!
-//! The bridge builds a Noesis `Shape` (`Rectangle`/`Ellipse`/`Line`) in Rust and
-//! assigns it to a named container element. Like the geometry bridge it has no
-//! read-back message of its own, so we observe its *actual effect* through a
-//! [`NoesisDp`] watch on the container's `ActualWidth`/`ActualHeight`: a
-//! size-to-content `Border` (Left/Top-aligned, no explicit size) adopts the
-//! assigned shape's measured size, so building a 40×24 `Rectangle` and handing
-//! it to the `Border` lays the `Border` out to exactly `40 × 24`.
-//!
-//! The negative control is a second, untouched `Border` ("Empty"): with no
-//! assigned child it measures to `0`, so a missing apply / wrong-entity routing
-//! / building-into-the-wrong-container regression reads `0` for "Host" and fails.
-//!
-//! Font-free XAML (only DP sizes are asserted, no glyph rendering), so the scene
-//! builds with no font gate.
+//! Shapes have no read-back message, so the effect is observed via a [`NoesisDp`] watch on
+//! `ActualWidth`/`ActualHeight`: a size-to-content `Border` adopts the shape's measured size.
+//! A second untouched `Border` ("Empty") is the negative control for wrong-target routing.
+//! XAML is font-free.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,9 +19,7 @@ use noesis_bevy::{
 const SET_AT_FRAME: usize = 10;
 const EXIT_AT_FRAME: usize = 60;
 
-// Two size-to-content Borders. "Host" receives a built shape as its decorator
-// Child; "Empty" stays untouched (the negative control). Both are Left/Top so
-// they shrink to their content rather than stretching to the 200×120 Grid.
+// Left/Top alignment causes each Border to shrink to content; explicit size would swallow the shape measurement.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="200" Height="120">
@@ -89,10 +75,8 @@ fn shapes_bridge_sizes_its_container() {
                         size: UVec2::new(200, 120),
                         ..default()
                     },
-                    // Write-only component starts empty (no-op); filled in after
-                    // the scene exists so its one-shot apply isn't lost.
+                    // Filled at SET_AT_FRAME so the first apply fires after the scene exists.
                     NoesisShapes::new(),
-                    // The DP watcher polls every frame regardless of changes.
                     watcher(),
                 ))
                 .id();
@@ -111,8 +95,6 @@ fn shapes_bridge_sizes_its_container() {
 
             if *frame == SET_AT_FRAME {
                 for (mut shapes, _dp) in &mut q {
-                    // Build a 40×24 Rectangle and hand it to "Host"; "Empty"
-                    // stays bare.
                     *shapes = NoesisShapes::new().rectangle("Host", 40.0, 24.0);
                 }
             }
@@ -141,7 +123,6 @@ fn shapes_bridge_sizes_its_container() {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
 
-    // Latest value seen for a watched (name, property) on our view.
     let latest = |name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
@@ -160,8 +141,8 @@ fn shapes_bridge_sizes_its_container() {
         "shapes: a 24-tall Rectangle assigned to the Border should size it to ActualHeight 24 \
          (default 0)",
     );
-    // Negative control: the bridge must touch ONLY its target — a wrong-name /
-    // "build into every container" regression would size Empty too.
+    // Negative control: the bridge must touch only its target. A wrong-name or
+    // build-into-every-container regression would size Empty too.
     assert_eq!(
         latest("Empty", "ActualWidth"),
         Some(DpValue::F32(0.0)),

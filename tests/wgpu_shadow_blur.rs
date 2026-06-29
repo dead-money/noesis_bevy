@@ -1,18 +1,16 @@
-//! Render-device effects test for the `SHADOW` (50) and `BLUR` (51) shaders —
-//! the last two effect shaders, which co-bind a `shadow` texture with `image`
-//! (group(3) bindings 2/3) plus the `cbuffer1_ps` uniform (group(1)
-//! binding(1)). Scenes with drop-shadow / blur effects previously panicked on
-//! `Shader(50)=SHADOW` / `Shader(51)=BLUR`.
+//! Tests SHADOW (50) and BLUR (51) effect shaders in `WgpuRenderDevice`.
 //!
-//! Both mirror the GL `Shader.140.frag` blocks:
+//! Both shaders co-bind a `shadow` texture with `image` (group(3) bindings 2/3)
+//! plus `cbuffer1_ps` (group(1) binding(1)).
+//!
+//! Shader formulas (used to derive the expected pixel values):
 //!   SHADOW: (img + (1-img.a) * (shadowColor * alpha)) * (opacity * paint.a),
 //!           alpha = mix(image(uv-offset).a, shadow(uv-offset).a, cb1[6]).
 //!   BLUR:   mix(image(uv1), shadow(uv1), cb1[0]) * (opacity * paint.a).
 //!
-//! Strategy — drive `WgpuRenderDevice` directly (no Noesis) with the
-//! `test_set_forced_image` / `test_set_forced_shadow` hooks pointing the two
-//! group(3) slots at solid 1×1 textures, and constants picked so the algebra
-//! collapses to an easy-to-assert blend.
+//! Drives `WgpuRenderDevice` directly without Noesis, using `test_set_forced_image`
+//! and `test_set_forced_shadow` to point the two group(3) slots at solid 1x1
+//! textures; constants chosen so the algebra collapses to assertable values.
 
 use std::ffi::c_void;
 
@@ -76,7 +74,7 @@ async fn run_test() {
         MipFilter::Disabled,
     );
 
-    // ── BLUR: mix(red image, green shadow, 0.75) ──────────────────────────
+    // BLUR: mix(red image, green shadow, 0.75)
     // cbuffer1_ps[0] = 0.75 crossfade; paint = opaque white vertex color so
     // opacity*paint.a = 1. Expect 0.25*red + 0.75*green ≈ (64, 191, 0, 255).
     let red_px: [u8; 4] = [255, 0, 0, 255];
@@ -132,7 +130,7 @@ async fn run_test() {
     let blur = read_pixel(&device, &queue, &rd, rt.resolve_texture.handle, 2, 2).await;
     assert_close(blur, [64, 191, 0, 255], 2, "blur mix(image, shadow, 0.75)");
 
-    // ── SHADOW: transparent layer over an opaque-alpha shadow ─────────────
+    // SHADOW: transparent layer over an opaque-alpha shadow
     // Make `image` fully transparent (img.a = 0) so the formula reduces to
     //   shadowColor * alpha, with alpha = mix(image.a=0, shadow.a=1, cb1[6]=1)
     //   = 1. shadowColor = (0, 0, 1, 1) (blue). offset = 0, rect = whole. So
@@ -195,8 +193,6 @@ async fn run_test() {
     assert_close(shadow, [0, 0, 255, 255], 2, "shadow over transparent layer");
 }
 
-// ── Geometry helpers ────────────────────────────────────────────────────
-
 fn full_tile() -> noesis_runtime::render_device::types::Tile {
     noesis_runtime::render_device::types::Tile {
         x: 0,
@@ -223,7 +219,6 @@ const QUAD_POS: [[f32; 2]; 6] = [
     [1.0, 1.0],
 ];
 
-/// Full-screen quad in `PosColorTex1` format (pos, color, uv1), constant attrs.
 fn pos_color_tex1_quad(color: [u8; 4], uv1: [f32; 2]) -> Vec<u8> {
     let mut vb = Vec::new();
     for p in QUAD_POS {
@@ -236,8 +231,6 @@ fn pos_color_tex1_quad(color: [u8; 4], uv1: [f32; 2]) -> Vec<u8> {
     vb
 }
 
-/// Full-screen quad in `PosColorTex1Rect` format (pos, color, uv1, rect). Rect
-/// is `Unorm16x4`: 0xFFFF == 1.0, so the rect covers the whole [0,1]² space.
 fn pos_color_tex1_rect_quad(color: [u8; 4], uv1: [f32; 2]) -> Vec<u8> {
     let mut vb = Vec::new();
     for p in QUAD_POS {
@@ -296,8 +289,6 @@ fn effect_batch(shader: Shader, cb1: &[f32; 8]) -> Batch {
         pixel_shader: std::ptr::null_mut(),
     }
 }
-
-// ── Readback ────────────────────────────────────────────────────────────
 
 async fn read_pixel(
     device: &wgpu::Device,

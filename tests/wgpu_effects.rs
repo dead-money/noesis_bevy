@@ -1,15 +1,7 @@
-//! Render-device effects-resolve test: the `DOWNSAMPLE` (49) and `UPSAMPLE`
-//! (48) shaders, the two halves of Noesis's separable-blur resolve chain that
-//! `Effects.xaml` / `Transform3D.xaml` previously panicked on
-//! (`Shader(49)=DOWNSAMPLE`).
+//! Tests `DOWNSAMPLE` (shader 49) and `UPSAMPLE` (shader 48) in the Noesis separable-blur resolve chain.
 //!
-//! - `DOWNSAMPLE`: the vertex shader spreads `uv0 ± uv1` into four taps; the
-//!   fragment box-filters them from the group(2) source. Pointed at a 2×2
-//!   red/green/blue/yellow source with the taps on the four texel centres, the
-//!   output is their average.
-//! - `UPSAMPLE`: `mix(image(uv1), pattern(uv0), color.a)`. With a red `image`
-//!   (group 3), a green `pattern` (group 2) and `color.a = 0.5`, the output is
-//!   the half-and-half blend.
+//! DOWNSAMPLE: four-tap box-filter over a 2x2 red/green/blue/yellow source; asserts the average.
+//! UPSAMPLE: `mix(image, pattern, color.a)` with red image, green pattern, alpha=0.5; asserts the half blend.
 
 use std::ffi::c_void;
 
@@ -196,7 +188,6 @@ fn quad_indices() -> Vec<u8> {
     ib
 }
 
-/// Full-screen quad in `PosTex0Tex1` format (pos, uv0, uv1), constant uvs.
 fn pos_tex0_tex1_quad(uv0: [f32; 2], uv1: [f32; 2]) -> Vec<u8> {
     let pos = [
         [-1.0f32, -1.0],
@@ -218,7 +209,6 @@ fn pos_tex0_tex1_quad(uv0: [f32; 2], uv1: [f32; 2]) -> Vec<u8> {
     vb
 }
 
-/// Full-screen quad in `PosColorTex0Tex1` format, constant color/uvs.
 fn pos_color_tex0_tex1_quad(color: [u8; 4], uv0: [f32; 2], uv1: [f32; 2]) -> Vec<u8> {
     let pos = [
         [-1.0f32, -1.0],

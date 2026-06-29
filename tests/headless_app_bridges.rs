@@ -1,22 +1,10 @@
-//! Bevy-app-level integration test for the **per-entity** bridges, exercised
-//! end-to-end through the real `NoesisPlugin` pipeline (headless, pipelined
-//! rendering on).
+//! Integration tests for per-entity bridges through the real `NoesisPlugin` pipeline (headless).
 //!
-//! It deliberately couples three bridges so the assertion is bluff-*resistant*:
+//! Couples three bridges per view: a [`NoesisVm`] sets a `Foo` string property as `DataContext`,
+//! a `TextBlock` binds to it, and a [`NoesisText`] watch reports the result. All three must
+//! work correctly for the right entity to receive the right [`NoesisTextChanged`] message.
 //!
-//!   1. A [`NoesisVm`] (DO-backed view model) declares a `String` property `Foo`
-//!      and is attached as the view-root `DataContext`.
-//!   2. A `<TextBlock x:Name="Echo" Text="{Binding Foo}"/>` binds its text to it.
-//!   3. A [`NoesisText`] watch on the same view observes `Echo`'s text.
-//!
-//! When a system writes `Foo = "magic-smoke"` into the VM, the *only* way the
-//! watch can report that exact string back via a [`NoesisTextChanged`] carrying
-//! the right `view` entity is if: the VM was built, attached as `DataContext`,
-//! the binding resolved, and the per-entity message path tagged the correct
-//! entity. A broken attach / wrong-entity tag / missing reconcile all fail it.
-//!
-//! Font-free XAML (no glyph rendering is asserted — only DP values), so the
-//! scene builds with no font gate.
+//! Font-free XAML; no glyph rendering is asserted.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,12 +27,8 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <TextBlock x:Name="Echo" Text="{Binding Foo}"/>
 </Grid>"##;
 
-/// Bluff-catch follow-up: **two** views, each with its own `NoesisVm` bound to
-/// its own `Echo` `TextBlock` and its own `NoesisText` watch. Writing a distinct
-/// sentinel into each view's VM must surface a `NoesisTextChanged` tagged with
-/// the *matching* view entity — and crucially, NO message may carry one view's
-/// entity with the other view's sentinel. A "route everything to the first
-/// scene" bug (the failure mode single-view tests can't see) fails this.
+// Two views, each with its own VM/binding/watch. Catches "route to first scene"
+// cross-entity routing bugs that a single-view test cannot detect.
 #[test]
 fn per_entity_routing_is_isolated_across_two_views() {
     noesis_license_from_env();
@@ -73,7 +57,7 @@ fn per_entity_routing_is_isolated_across_two_views() {
         move |mut commands: Commands, mut reg: ResMut<XamlRegistry>| {
             reg.insert("a.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
             reg.insert("b.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
-            // Distinct VM class names — Noesis class registration is global by name.
+            // Distinct VM class names: Noesis class registration is global by name.
             let a = spawn_view(&mut commands, "a.xaml", "RouteVmA");
             let b = spawn_view(&mut commands, "b.xaml", "RouteVmB");
             let mut v = views_startup.lock().unwrap();

@@ -1,22 +1,14 @@
-//! Phase 4.E regression test: pattern wrap variants. Exercises
-//! `PATH_PATTERN_CLAMP` (`PosTex0Rect` vertex format) and
-//! `PATH_PATTERN_REPEAT` (`PosTex0RectTile`) in a single frame.
+//! Exercises `PATH_PATTERN_CLAMP` (`PosTex0Rect`) and `PATH_PATTERN_REPEAT`
+//! (`PosTex0RectTile`) in a single frame.
 //!
-//! Target is split in half: the left half is a clamped quad with an
-//! inner `rect` — fragments inside the rect sample the pattern, outside
-//! drop to zero (transparent black, visibly distinct from the
-//! dark-blue clear). The right half is a repeated quad sampling `uv0 ∈
-//! [0, 2]` with `tile = (0, 0, 1, 1)`, which wraps the 2×2 pattern into
-//! two horizontal tiles. Pixel asserts confirm:
+//! Left half: clamped quad with an inner `rect`; fragments inside sample the
+//! pattern, outside collapse to transparent black. Right half: repeated quad
+//! with `uv0 ∈ [0, 2]` and `tile = (0, 0, 1, 1)`, wrapping the 2×2 pattern
+//! into two horizontal tiles.
 //!
-//! - CLAMP: inside-rect pixel samples expected texel; outside-rect
-//!   pixel collapses to zero.
-//! - REPEAT: two disjoint x-positions at the same v map to the same
-//!   texel — confirming the `fract()` wrap math is actually wrapping.
-//!
-//! The `ramp` plumbing from `wgpu_radial.rs` doesn't apply here —
-//! these variants hit `batch.pattern`. The `test_set_forced_pattern`
-//! hook works uniformly across any shader that routes through group(2).
+//! Asserts: CLAMP inside-rect pixel matches expected texel, outside collapses
+//! to zero; REPEAT two x-positions at the same v map to the same texel
+//! (confirming `fract()` wrap).
 
 use std::ffi::c_void;
 
@@ -30,9 +22,8 @@ use noesis_runtime::render_device::{RenderDevice, TextureDesc};
 const TARGET_W: u32 = 32;
 const TARGET_H: u32 = 32;
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-// wgpu requires `bytes_per_row` to respect `COPY_BYTES_PER_ROW_ALIGNMENT`
-// (256). TARGET_W * 4 = 128 would break `copy_texture_to_buffer`; pad to
-// 256 and skip over the trailing 128 bytes in the pixel accessor.
+// COPY_BYTES_PER_ROW_ALIGNMENT requires 256; TARGET_W*4=128 would break
+// copy_texture_to_buffer, so pad to 256 and skip trailing bytes in pixel().
 const BYTES_PER_ROW: u32 = 256;
 
 const CLEAR: [u8; 4] = [0, 0, 64, 255];
@@ -52,7 +43,6 @@ fn path_pattern_clamp_and_repeat_draw_their_variants() {
 
 #[allow(clippy::too_many_lines)]
 async fn run_test() {
-    // ── wgpu init ──────────────────────────────────────────────────────────
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -74,7 +64,6 @@ async fn run_test() {
         .await
         .expect("no wgpu device");
 
-    // ── Target + pre-clear ─────────────────────────────────────────────────
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pattern-wrap target"),
         size: wgpu::Extent3d {
@@ -121,9 +110,7 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // ── 2×2 RGBA pattern texture. ──────────────────────────────────────────
-    //   (0,0) red    (1,0) green
-    //   (0,1) blue   (1,1) yellow
+    // 2×2 RGBA: (0,0)=red (1,0)=green / (0,1)=blue (1,1)=yellow
     let pattern_texels: [u8; 16] = [
         255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
     ];
@@ -144,31 +131,24 @@ async fn run_test() {
     );
     rd.test_set_forced_pattern(Some((pattern_binding.handle, sampler_state)));
 
-    // ── Vertex buffer: CLAMP quad (PosTex0Rect, stride 24) + REPEAT quad
-    //    (PosTex0RectTile, stride 40). ───────────────────────────────────
-    //
-    // CLAMP: left half (clip x ∈ [-1, 0]), uv0 ∈ [0, 1] across the quad
-    //   so each pixel maps to a unique UV point. rect = (0.25, 0.25,
-    //   0.75, 0.75) carves a 50%×50% inner window — inside shows pattern,
-    //   outside goes to (0, 0, 0, 0) via the inside-mask.
-    // REPEAT: right half (clip x ∈ [0, 1]), uv0 ∈ [0, 2] × [0, 1],
-    //   tile = (0, 0, 1, 1), rect = (0, 0, 1, 1). Produces 2 horizontal
-    //   tiles of the pattern.
-    //
-    // wgpu clip y=+1 → top of target (row 0). UVs at the top two verts
-    // use v=0; bottom two use v=1 — matching the pattern's "top row red,
-    // bottom row blue" layout.
+    // CLAMP quad (PosTex0Rect, stride 24): clip x ∈ [-1, 0], uv0 ∈ [0,1].
+    //   rect=(0.25,0.25,0.75,0.75) carves a 50%×50% window; outside goes to
+    //   (0,0,0,0) via the inside-mask.
+    // REPEAT quad (PosTex0RectTile, stride 40): clip x ∈ [0, 1],
+    //   uv0 ∈ [0,2]×[0,1], tile=(0,0,1,1), producing 2 horizontal tiles.
+    // wgpu clip y=+1 is row 0, so top verts use v=0, bottom use v=1
+    // (aligns with pattern top-row=red, bottom-row=blue).
 
     let mut vb: Vec<u8> = Vec::new();
 
-    // CLAMP verts — 4 verts × 24 bytes = 96 bytes at offset 0.
+    // CLAMP verts: 4 × 24 bytes = 96 bytes at offset 0.
     push_pos_tex0_rect(&mut vb, [-1.0, -1.0], [0.0, 1.0], [0.25, 0.25, 0.75, 0.75]);
     push_pos_tex0_rect(&mut vb, [0.0, -1.0], [1.0, 1.0], [0.25, 0.25, 0.75, 0.75]);
     push_pos_tex0_rect(&mut vb, [-1.0, 1.0], [0.0, 0.0], [0.25, 0.25, 0.75, 0.75]);
     push_pos_tex0_rect(&mut vb, [0.0, 1.0], [1.0, 0.0], [0.25, 0.25, 0.75, 0.75]);
     assert_eq!(vb.len(), 96);
 
-    // REPEAT verts — 4 verts × 40 bytes = 160 bytes at offset 96.
+    // REPEAT verts: 4 × 40 bytes = 160 bytes at offset 96.
     push_pos_tex0_rect_tile(
         &mut vb,
         [0.0, -1.0],
@@ -199,7 +179,6 @@ async fn run_test() {
     );
     assert_eq!(vb.len(), 96 + 160);
 
-    // Two quads share the same [0,1,2, 1,3,2] index pattern.
     let quad_idx = [0u16, 1, 2, 1, 3, 2];
     let mut ib = Vec::with_capacity(24);
     for _ in 0..2 {
@@ -208,7 +187,7 @@ async fn run_test() {
         }
     }
 
-    // Identity projection — pos.xy flows through to clip.xy.
+    // Identity projection: pos.xy passes through to clip.xy.
     let identity_mat: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
@@ -218,7 +197,6 @@ async fn run_test() {
     // Pattern shaders read opacity from ps_uniforms0.values[0].x; rest is 0.
     let ps_uniform0: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
-    // ── Drive the device. ──────────────────────────────────────────────────
     rd.begin_onscreen_render();
 
     rd.map_vertices(vb.len() as u32).copy_from_slice(&vb);
@@ -253,7 +231,6 @@ async fn run_test() {
     rd.end_onscreen_render();
     rd.test_set_forced_pattern(None);
 
-    // ── Readback. ──────────────────────────────────────────────────────────
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(TARGET_H),
@@ -306,7 +283,7 @@ async fn run_test() {
         ]
     };
 
-    // ── CLAMP half (left 16 px). ───────────────────────────────────────────
+    // CLAMP half (left 16 px).
     // uv = ((x+0.5)/16, (y+0.5)/32); inside rect when uv ∈ [0.25, 0.75]²
     //   → pixel x ∈ [3.5, 11.5] (x = 4..11), y ∈ [7.5, 23.5] (y = 8..23).
     //
@@ -349,7 +326,7 @@ async fn run_test() {
         "CLAMP outside-rect → transparent black; got {outside_se:?}",
     );
 
-    // ── REPEAT half (right 16 px). ─────────────────────────────────────────
+    // REPEAT half (right 16 px).
     // uv = ((x-16+0.5)/16 * 2, (y+0.5)/32). fract(uv.x) picks a tile.
     //   pixel (17, 8):  uv ≈ (0.188, 0.266) → texel (0,0) = red.
     //   pixel (25, 8):  uv ≈ (1.188, 0.266), fract=0.188 → same texel → red.
@@ -376,10 +353,6 @@ async fn run_test() {
     drop(data);
     readback.unmap();
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Vertex / batch builders
-// ────────────────────────────────────────────────────────────────────────────
 
 /// `PosTex0Rect`: pos (F32x2, 8B) + tex0 (F32x2, 8B) + rect (Unorm16x4, 8B) = 24B.
 fn push_pos_tex0_rect(out: &mut Vec<u8>, pos: [f32; 2], uv0: [f32; 2], rect: [f32; 4]) {

@@ -1,32 +1,8 @@
-//! Bevy-app-level integration test for the per-element **SVG** bridge
-//! ([`NoesisSvg`]), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on).
+//! Integration test for the SVG bridge: parse path data, read back measured
+//! bounds, and verify element sizing via `ActualWidth`.
 //!
-//! The bridge parses an SVG *path-data* source string with the runtime's
-//! CPU-side `Noesis::SVGPath` parser and (a) reports the parsed outline's exact
-//! measured bounds via [`NoesisSvgChanged`] and (b) sizes the named element to
-//! those bounds. Both effects are asserted, and both are bluff-resistant:
-//!
-//!   * **read-back** → `NoesisSvgChanged.bounds`: the known path
-//!     `"M0 0 L40 0 L40 20 Z"` measures to exactly `[0, 0, 40, 20]`. A no-op
-//!     apply / wrong parse would not produce these exact numbers.
-//!   * **write effect** → `ActualWidth` (`f32`) via `NoesisDp`: sizing the
-//!     element to the SVG width drives a re-layout to `ActualWidth = 40`, not the
-//!     element's authored default. The `Border` starts with no `Width` and is
-//!     `HorizontalAlignment=Left`, so it shrinks to content (`ActualWidth = 0`);
-//!     only a real apply lifts it to `40`. (A `Shape` like `Path` derives its
-//!     `ActualWidth` from its geometry, not an explicit `Width`, so a sizable
-//!     host element is used for this assertion.)
-//!   * **negative control**: a source routed to an `x:Name` *absent* from the
-//!     live tree (`"Ghost"`) resolves to no element, so it emits no message and
-//!     touches nothing.
-//!
-//! The component starts empty (no-op) and is filled in *after* the scene is
-//! built, because it applies only on Bevy change-detection — mutating it before
-//! the view exists would drop the one-shot apply.
-//!
-//! Font-free XAML (only geometry/DP values are asserted, no glyph rendering), so
-//! the scene builds with no font gate.
+//! `NoesisSvg` is populated at frame `SET_AT_FRAME` rather than at spawn so the
+//! view exists when change-detection fires; an earlier mutation drops the apply.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -90,7 +66,6 @@ fn svg_bridge_parses_and_sizes_element() {
                     // Starts empty (no-op); filled after the scene exists so its
                     // one-shot apply isn't lost.
                     NoesisSvg::new(),
-                    // Watch the Path's laid-out width to observe the size effect.
                     NoesisDp::new().watch("Icon", "ActualWidth", DpKind::F32),
                 ))
                 .id();
@@ -147,13 +122,11 @@ fn svg_bridge_parses_and_sizes_element() {
         eprintln!("  {:?} {} = {:?}", ev.view, ev.name, ev.bounds);
     }
 
-    // Negative control: "Ghost" is not in the scene, so no message for it.
     assert!(
         !svgs.iter().any(|e| e.name == "Ghost"),
         "svg: a source routed to an absent x:Name must emit nothing",
     );
 
-    // Read-back: the known path measures to exactly [0, 0, 40, 20].
     let icon = svgs
         .iter()
         .rfind(|e| e.view == view && e.name == "Icon")
@@ -168,8 +141,7 @@ fn svg_bridge_parses_and_sizes_element() {
         icon.bounds,
     );
 
-    // Write effect: the Path was sized to the SVG width => ActualWidth 40
-    // (default 0 for an unsized, Stretch=None, Left-aligned Path).
+    // Border has no explicit Width and is Left-aligned, so without the SVG apply ActualWidth is 0.
     let latest_aw = dps
         .iter()
         .rfind(|(e, n, p, _)| *e == view && n == "Icon" && p == "ActualWidth")

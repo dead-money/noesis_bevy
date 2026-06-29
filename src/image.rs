@@ -1,4 +1,4 @@
-//! Image-asset plumbing for the `ImageBrush` / Image loader (Phase 4.E).
+//! Image-asset plumbing for the `ImageBrush` / `Image` loader.
 //!
 //! Parallels [`crate::font`]:
 //!
@@ -23,14 +23,14 @@
 //!
 //! Noesis configures `DeviceCaps::linearRendering = false` and its blend
 //! state is `(BlendFactor::One, BlendFactor::OneMinusSrcAlpha)` for
-//! `BlendMode::SrcOver` — the canonical premultiplied-alpha blend.
+//! `BlendMode::SrcOver`, the canonical premultiplied-alpha blend.
 //! Feeding straight-alpha bytes to that blend state produces noticeable
 //! edge fringing where opacity is partial.
 //!
 //! Premultiplication therefore happens at decode time inside
 //! [`ImageAssetLoader::load`]. Every byte stored in [`ImageAsset::bytes`]
 //! and (transitively) [`ImageRegistry`] / [`SharedImageMap`] is PMA by
-//! contract — non-PMA consumers must build their own loader against a
+//! contract. Non-PMA consumers must build their own loader against a
 //! different asset type.
 //!
 //! Idempotency is guaranteed because the loader sees only the source PNG
@@ -57,26 +57,31 @@ use noesis_runtime::texture_provider::{ImageData, TextureInfo, TextureProvider};
 /// copying on every `ExtractResource` clone.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct ImageAsset {
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
+    /// Tightly-packed RGBA8 pixels, premultiplied alpha (see module docs).
     pub bytes: Arc<Vec<u8>>,
 }
 
 /// Errors from [`ImageAssetLoader`]. Decode failures fold into one
 /// variant because the `image` crate's errors aren't useful to expose
-/// individually — the URI in the log line tells you which file broke.
+/// individually; the URI in the log line tells you which file broke.
 #[derive(thiserror::Error, Debug)]
 pub enum ImageLoadError {
+    /// Reading the encoded bytes off the asset reader failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The `image` crate could not decode the file; the string is its
+    /// formatted error.
     #[error("decode: {0}")]
     Decode(String),
 }
 
 /// Decodes `.png` / `.jpg` / `.jpeg` files via the `image` crate into
-/// RGBA8. The decoded buffer is retained in memory — SDK icons are
-/// small enough that this doesn't matter, and we'd have to keep the
-/// pixels hot anyway for Noesis's on-demand `LoadTexture` calls.
+/// RGBA8. The decoded buffer stays resident: Noesis needs the pixels hot
+/// for its on-demand `LoadTexture` calls anyway.
 #[derive(Default, TypePath)]
 pub struct ImageAssetLoader;
 
@@ -116,7 +121,7 @@ impl AssetLoader for ImageAssetLoader {
 /// Required so [`ImageAsset::bytes`] satisfy Noesis's PMA blend assumption
 /// (see module docs). `bytes.len()` must be a multiple of 4.
 ///
-/// Uses 8-bit rounding (`+ 127) / 255`) — matches what Photoshop / GIMP /
+/// Uses 8-bit rounding (`+ 127) / 255`), matching what Photoshop / GIMP /
 /// Unity's `NoesisGUIPackage` importer write for cooked sprites. Pure-zero
 /// alpha pixels collapse to fully-transparent black, which is the
 /// conventional PMA representation (avoids stale colour bleeding through
@@ -149,7 +154,7 @@ fn premultiply_alpha(bytes: &mut [u8]) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ImageRegistry — uri → decoded image
+// ImageRegistry: uri -> decoded image
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Flat `uri` → decoded image map. Populated by
@@ -186,7 +191,7 @@ impl ImageRegistry {
         self.entries.len()
     }
 
-    /// `true` when no images have been registered yet — useful for waiting
+    /// `true` when no images have been registered yet. Useful for waiting
     /// on async asset loads from a downstream plugin.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -252,7 +257,7 @@ pub fn update_image_registry(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BevyTextureProvider — the render-world TextureProvider impl
+// BevyTextureProvider: the render-world TextureProvider impl
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Shared `uri` → image map. Render-world-only; the provider's boxed
@@ -260,6 +265,12 @@ pub fn update_image_registry(
 /// sync system can refresh the map from [`ImageRegistry`] each frame.
 type ImageMapEntries = HashMap<String, RegisteredImage>;
 
+/// Render-world-shared `uri` → image map behind an `Arc<Mutex<…>>`.
+///
+/// One handle lives inside the boxed [`BevyTextureProvider`], another in
+/// [`crate::render::NoesisRenderPlugin`], whose sync system calls
+/// [`SharedImageMap::sync_from`] each frame to push the latest
+/// [`ImageRegistry`] across the main → render boundary.
 #[derive(Clone, Default)]
 pub struct SharedImageMap(pub(crate) Arc<Mutex<ImageMapEntries>>);
 
@@ -268,7 +279,7 @@ impl SharedImageMap {
     ///
     /// # Panics
     ///
-    /// Panics on mutex poisoning — a bug, not a runtime condition.
+    /// Panics on mutex poisoning (a bug, not a runtime condition).
     pub fn sync_from(&self, registry: &ImageRegistry) {
         let mut guard = self.0.lock().expect("SharedImageMap mutex poisoned");
         guard.clone_from(&registry.entries);
@@ -278,7 +289,7 @@ impl SharedImageMap {
 /// Implements [`TextureProvider`] against a [`SharedImageMap`].
 ///
 /// `load` returns a borrow into `self.current`, which is rotated on
-/// each call — same pattern as [`crate::xaml::BevyXamlProvider`] and
+/// each call, like [`crate::xaml::BevyXamlProvider`] and
 /// [`crate::font::BevyFontProvider`].
 pub struct BevyTextureProvider {
     shared: SharedImageMap,
@@ -287,6 +298,9 @@ pub struct BevyTextureProvider {
 }
 
 impl BevyTextureProvider {
+    /// Build a provider that resolves textures through the given
+    /// [`SharedImageMap`]. The render plugin boxes this and hands it to
+    /// Noesis as the active [`TextureProvider`].
     #[must_use]
     pub fn from_shared(map: SharedImageMap) -> Self {
         Self {

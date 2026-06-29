@@ -1,37 +1,23 @@
-//! Bevy-app-level integration test for the **write-only** per-entity element
-//! bridges — visibility, layout (margin), focus, and geometry — plus the
-//! generic `NoesisDp` get/set bridge, exercised end-to-end through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Tests write-only bridges (visibility, layout, focus, geometry) and `NoesisDp`
+//! set through the real `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
-//! These four bridges have no read-back message of their own (they only push
-//! state into the live view). To make the assertions bluff-*resistant* we
-//! observe each one's *actual effect* through a `NoesisDp` watch on a scalar
-//! dependency property the write provably changes, and assert the exact value —
-//! the element's *default* value is the built-in negative control, so a missing
-//! apply / wrong-entity routing / inverted change-detection reads back the
-//! default and fails:
+//! These bridges have no read-back message. Each is verified through a `NoesisDp`
+//! watch on a derived property the write changes; the element default is the
+//! negative control, so a missing apply reads back the default and fails.
 //!
-//!   * **visibility** → `IsVisible` (`bool`): `hide` ⇒ `false`, not the default
-//!     `true`. (Noesis's `Visibility` enum isn't reachable through `get_i32` /
-//!     `get_string`, but the derived `IsVisible` bool reflects it directly.)
-//!   * **focus** → `IsFocused` (`bool`): focusing the `TextBox` ⇒ `true`, not
-//!     the default `false`.
-//!   * **layout** → `ActualWidth` (`f32`): a stretchy 64-wide element with
-//!     `Margin = [8,0,16,0]` lays out to `64 - 8 - 16 = 40`, not `64`.
-//!   * **geometry** → `ActualWidth` (`f32`): a `Path` with no `Data` measures
-//!     to `0`; assigning a polyline gives it real bounds (> 0).
-//!   * **dp** (set side-effect) → `Input.ActualWidth` (`f32`): writing
-//!     `Input.Width = 40` drives a re-layout to `ActualWidth = 40`, not the
-//!     authored `20`. (A DP read can't observe its *own* write — the bridge
-//!     eagerly snapshots self-writes to avoid echoes — so we watch a derived
-//!     property the write provably changes.)
+//! * visibility: `Panel.IsVisible` (`false` after hide, default `true`);
+//!   `Visibility` enum isn't reachable via `get_i32`/`get_string`,
+//!   but the derived `IsVisible` bool reflects it.
+//! * focus: `Input.IsFocused` (`true` after focus, default `false`);
+//!   `Other.IsFocused` stays `false` (proves only the target is focused).
+//! * layout: `Float.ActualWidth` (40 after Margin=[8,0,16,0] on 64-wide, default 64).
+//! * geometry: `Trace.ActualWidth` (~40 after [0,0]->[40,20] polyline, default 0).
+//! * dp set: `Input.ActualWidth` (40 after Width=40, default 20);
+//!   a DP read can't observe its own write (bridge snapshots self-writes),
+//!   so we watch the derived `ActualWidth` the re-layout changes.
 //!
-//! The write-only components start empty (no-op) and are filled in *after* the
-//! scene is built, because each applies only on Bevy change-detection — mutating
-//! them before the view exists would drop the one-shot apply.
-//!
-//! Font-free XAML (only DP values are asserted, no glyph rendering), so the scene
-//! builds with no font gate.
+//! Write-only components are spawned empty and mutated at `SET_AT_FRAME` so
+//! change-detection fires after the scene is built.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -141,8 +127,7 @@ fn write_only_bridges_apply_their_effect() {
                     *focus = NoesisFocus::new().focus("Input");
                     *layout = NoesisLayout::new().margin("Float", [8.0, 0.0, 16.0, 0.0]);
                     *geom = NoesisGeometry::new().path("Trace", vec![[0.0, 0.0], [40.0, 20.0]]);
-                    // Keep the watches; add a DP write whose layout side-effect
-                    // (Input.ActualWidth: 20 -> 40) is observable.
+                    // keep watches; add a width write whose re-layout (ActualWidth 20->40) is observable
                     *dp = watcher().set_f32("Input", "Width", 40.0);
                 }
             }
@@ -171,7 +156,6 @@ fn write_only_bridges_apply_their_effect() {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
 
-    // Latest value seen for a watched (name, property) on our view.
     let latest = |name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
@@ -188,8 +172,7 @@ fn write_only_bridges_apply_their_effect() {
         Some(DpValue::Bool(true)),
         "focus: focusing the TextBox should set IsFocused=true (default false)",
     );
-    // Negative control: the focus bridge must touch ONLY its target — a
-    // "focus everything" or auto-focus regression would flip Other too.
+    // Negative control: focus bridge must touch only its target; "focus everything" or auto-focus regressions would flip Other.
     assert_eq!(
         latest("Other", "IsFocused"),
         Some(DpValue::Bool(false)),
@@ -201,9 +184,8 @@ fn write_only_bridges_apply_their_effect() {
         "layout: Margin [8,0,16,0] on a 64-wide stretchy element => ActualWidth 40 \
          (default 64)",
     );
-    // The Path is Left/Top-aligned, Stretch=None, so its empty default measures
-    // to 0 and the [0,0]->[40,20] polyline gives an x-extent of ~40 (+ stroke).
-    // A no-op apply reads 0; a stretched cell would read 64 — both fail this.
+    // Left/Top-aligned, Stretch=None: empty default measures 0; [0,0]->[40,20] gives ~40 (+ stroke).
+    // A no-op apply reads 0; a stretched cell reads 64. Both alternatives fail.
     match latest("Trace", "ActualWidth") {
         Some(DpValue::F32(w)) => assert!(
             (38.0..=43.0).contains(&w),

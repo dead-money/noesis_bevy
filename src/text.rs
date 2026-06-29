@@ -1,8 +1,8 @@
-//! Per-view `Text` bridge — write and observe the `Text` of named XAML
-//! elements (`TextBox` / `TextBlock`) on a single [`NoesisView`].
+//! Per-view `Text` bridge: write and observe the `Text` of named XAML
+//! elements (`TextBox` / `TextBlock`) on a single [`crate::NoesisView`].
 //!
 //! Add a [`NoesisText`] component to the view's camera entity. Its `set` map is
-//! the desired text per `x:Name` — applied to the view's elements whenever the
+//! the desired text per `x:Name`, applied to the view's elements whenever the
 //! component changes (Bevy change detection). Its `watch` list names elements
 //! whose `Text` to observe; changes surface as a [`NoesisTextChanged`] message
 //! carrying the originating `view` entity.
@@ -23,7 +23,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component, applies writes + polls the
-//! watch list against that view's live scene, and emits messages directly — no
+//! watch list against that view's live scene, and emits messages directly; no
 //! cross-world queues.
 
 use std::collections::HashMap;
@@ -46,6 +46,8 @@ pub struct NoesisText {
 }
 
 impl NoesisText {
+    /// Creates an empty bridge with no writes and no watched elements. Chain
+    /// [`with`](Self::with) and [`watching`](Self::watching) to populate it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

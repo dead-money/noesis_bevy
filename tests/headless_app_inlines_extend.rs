@@ -1,24 +1,10 @@
-//! Bevy-app-level integration test for the **extended** `NoesisInlines` bridge,
-//! exercised end-to-end through the real `NoesisPlugin` pipeline (headless,
-//! pipelined rendering on). It covers the three additions over the base bridge:
+//! Integration test for the extended `NoesisInlines` bridge: re-apply,
+//! `TextDecorations`, and `InlineUIContainer`, verified by reading back from
+//! live Noesis objects (not echoing the spec), so a no-op apply, stale
+//! collection, or dropped write fails.
 //!
-//!   * **re-apply** — a changed [`NoesisInlines`] component clears the live
-//!     `InlineCollection` and rebuilds it from the new spec, *replacing* the
-//!     previous content (the base bridge could only populate an empty
-//!     `TextBlock`). The test applies one tree, observes it landed, then applies
-//!     a different tree and asserts the live structure became the new one and is
-//!     no longer the old one.
-//!   * **`TextDecorations`** — [`InlineSpec::decorated`] builds a `Span` carrying
-//!     a decoration; the read-back re-reads it from the live Noesis `Span`.
-//!   * **`InlineUIContainer`** — [`InlineSpec::ui_container`] embeds a `UIElement`
-//!     parsed from XAML; the read-back proves the live `Child` is that element by
-//!     pointer identity (`hosted_ui`).
-//!
-//! Every assertion reads back from live Noesis objects, never echoing the spec,
-//! so a no-op apply, a stale (un-cleared) collection, or a dropped write fails.
-//!
-//! Font-free: only inline structure / decorations / hosted-child identity are
-//! read, so the scene builds with no font gate.
+//! Font-free: only inline structure, decorations, and hosted-child identity
+//! are asserted.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,12 +27,9 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <TextBlock x:Name="Body"/>
 </Grid>"##;
 
-// A font-free UIElement to embed (a glyph-bearing child would need a font, but
-// this scene builds with no font gate).
+// Rectangle, not a glyph element: avoids a font dependency.
 const CHILD_XAML: &str = r#"<Rectangle xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Width="10" Height="10" Fill="Red"/>"#;
 
-// Initial tree: a plain Run + a Strikethrough-decorated Span. Two top-level
-// inlines; flattened text "firstX".
 fn initial_tree() -> Vec<InlineSpec> {
     vec![
         InlineSpec::run("first"),
@@ -54,9 +37,6 @@ fn initial_tree() -> Vec<InlineSpec> {
     ]
 }
 
-// Replacement tree: a different Run, an InlineUIContainer hosting a Button, and
-// an OverLine-decorated Span. Three top-level inlines; flattened text "second Y"
-// (the container contributes no text).
 fn replacement_tree() -> Vec<InlineSpec> {
     vec![
         InlineSpec::run("second "),
@@ -106,8 +86,7 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
                         size: UVec2::new(320, 96),
                         ..default()
                     },
-                    // Starts empty (no-op); filled after the scene exists so the
-                    // first apply isn't lost to change-detection timing.
+                    // filled later; avoids losing the first apply to change-detection timing
                     NoesisInlines::new(),
                 ))
                 .id();
@@ -167,7 +146,6 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
         .map(|(_, _, v)| v)
         .collect();
 
-    // The initial apply must have been observed with exactly its content.
     let initial = body_reads
         .iter()
         .find(|r| r.text == "firstX")
@@ -181,7 +159,6 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
     );
     assert_eq!(initial.hosted_ui, 0, "initial tree hosts no UIElement");
 
-    // After re-apply, the latest read-back must be the REPLACEMENT tree.
     let latest = body_reads
         .last()
         .expect("at least one Body read-back observed");
@@ -207,8 +184,7 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
         "InlineUIContainer hosts the parsed Button by pointer identity",
     );
 
-    // Bluff-killer for re-apply: the final state is genuinely different from the
-    // initial one (clear-and-rebuild really happened, not an append or no-op).
+    // confirms clear-and-rebuild happened, not append or no-op
     assert_ne!(
         latest.text, "firstX",
         "re-apply must replace the initial content, not retain it",

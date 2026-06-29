@@ -1,34 +1,14 @@
-//! End-to-end test for the collection-view navigation bridge
-//! (`noesis_bevy::items`): drive a bound `ListBox`'s default
-//! `ICollectionView` current item and assert the exact `CurrentPosition` /
-//! `CurrentItem` the engine reports back.
+//! Tests `ItemsBinding` collection-view navigation: bind a typed i32 list to a
+//! `ListBox`, walk the cursor via [`ItemsBinding::navigate`], and assert
+//! `current_position()` / `current_item_value()` after each move.
 //!
-//! Drives Noesis directly (no GPU), like `headless_items_source.rs`: the
-//! bridge's [`ItemsBinding`] owns the `ObservableCollection` + the
-//! `CollectionViewSource`/`CollectionView` over it (the same default view the
-//! control synchronizes against once `set_items_source` shares the collection).
-//! We bind a typed list to a `ListBox`, then walk the cursor with
-//! [`ItemsBinding::navigate`] and assert `current_position()` /
-//! `current_item_value()` after each move.
+//! Bluff-resistance controls: the un-driven fresh view, the after-last cursor
+//! (position == count, value == None), and the before-first cursor (position == -1,
+//! value == None) each prove the read-back tracks real state. Typed i32 items ensure
+//! values round-trip as `I32(n)`, not `Str`/`None`.
 //!
-//! Bluff-resistance — the *un-driven default* and the off-the-end states are
-//! negative controls:
-//!
-//!   * before any move, the freshly populated view's current item is **not**
-//!     `Some(I32(30))` (the value we later land on), so a stuck read-back would
-//!     fail the post-move assertion;
-//!   * `MoveCurrentToNext` past the end yields `current_position == count` and
-//!     `current_item_value() == None` (cursor *after last*), while a valid
-//!     position yields `Some(exact typed value)` — proving the read-back tracks
-//!     real cursor state rather than always returning a value;
-//!   * the items round-trip as boxed `i32`s: a string list would unbox to
-//!     `Str`/`None`, never `I32(20)`.
-//!
-//! Sorting / filtering / grouping are a genuine Noesis SDK limitation (no
-//! programmatic `SortDescription`/`Filter` is exposed), so they are not tested
-//! here — see `noesis_runtime::collection_view`.
-//!
-//!   `cargo test -p noesis_bevy --test headless_collection_view -- --nocapture`
+//! Sorting, filtering, and grouping are not tested: the Noesis SDK exposes no
+//! programmatic `SortDescription` or `Filter`.
 
 use std::collections::HashMap;
 
@@ -63,8 +43,7 @@ fn collection_view_navigates_current_item() {
     noesis_runtime::init();
 
     {
-        // The bridge's per-element binding, exactly as the render systems own it.
-        // Typed i32 items so the read-back proves real boxing, not the Rust copy.
+        // i32 items: read-back must return I32(n), not Str/None.
         let mut binding = ItemsBinding::new();
         binding.set_typed(&[ItemValue::I32(10), ItemValue::I32(20), ItemValue::I32(30)]);
 
@@ -95,15 +74,13 @@ fn collection_view_navigates_current_item() {
             "ListBox did not see the 3 typed items",
         );
 
-        // Negative control: the un-driven view must not already sit on the value
-        // we later land on, or the post-move assertions would be vacuous.
+        // Negative control: if already at last item, post-move assertions are vacuous.
         assert_ne!(
             binding.current_item_value(),
             Some(ItemValue::I32(30)),
             "fresh view unexpectedly already at the last item",
         );
 
-        // MoveCurrentToFirst -> position 0, value 10.
         assert!(binding.navigate(CollectionViewOp::First));
         tick(&mut view, &mut t);
         assert_eq!(binding.current_position(), 0, "First -> position 0");
@@ -113,7 +90,6 @@ fn collection_view_navigates_current_item() {
             "First -> item 10",
         );
 
-        // MoveCurrentToNext -> position 1, value 20.
         assert!(binding.navigate(CollectionViewOp::Next));
         tick(&mut view, &mut t);
         assert_eq!(binding.current_position(), 1, "Next -> position 1");
@@ -123,7 +99,6 @@ fn collection_view_navigates_current_item() {
             "Next -> item 20",
         );
 
-        // MoveCurrentToLast -> position 2, value 30.
         assert!(binding.navigate(CollectionViewOp::Last));
         tick(&mut view, &mut t);
         assert_eq!(binding.current_position(), 2, "Last -> position 2");
@@ -133,8 +108,6 @@ fn collection_view_navigates_current_item() {
             "Last -> item 30",
         );
 
-        // MoveCurrentToNext past the end -> cursor after last: position == count,
-        // no current item. The off-the-end negative control.
         binding.navigate(CollectionViewOp::Next);
         tick(&mut view, &mut t);
         assert_eq!(
@@ -148,7 +121,6 @@ fn collection_view_navigates_current_item() {
             "after-last cursor has no current item",
         );
 
-        // MoveCurrentToPrevious -> back onto the last item.
         assert!(binding.navigate(CollectionViewOp::Previous));
         tick(&mut view, &mut t);
         assert_eq!(binding.current_position(), 2, "Previous -> position 2");
@@ -158,7 +130,6 @@ fn collection_view_navigates_current_item() {
             "Previous -> item 30",
         );
 
-        // MoveCurrentToPosition(0) -> jump to the first item by ordinal.
         assert!(binding.navigate(CollectionViewOp::To(0)));
         tick(&mut view, &mut t);
         assert_eq!(binding.current_position(), 0, "To(0) -> position 0");
@@ -168,7 +139,6 @@ fn collection_view_navigates_current_item() {
             "To(0) -> item 10",
         );
 
-        // MoveCurrentToPosition(-1) -> before first: another off-the-end control.
         binding.navigate(CollectionViewOp::To(-1));
         tick(&mut view, &mut t);
         assert_eq!(
@@ -182,7 +152,7 @@ fn collection_view_navigates_current_item() {
             "before-first cursor has no current item",
         );
 
-        // Teardown: drop the control's ItemsSource ref before the collection.
+        // Drop the control's ItemsSource ref before the collection.
         drop(list);
         view.deactivate();
         drop(view);

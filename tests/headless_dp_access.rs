@@ -1,14 +1,5 @@
-//! End-to-end test for the generic DP get/set bridge (`noesis_bevy::dp`,
-//! TODO §3): read and write arbitrary dependency properties by
-//! `(x:Name, property)`, with no binding involved.
-//!
-//! Drives Noesis directly (no GPU), like the runtime's `binding.rs`. It
-//! exercises the bridge's value↔element dispatch — [`DpValue::write_to`] and
-//! [`DpKind::read_from`] — which are exactly what the render-side write/poll
-//! systems call, across an `f32` (`Slider.Value`), a plain `bool`
-//! (`Slider.IsEnabled`), and an `i32` (`ComboBox.SelectedIndex`). The plugin's
-//! queue / watch / snapshot plumbing is covered by the unit tests in
-//! `src/dp.rs`.
+//! Headless test for the dp bridge: writes and reads back `f32`, `bool`, and
+//! `i32` dependency properties by `(x:Name, property)` with no binding or GPU.
 //!
 //!   `cargo test -p noesis_bevy --test headless_dp_access -- --nocapture`
 
@@ -65,7 +56,6 @@ fn dp_access_writes_and_reads_by_name_and_type() {
 
         let mut t = 0.0_f64;
 
-        // ── f32: Slider.Value (Noesis is a float engine) ─────────────────────
         let mut slider = content.find_name("Vol").expect("Vol missing");
         assert!(
             DpValue::F32(0.5).write_to(&mut slider, "Value"),
@@ -79,7 +69,7 @@ fn dp_access_writes_and_reads_by_name_and_type() {
             "read-back f32 Slider.Value mismatch",
         );
 
-        // ── bool: a plain Boolean DP (IsEnabled), unlike CheckBox.IsChecked ──
+        // IsEnabled is a plain bool DP; CheckBox.IsChecked is nullable and needs different handling.
         assert!(
             DpValue::Bool(false).write_to(&mut slider, "IsEnabled"),
             "write bool Slider.IsEnabled failed",
@@ -92,7 +82,6 @@ fn dp_access_writes_and_reads_by_name_and_type() {
             "read-back bool Slider.IsEnabled mismatch",
         );
 
-        // ── i32: ComboBox.SelectedIndex ──────────────────────────────────────
         let mut combo = content.find_name("Quality").expect("Quality missing");
         assert!(
             DpValue::I32(2).write_to(&mut combo, "SelectedIndex"),

@@ -1,21 +1,16 @@
-//! Custom XAML class registration (Phase 5.C) — Bevy wrapper.
+//! Register Rust-backed XAML classes (`<myns:Foo>`) with Noesis from Bevy systems.
 //!
-//! Lets you register Rust-backed `<myns:Foo>` types with Noesis from Bevy
-//! systems, with the resulting [`ClassRegistration`] managed by the Bevy
-//! resource lifecycle (dropped at app teardown, before
-//! [`noesis_runtime::shutdown`] runs via [`crate::NoesisShutdownGuard`]).
+//! The resulting [`ClassRegistration`] is owned by the Bevy resource lifecycle:
+//! it drops at app teardown, before [`noesis_runtime::shutdown`] runs via
+//! `NoesisShutdownGuard`.
 //!
-//! # Why this layer is intentionally thin
-//!
-//! The heavy lifting lives in [`noesis_runtime::classes`] — `ClassBuilder`,
-//! `ClassRegistration`, `Instance`, `PropertyChangeHandler`, `PropertyValue`,
-//! all re-exported here. The Bevy side adds:
-//!   * [`NoesisClassPlugin`] to declare the dependency explicitly and
-//!     install the registry resource.
-//!   * [`NoesisClassRegistry`] resource to own the live `ClassRegistration`
-//!     instances. Drop order matches resource cleanup, which Bevy 0.18 runs
-//!     before the !Send `NoesisShutdownGuard` Drop, so registrations clean
-//!     up before Noesis shuts down.
+//! The class machinery (`ClassBuilder`, `ClassRegistration`, `Instance`,
+//! `PropertyChangeHandler`, `PropertyValue`) lives in [`noesis_runtime::classes`]
+//! and is re-exported here. The Bevy side adds two pieces:
+//!   * [`NoesisClassPlugin`] installs the registry resource.
+//!   * [`NoesisClassRegistry`] owns the live `ClassRegistration` instances. Bevy
+//!     0.18 runs resource cleanup before the `!Send` `NoesisShutdownGuard` Drop,
+//!     so registrations release before Noesis shuts down.
 //!
 //! # Property-change threading
 //!
@@ -24,7 +19,7 @@
 //! mutations to Bevy ECS state should be queued and processed on the main
 //! thread. For purely-derived properties (e.g. `NineSlicer` computing
 //! viewbox rects from `SliceThickness`), the handler can do the math and
-//! call [`Instance::set_*`] inline — no main-world hop needed.
+//! call `Instance::set_*` inline, with no main-world hop.
 //!
 //! # Usage
 //!
@@ -68,14 +63,14 @@ pub use noesis_runtime::ffi::{ClassBase, PropType};
 /// Insert finished registrations from a `Startup` system; the resource
 /// drops them at app teardown, before [`noesis_runtime::shutdown`] runs.
 ///
-/// Registrations must be added BEFORE any XAML referencing them is loaded —
-/// in practice that means a `Startup` system ordered after [`crate::NoesisPlugin`]
-/// initialization (Bevy's default startup order suffices unless explicitly
-/// overridden).
-/// **Non-send** resource: [`ClassRegistration`] holds `!Send`/`!Sync` Noesis
-/// handles, so this is stored via `init_non_send_resource` and accessed through
-/// `NonSendMut`. Class registration is a main-thread, startup-time concern
-/// anyway (Noesis is thread-affine), so the non-send pinning is a natural fit.
+/// Add registrations BEFORE any XAML referencing them is loaded: a `Startup`
+/// system ordered after [`crate::NoesisPlugin`] initialization (Bevy's default
+/// startup order suffices unless you override it).
+///
+/// Non-send resource: [`ClassRegistration`] holds `!Send`/`!Sync` Noesis handles,
+/// so it is stored via `init_non_send_resource` and accessed through `NonSendMut`.
+/// Class registration is a main-thread, startup-time concern anyway, since Noesis
+/// is thread-affine.
 #[derive(Default)]
 pub struct NoesisClassRegistry {
     registrations: Vec<ClassRegistration>,
@@ -94,6 +89,7 @@ impl NoesisClassRegistry {
         self.registrations.len()
     }
 
+    /// Whether no classes are registered yet.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.registrations.is_empty()
