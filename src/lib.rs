@@ -16,6 +16,7 @@ pub mod binding;
 pub mod brushes;
 pub mod classes;
 pub mod commands;
+pub mod diagnostics;
 pub mod dp;
 pub mod events;
 pub mod focus;
@@ -55,6 +56,7 @@ pub use commands::{
     CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
     SharedCommandQueue,
 };
+pub use diagnostics::{NoesisDiagnostics, NoesisDiagnosticsPlugin};
 /// Derive macro for [`NoesisViewModel`] — bind a plain struct's fields by name.
 pub use dm_noesis_bevy_derive::NoesisViewModel;
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
@@ -182,6 +184,7 @@ impl Plugin for NoesisPlugin {
             animation::NoesisAnimationPlugin,
             typography::NoesisTypographyPlugin,
             binding::NoesisBindingPlugin,
+            diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
     }
 }
