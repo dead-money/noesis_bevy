@@ -12,14 +12,22 @@ The few things that genuinely need runtime/FFI work first are called out in §5.
 
 ## 1. Render device / shaders
 
-- **Effects: `SHADOW` (50) / `BLUR` (51).** Need the `shadow` texture co-bound with `image`. With
-  `downlevel_defaults` (4 bind groups, 0–3 full) `shadow` must share group(3) with `image`
-  (texture+sampler at bindings 2/3), plus a second pixel uniform for `cbuffer1_ps`
-  (group(1) binding(1)). If the live Bevy wgpu device reports `max_bind_groups > 4`, raising the
-  device limit is the simpler path. Until these land, drop-shadow / blur scenes panic.
-- **Effects: `CUSTOM_EFFECT` (52).** Needs user pixel-shader compilation via `Batch.pixelShader`.
-- **`SDF_LCD_SOLID`.** Subpixel text needs dual-source blending (`@blend_src(1)` fragment output).
-  Separate kickoff from `SDF_SOLID`.
+- **Effects: `SHADOW` (50) / `BLUR` (51).** *Done.* The `shadow` texture is co-bound with `image`
+  on group(3) (texture+sampler at bindings 2/3) and `cbuffer1_ps` rides group(1) binding(1), staying
+  within the 4-bind-group `downlevel_defaults` limit (the more portable of the two options in the
+  original plan). Covered by `tests/wgpu_shadow_blur.rs`.
+- **`SDF_LCD_SOLID`.** *Implemented* (shader + `SrcOver_Dual` blend + device plumbing), covered by
+  `tests/wgpu_sdf_lcd.rs` (gated on the wgpu `DUAL_SOURCE_BLENDING` feature). **Not yet enabled in
+  production**: `caps()` still reports `subpixel_rendering = false`, because flipping it makes Noesis
+  emit the whole `SDF_LCD_*` matrix on every device — which needs per-device `DUAL_SOURCE_BLENDING`
+  negotiation in the render app, and the SDK ships no LCD reference to validate the exact subpixel
+  coverage against. Remaining: (a) wire the device feature so the cap is set only when supported,
+  (b) extend the LCD matrix beyond `SDF_LCD_SOLID` (Linear/Radial/Pattern_*), (c) validate coverage
+  against real text.
+- **Effects: `CUSTOM_EFFECT` (52).** *Deferred.* Needs user pixel-shader compilation via
+  `Batch.pixelShader`. The shim doesn't expose the effect's pixel-shader source/bytecode yet, and
+  there's no WGSL transpile path for user HLSL — this needs runtime/FFI work first, then a per-effect
+  pipeline build keyed on `Batch.pixelShader`.
 
 ## 2. Compositing & perf
 

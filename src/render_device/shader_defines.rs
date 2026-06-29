@@ -218,6 +218,22 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SDF");
         }
 
+        // ─── EFFECT_SDF_LCD × PAINT_SOLID (subpixel text) ──────────────────
+        // Same vertex format as SDF_SOLID (PosColorTex1) and the same glyph
+        // atlas at group(2); the difference is a dual-source fragment output
+        // (`@blend_src(0)` / `@blend_src(1)`) carrying per-channel subpixel
+        // coverage, composited with the `SrcOver_Dual` blend mode. Requires
+        // the device's `DUAL_SOURCE_BLENDING` feature; Noesis only emits these
+        // when `DeviceCaps::subpixel_rendering` is set (see `caps()` notes).
+        n if n == Shader::SDF_LCD_SOLID.0 => {
+            d.insert("HAS_COLOR");
+            d.insert("HAS_UV1");
+            d.insert("HAS_ST1");
+            d.insert("HAS_PAINT_TEXTURE");
+            d.insert("PAINT_SOLID");
+            d.insert("EFFECT_SDF_LCD");
+        }
+
         // ─── EFFECT_OPACITY × paint variants ───────────────────────────────
         // GL ref Shader.140.frag EFFECT_OPACITY block:
         //   fragColor = texture(image, uv1) * (opacity_ * paint.a)
@@ -337,11 +353,41 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_UPSAMPLE");
         }
 
+        // ─── EFFECT_SHADOW × PAINT_SOLID (drop shadow) ─────────────────────
+        // GL ref FSHADER2(SHADOW, SOLID). Vertex format PosColorTex1Rect:
+        // pos, color, uv1 (layer sample coords), rect (clamp bounds). Reads
+        // both the layer `image` (group 3 binding 0/1) and the blurred
+        // `shadow` (group 3 binding 2/3), plus cbuffer1_ps (group 1 binding 1)
+        // for shadow color / offset / blend factor.
+        n if n == Shader::SHADOW.0 => {
+            d.insert("HAS_COLOR");
+            d.insert("HAS_UV1");
+            d.insert("HAS_RECT");
+            d.insert("HAS_IMAGE_TEXTURE");
+            d.insert("HAS_SHADOW_TEXTURE");
+            d.insert("HAS_CBUFFER1_PS");
+            d.insert("PAINT_SOLID");
+            d.insert("EFFECT_SHADOW");
+        }
+
+        // ─── EFFECT_BLUR × PAINT_SOLID (gaussian blur resolve) ─────────────
+        // GL ref FSHADER2(BLUR, SOLID). Vertex format PosColorTex1:
+        // pos, color, uv1. Crossfades the layer `image` with the blurred
+        // `shadow` by cbuffer1_ps[0].
+        n if n == Shader::BLUR.0 => {
+            d.insert("HAS_COLOR");
+            d.insert("HAS_UV1");
+            d.insert("HAS_IMAGE_TEXTURE");
+            d.insert("HAS_SHADOW_TEXTURE");
+            d.insert("HAS_CBUFFER1_PS");
+            d.insert("PAINT_SOLID");
+            d.insert("EFFECT_BLUR");
+        }
+
         other => panic!(
             "Shader({other}) not yet ported to noesis.wgsl. \
-             SHADOW (50) / BLUR (51) need a `shadow` texture co-bound with \
-             `image` plus the cbuffer1_ps uniform; CUSTOM_EFFECT (52) needs \
-             user pixel-shader compilation. Extend \
+             CUSTOM_EFFECT (52) needs user pixel-shader compilation via \
+             Batch.pixelShader. Extend \
              shader_defines::defines_for_shader and noesis.wgsl together."
         ),
     }
