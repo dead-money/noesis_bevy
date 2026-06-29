@@ -9,9 +9,6 @@ repository = "https://github.com/dead-money/noesis_bevy"
 license = "MIT"
 keywords = ["bevy", "noesis", "xaml", "derive", "macro"]
 categories = ["gui", "game-development"]
-# Not published yet. Published just before noesis_bevy (which depends on it); see
-# the parent RELEASING.md. Remove as the deliberate go-live step.
-publish = false
 
 [lib]
 proc-macro = true
