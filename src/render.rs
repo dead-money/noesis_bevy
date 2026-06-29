@@ -1680,6 +1680,54 @@ impl NoesisRenderState {
         }
     }
 
+    /// Parse view `entity`'s [`NoesisSvg`](crate::svg::NoesisSvg) sources and
+    /// size each named element to the parsed outline's measured bounds. Returns
+    /// `(name, bounds)` (`bounds` = `[x, y, width, height]`) for every source
+    /// that resolved to a live element and parsed — the read-back the SVG bridge
+    /// turns into [`NoesisSvgChanged`](crate::svg::NoesisSvgChanged). Missing
+    /// names and unparseable sources warn and are skipped (no entry).
+    pub(crate) fn apply_svg_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, String>,
+    ) -> Vec<(String, [f32; 4])> {
+        use noesis_runtime::svg::SvgPath;
+
+        let mut applied = Vec::new();
+        if desired.is_empty() {
+            return applied;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return applied;
+        };
+        let Some(content) = scene.view.content() else {
+            return applied;
+        };
+        for (name, source) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisSvg: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let Some(path) = SvgPath::parse(source) else {
+                warn!("NoesisSvg: source for {name:?} failed to parse; skipped");
+                continue;
+            };
+            let bounds = path.bounds();
+            // Size the element to the SVG's measured extent; a non-sizable target
+            // (no Width/Height DP) still reports its bounds but warns on the set.
+            if !element.set_width(bounds[2]) || !element.set_height(bounds[3]) {
+                warn!(
+                    "NoesisSvg: element {name:?} did not accept Width/Height; bounds still reported"
+                );
+            }
+            applied.push((name.clone(), bounds));
+        }
+        applied
+    }
+
     /// Move keyboard focus to `target` (an `x:Name`) in view `entity`, if set.
     /// Called when the view's `NoesisFocus` component changes.
     pub(crate) fn apply_focus_for(&mut self, entity: Entity, target: Option<&str>) {
