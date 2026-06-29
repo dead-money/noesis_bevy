@@ -1353,6 +1353,67 @@ impl NoesisRenderState {
         }
     }
 
+    /// Apply each `(x:Name → FontStyling)` desired by view `entity`'s
+    /// [`NoesisTypography`](crate::typography::NoesisTypography) component onto
+    /// that view's `TextElement`s. Each block's `Some` fields are written; `None`
+    /// fields are skipped. Missing names log a warning; a field a target doesn't
+    /// expose is logged at debug. No-op until the view's scene exists.
+    pub(crate) fn apply_typography_for(
+        &mut self,
+        entity: Entity,
+        set: &HashMap<String, crate::typography::FontStyling>,
+    ) {
+        if set.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, styling) in set {
+            if styling.is_empty() {
+                continue;
+            }
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTypography: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if let Some(size) = styling.font_size
+                && !noesis_runtime::typography::set_font_size(&element, size)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontSize");
+            }
+            if let Some(source) = &styling.font_family {
+                // A fresh FontFamily holds one +1 ref; set_font_family AddRefs on
+                // the Noesis side, so the handle can drop at scope end.
+                let family = noesis_runtime::typography::FontFamily::new(source);
+                if !noesis_runtime::typography::set_font_family(&element, &family) {
+                    debug!("NoesisTypography: {name:?} did not accept FontFamily");
+                }
+            }
+            if let Some(weight) = styling.font_weight
+                && !noesis_runtime::typography::set_font_weight(&element, weight)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontWeight");
+            }
+            if let Some(style) = styling.font_style
+                && !noesis_runtime::typography::set_font_style(&element, style)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontStyle");
+            }
+            if let Some(stretch) = styling.font_stretch
+                && !noesis_runtime::typography::set_font_stretch(&element, stretch)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontStretch");
+            }
+        }
+    }
+
     /// Apply pending geometry writes from
     /// [`crate::geometry::NoesisGeometryRequests`]. Mirrors
     /// [`Self::apply_text_writes`]: drains the queue, looks up each named

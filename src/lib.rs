@@ -30,6 +30,7 @@ pub mod render_device;
 pub mod routed_events;
 pub mod text;
 pub mod theme;
+pub mod typography;
 pub mod viewmodel;
 pub mod visibility;
 pub mod visual_state;
@@ -70,6 +71,9 @@ pub use routed_events::{
 };
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
+pub use typography::{
+    FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyPlugin,
+};
 pub use viewmodel::{
     NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,
     ViewModelChangeForwarder, ViewModelDef, VmValue,
@@ -153,6 +157,9 @@ impl Plugin for NoesisPlugin {
                 items::NoesisItemsPlugin,
                 dp::NoesisDpPlugin,
             ),
+            // Overflow group — the prior bridge tuple is at Bevy's 15-element
+            // `Plugins` impl limit, so new bridges land here.
+            (typography::NoesisTypographyPlugin,),
         ));
     }
 }
