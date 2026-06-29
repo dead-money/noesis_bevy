@@ -30,9 +30,6 @@ things that need runtime/FFI work first are in §4.
 - **More SDK example ports.** `controls_gallery` and `databinding` are in; port additional
   representative Noesis samples (`$NOESIS_SDK_DIR/Data/`) as in-crate `examples/` driven through the
   bridge components — visible demos that also exercise the bridges.
-- **Phase 5 corpus styling.** `assets/phase5/` Buttons set `Background`/`Foreground` without a
-  `ControlTemplate`, so even themed they show the magenta no-Template placeholder. Fix by `BasedOn`
-  a theme Style (the styles bridge now exists) or dropping the custom Style.
 
 ## 3. Platform
 

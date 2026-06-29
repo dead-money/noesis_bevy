@@ -52,7 +52,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 `xaml_viewer` is a runnable demo with scene cycling, theme loading, and a screenshot harness:
 
 ```sh
-# Cycle through assets/phase5/*.xaml. [/] navigate, R reload, S screenshot, P toggle PPAA.
+# Cycle through assets/viewer_samples/*.xaml. [/] navigate, R reload, S screenshot, P toggle PPAA.
 cargo run --example xaml_viewer
 
 # A single XAML file
@@ -64,7 +64,7 @@ NOESIS_VIEWER_THEME=DarkBlue \
 
 # A headless screenshot for CI
 NOESIS_VIEWER_EXIT_AFTER=1 NOESIS_SCREENSHOT=/tmp/out.png NOESIS_SCREENSHOT_FRAMES=120 \
-    cargo run --example xaml_viewer -- assets/phase5/08_radial.xaml
+    cargo run --example xaml_viewer -- assets/viewer_samples/08_radial.xaml
 ```
 
 Environment variables: `NOESIS_VIEWER_PATH`, `NOESIS_VIEWER_SIZE` (`WxH`), `NOESIS_VIEWER_THEME`, `NOESIS_VIEWER_IMAGES` (comma-separated asset paths to pre-load), `NOESIS_SCREENSHOT`, `NOESIS_SCREENSHOT_FRAMES`, `NOESIS_VIEWER_EXIT_AFTER`.

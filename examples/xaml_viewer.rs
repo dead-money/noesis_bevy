@@ -21,17 +21,17 @@
 //!
 //! ```bash
 //! # Single file
-//! cargo run -p dm_noesis_bevy --example xaml_viewer assets/phase5/01_button_hover.xaml
+//! cargo run -p dm_noesis_bevy --example xaml_viewer assets/viewer_samples/01_button_hover.xaml
 //!
 //! # Directory — cycle with [/]
-//! cargo run -p dm_noesis_bevy --example xaml_viewer assets/phase5
+//! cargo run -p dm_noesis_bevy --example xaml_viewer assets/viewer_samples
 //!
 //! # Point at the SDK's Data/ (symlink assets/Data -> $NOESIS_SDK_DIR/Data first)
 //! cargo run -p dm_noesis_bevy --example xaml_viewer assets/Data
 //!
 //! # Headless screenshot for CI / visual eval
 //! NOESIS_VIEWER_EXIT_AFTER=1 NOESIS_SCREENSHOT=out.png \
-//!   cargo run -p dm_noesis_bevy --example xaml_viewer assets/phase5/01_button_hover.xaml
+//!   cargo run -p dm_noesis_bevy --example xaml_viewer assets/viewer_samples/01_button_hover.xaml
 //! ```
 //!
 //! Environment:
@@ -89,7 +89,7 @@ fn main() {
     let arg_path = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("NOESIS_VIEWER_PATH").ok());
-    let arg_path = arg_path.as_deref().unwrap_or("assets/phase5");
+    let arg_path = arg_path.as_deref().unwrap_or("assets/viewer_samples");
     let scenes = collect_scenes(arg_path);
 
     if scenes.is_empty() {
