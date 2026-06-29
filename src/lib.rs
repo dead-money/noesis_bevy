@@ -34,6 +34,7 @@ pub mod markup;
 pub mod plain_vm;
 pub mod render;
 pub mod render_device;
+pub mod resources;
 pub mod routed_events;
 pub mod shapes;
 pub mod styles;
@@ -100,6 +101,9 @@ pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
+pub use resources::{
+    NoesisResources, NoesisResourcesInstalled, NoesisResourcesPlugin, ResourceEntry,
+};
 pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
@@ -223,6 +227,10 @@ impl Plugin for NoesisPlugin {
             diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
         // Bridge group C — appended past group B's 15-element `Plugins` limit.
-        app.add_plugins((styles::NoesisStylesPlugin, shapes::NoesisShapesPlugin));
+        app.add_plugins((
+            styles::NoesisStylesPlugin,
+            shapes::NoesisShapesPlugin,
+            resources::NoesisResourcesPlugin,
+        ));
     }
 }

@@ -2838,6 +2838,84 @@ impl NoesisRenderState {
         }
     }
 
+    /// Build a `ResourceDictionary` from `entries` (code-built brushes + boxed
+    /// scalar values) plus any parsed `merged_xaml` fragments, and install it as
+    /// the process-global application resources (`GUI::SetApplicationResources`).
+    /// Noesis takes its own reference, so the Rust dictionary handle drops right
+    /// after. Returns the declared `entries` keys confirmed resolvable through
+    /// the live application resources (sorted) — the read-back the
+    /// [`NoesisResources`](crate::resources::NoesisResources) bridge surfaces.
+    /// Called from the `Sync` phase (before scene build) when the resource
+    /// changes, so a scene's `{StaticResource}` can resolve at parse time.
+    pub(crate) fn install_app_resources_from(
+        &mut self,
+        entries: &HashMap<String, crate::resources::ResourceEntry>,
+        merged_xaml: &[String],
+    ) -> Vec<String> {
+        use crate::brushes::BrushSpec;
+        use crate::resources::ResourceEntry;
+        use noesis_runtime::brushes::{GradientStop, LinearGradientBrush, SolidColorBrush};
+        use noesis_runtime::resources::{
+            ResourceDictionary, application_resources_contains, set_application_resources,
+        };
+
+        let mut dict = ResourceDictionary::new();
+
+        // Merge parsed dictionaries first; own entries added afterwards win on a
+        // key collision (base entries take precedence over merged, per WPF).
+        for xaml in merged_xaml {
+            match ResourceDictionary::parse(xaml) {
+                Some(merged) => {
+                    if !dict.add_merged(&merged) {
+                        warn!("NoesisResources: failed to merge a parsed ResourceDictionary");
+                    }
+                }
+                None => warn!(
+                    "NoesisResources: a merged_xaml fragment did not parse as a <ResourceDictionary>",
+                ),
+            }
+        }
+
+        for (key, entry) in entries {
+            let ok = match entry {
+                ResourceEntry::Value(value) => dict.add_boxed(key, &value.to_boxed()),
+                ResourceEntry::Brush(BrushSpec::Solid(rgba)) => {
+                    dict.add_brush(key, &SolidColorBrush::new(*rgba))
+                }
+                ResourceEntry::Brush(BrushSpec::LinearGradient { start, end, stops }) => {
+                    let mut brush = LinearGradientBrush::new();
+                    brush.set_start_point(start[0], start[1]);
+                    brush.set_end_point(end[0], end[1]);
+                    for stop in stops {
+                        brush.add_stop(GradientStop::new(stop.offset, stop.color));
+                    }
+                    dict.add_brush(key, &brush)
+                }
+            };
+            if !ok {
+                warn!("NoesisResources: failed to add resource {key:?}");
+            }
+        }
+
+        set_application_resources(&dict);
+
+        // Confirm against the live global (now our dict) so the read-back proves
+        // the install took, not just that we built the spec.
+        let mut present: Vec<String> = entries
+            .keys()
+            .filter(|key| application_resources_contains(key))
+            .cloned()
+            .collect();
+        present.sort();
+        info!(
+            "Installed Noesis application resources: {} entries, {} merged dicts, {} present",
+            entries.len(),
+            merged_xaml.len(),
+            present.len(),
+        );
+        present
+    }
+
     /// Poll view `entity`'s named elements' live `RenderTransform`s, returning
     /// `(name, spec)` for each that changed since last frame (deduped against the
     /// per-scene snapshot). A name only reports while the element's current
