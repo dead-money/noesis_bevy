@@ -102,7 +102,9 @@ pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
     RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
 };
-pub use styles::{NoesisStyles, NoesisStylesPlugin, PropertyTrigger, StyleSpec};
+pub use styles::{
+    DataTriggerSpec, MultiTriggerSpec, NoesisStyles, NoesisStylesPlugin, PropertyTrigger, StyleSpec,
+};
 pub use svg::{NoesisSvg, NoesisSvgChanged, NoesisSvgPlugin};
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
