@@ -45,14 +45,17 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice, RenderQueue},
     view::ViewTarget,
 };
+use noesis_runtime::animation::{Animation, DoubleAnimation, Timeline};
 use noesis_runtime::commands::Command;
 use noesis_runtime::events::{
     ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, subscribe_click,
     subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
+use noesis_runtime::transforms::CompositeTransform;
 use noesis_runtime::view::{FrameworkElement, Key, View};
 
+use crate::binding::{BindingEntry, BuiltBinding};
 use crate::commands::{CommandEntry, CommandsDef, SharedCommandQueue};
 use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
@@ -361,6 +364,13 @@ pub(crate) struct NoesisRenderState {
     /// before the registered device. Keyed by view entity. See
     /// [`crate::commands`].
     command_hosts: HashMap<Entity, CommandEntry>,
+    /// Rust-owned converted/multi bindings keyed by `(view entity, x:Name,
+    /// property)`. Each owns the built `Binding`/`MultiBinding` + its
+    /// `Converter`/`MultiConverter`, attached to a named element's DP. Same
+    /// rebuild/teardown rules as [`Self::items_sources`] (re-bound by the apply
+    /// pass after a scene rebuild); released in [`Drop`] before the registered
+    /// device. See [`crate::binding`].
+    binding_entries: HashMap<(Entity, String, String), BindingEntry>,
 }
 
 struct SceneInstance {
@@ -411,6 +421,27 @@ struct SceneInstance {
     /// [`Self::text_snapshots`] but for arbitrary typed DPs; lives in the
     /// scene so it resets on rebuild.
     dp_snapshots: HashMap<(String, String), crate::dp::DpValue>,
+    /// `CompositeTransform` handles assigned as elements' `RenderTransform` by
+    /// [`crate::transforms::NoesisTransform`], keyed by `x:Name`. Each is held at
+    /// +1 so it stays alive while it is the element's live transform; it is the
+    /// *same* object Noesis stores (assignment `AddRef`'s our pointer, it does not
+    /// clone), so reading it back reflects the element's true transform. Drops
+    /// with the scene; reassigning a name replaces (and releases) the old one.
+    transform_handles: HashMap<String, CompositeTransform>,
+    /// Last [`TransformSpec`](crate::transforms::TransformSpec) snapshot per
+    /// `x:Name`, to dedupe [`crate::transforms::NoesisTransformChanged`]
+    /// emissions. Resets on scene rebuild.
+    transform_snapshots: HashMap<String, crate::transforms::TransformSpec>,
+    /// Last brush read back per `(x:Name, property)` painted by
+    /// [`crate::brushes::NoesisBrushes`]. Dedupes [`crate::brushes::NoesisBrushChanged`]
+    /// emissions; resets on scene rebuild.
+    brush_snapshots: HashMap<(String, String), crate::brushes::BrushReadback>,
+    /// Last typed font value per `(x:Name, field)` watched by
+    /// [`crate::typography::NoesisTypography`]. Dedupes `NoesisTypographyChanged`
+    /// emissions; resets on scene rebuild. Distinct from [`Self::dp_snapshots`]
+    /// because enum font DPs need the typed getters, not the generic `i32` read.
+    typo_snapshots:
+        HashMap<(String, crate::typography::TypographyField), crate::typography::TypographyValue>,
     /// Installed `KeyBinding`s keyed by `(x:Name, key ordinal, modifier
     /// bits)`, synced against [`crate::focus_input::NoesisFocusControl::bindings`].
     /// Drops with the scene; cannot be detached mid-life (no Noesis remove API).
@@ -491,6 +522,7 @@ impl NoesisRenderState {
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
+            binding_entries: HashMap::new(),
         }
     }
 
@@ -701,6 +733,60 @@ impl NoesisRenderState {
                 binding.mark_bound(&uri);
             } else {
                 warn!("NoesisItems: element {name:?} is not an ItemsControl; skipped");
+            }
+        }
+    }
+
+    /// Whether view `entity` already has a built binding for `(element,
+    /// property)`. The bridge builds each target's runtime binding once.
+    pub(crate) fn has_binding(&self, entity: Entity, element: &str, property: &str) -> bool {
+        self.binding_entries
+            .contains_key(&(entity, element.to_owned(), property.to_owned()))
+    }
+
+    /// Store a freshly built binding for view `entity`'s `(element, property)`
+    /// target. Bound to its element by the next [`Self::bind_pending_for`] pass.
+    pub(crate) fn insert_binding(
+        &mut self,
+        entity: Entity,
+        element: String,
+        property: String,
+        built: BuiltBinding,
+    ) {
+        self.binding_entries
+            .insert((entity, element, property), BindingEntry::new(built));
+    }
+
+    /// Attach any of view `entity`'s not-yet-bound bindings onto their named
+    /// element's DP. No-op until the view (and named element) exists; retries each
+    /// frame, and re-attaches after a scene rebuild. Mirrors
+    /// [`Self::apply_items_for`]'s bind pass.
+    pub(crate) fn bind_pending_for(&mut self, entity: Entity) {
+        let Some(scene) = self.scenes.get(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let uri = scene.built_for_uri.clone();
+        for ((ent, element, property), entry) in &mut self.binding_entries {
+            if *ent != entity || !entry.needs_bind(&uri) {
+                continue;
+            }
+            let Some(target) = content.find_name(element) else {
+                warn!(
+                    "NoesisBinding: x:Name {:?} not found in scene {:?}",
+                    element, scene.built_for_uri,
+                );
+                continue;
+            };
+            if entry.bind_onto(&target, property) {
+                entry.mark_bound(&uri);
+            } else {
+                warn!(
+                    "NoesisBinding: binding {element:?}.{property:?} failed \
+                     (unknown property or type mismatch)",
+                );
             }
         }
     }
@@ -1005,6 +1091,10 @@ impl NoesisRenderState {
                 event_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
+                transform_handles: HashMap::new(),
+                transform_snapshots: HashMap::new(),
+                brush_snapshots: HashMap::new(),
+                typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
             },
@@ -1099,6 +1189,54 @@ impl NoesisRenderState {
                     "NoesisVisualState: GoToState({state:?}) failed for {name:?} \
                      in scene {:?} (not a templated control, or unknown state)",
                     scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Begin view `entity`'s requested code-built animations
+    /// (`x:Name → AnimationSpec`) via `Animation::begin_on` against each named
+    /// element's scalar dependency property. No-op until the scene exists;
+    /// missing names warn, and a failed begin (unknown / non-`float` property,
+    /// or a disconnected target) warns too. Re-begin replaces any clock already
+    /// running on the same property (`SnapshotAndReplace`).
+    pub(crate) fn begin_animations_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::animation::AnimationSpec>,
+    ) {
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, spec) in desired {
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisAnimation: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let mut anim = DoubleAnimation::new();
+            // From/To/Duration return false only on a type/read-only mismatch,
+            // impossible on a freshly-created DoubleAnimation — ignore them.
+            let _ = anim.set_from(spec.from);
+            let _ = anim.set_to(Some(spec.to));
+            let _ = anim.set_duration_secs(spec.duration_secs);
+            if !anim.begin_on(
+                &element,
+                &spec.property,
+                noesis_runtime::animation::HandoffBehavior::SnapshotAndReplace,
+            ) {
+                warn!(
+                    "NoesisAnimation: begin_on({:?}) failed for {name:?} in scene {:?} \
+                     (unknown / non-float property, or disconnected target)",
+                    spec.property, scene.built_for_uri,
                 );
             }
         }
@@ -1351,6 +1489,127 @@ impl NoesisRenderState {
             // NoesisTextChanged for a write we just made ourselves.
             scene.text_snapshots.insert(name.clone(), text.clone());
         }
+    }
+
+    /// Apply each `(x:Name → FontStyling)` desired by view `entity`'s
+    /// [`NoesisTypography`](crate::typography::NoesisTypography) component onto
+    /// that view's `TextElement`s. Each block's `Some` fields are written; `None`
+    /// fields are skipped. Missing names log a warning; a field a target doesn't
+    /// expose is logged at debug. No-op until the view's scene exists.
+    pub(crate) fn apply_typography_for(
+        &mut self,
+        entity: Entity,
+        set: &HashMap<String, crate::typography::FontStyling>,
+    ) {
+        if set.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, styling) in set {
+            if styling.is_empty() {
+                continue;
+            }
+            let Some(element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTypography: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            if let Some(size) = styling.font_size
+                && !noesis_runtime::typography::set_font_size(&element, size)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontSize");
+            }
+            if let Some(source) = &styling.font_family {
+                // A fresh FontFamily holds one +1 ref; set_font_family AddRefs on
+                // the Noesis side, so the handle can drop at scope end.
+                let family = noesis_runtime::typography::FontFamily::new(source);
+                if !noesis_runtime::typography::set_font_family(&element, &family) {
+                    debug!("NoesisTypography: {name:?} did not accept FontFamily");
+                }
+            }
+            if let Some(weight) = styling.font_weight
+                && !noesis_runtime::typography::set_font_weight(&element, weight)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontWeight");
+            }
+            if let Some(style) = styling.font_style
+                && !noesis_runtime::typography::set_font_style(&element, style)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontStyle");
+            }
+            if let Some(stretch) = styling.font_stretch
+                && !noesis_runtime::typography::set_font_stretch(&element, stretch)
+            {
+                debug!("NoesisTypography: {name:?} did not accept FontStretch");
+            }
+        }
+    }
+
+    /// Poll view `entity`'s watched typed font properties, returning
+    /// `(x:Name, value)` for each that changed since last frame (deduped against
+    /// the per-scene snapshot). First poll after a watch is added always reports.
+    ///
+    /// Uses the runtime's *typed* font getters rather than the generic DP read
+    /// path: `FontWeight`/`FontStyle`/`FontStretch` are enum DPs and don't
+    /// round-trip through `get_i32`.
+    pub(crate) fn poll_typography_reads_for(
+        &mut self,
+        entity: Entity,
+        watched: &[crate::typography::TypographyWatch],
+    ) -> Vec<(String, crate::typography::TypographyValue)> {
+        use crate::typography::{TypographyField, TypographyValue};
+        use noesis_runtime::typography as ty;
+
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene.typo_snapshots.retain(|(name, field), _| {
+            watched.iter().any(|w| &w.name == name && w.field == *field)
+        });
+        if watched.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for watch in watched {
+            let Some(element) = content.find_name(&watch.name) else {
+                continue;
+            };
+            let current = match watch.field {
+                TypographyField::FontSize => ty::font_size(&element).map(TypographyValue::FontSize),
+                TypographyField::FontFamily => {
+                    ty::get_font_family(&element).map(|f| TypographyValue::FontFamily(f.source()))
+                }
+                TypographyField::FontWeight => {
+                    ty::font_weight(&element).map(TypographyValue::FontWeight)
+                }
+                TypographyField::FontStyle => {
+                    ty::font_style(&element).map(TypographyValue::FontStyle)
+                }
+                TypographyField::FontStretch => {
+                    ty::font_stretch(&element).map(TypographyValue::FontStretch)
+                }
+            };
+            let Some(current) = current else {
+                continue;
+            };
+            let key = (watch.name.clone(), watch.field);
+            if scene.typo_snapshots.get(&key) == Some(&current) {
+                continue;
+            }
+            scene.typo_snapshots.insert(key, current.clone());
+            changed.push((watch.name.clone(), current));
+        }
+        changed
     }
 
     /// Apply pending geometry writes from
@@ -1720,6 +1979,231 @@ impl NoesisRenderState {
         changed
     }
 
+    /// Assign view `entity`'s desired `RenderTransform`s (`x:Name → spec`). Each
+    /// spec becomes a `CompositeTransform` held at +1 in
+    /// [`Self::transform_handles`] (the same object Noesis stores), so the poll
+    /// can read it back. Missing names / non-`UIElement` targets warn.
+    pub(crate) fn apply_transforms_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::transforms::TransformSpec>,
+    ) {
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        // Drop handles for names no longer requested; releasing each handle's +1
+        // (Noesis still holds its own ref until the DP is overwritten / cleared).
+        scene
+            .transform_handles
+            .retain(|k, _| desired.contains_key(k));
+        if desired.is_empty() {
+            return;
+        }
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        for (name, spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisTransform: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let transform = CompositeTransform::new(spec.to_fields());
+            if element.set_render_transform(&transform) {
+                scene.transform_handles.insert(name.clone(), transform);
+            } else {
+                warn!(
+                    "NoesisTransform: {name:?} has no RenderTransform (not a UIElement?) \
+                     in scene {:?}",
+                    scene.built_for_uri,
+                );
+            }
+        }
+    }
+
+    /// Paint view `entity`'s elements with the desired code-built brushes
+    /// (`(x:Name, target) → spec`). Each spec is built into a fresh Noesis brush
+    /// and assigned through the element's typed brush sugar; Noesis takes its own
+    /// reference, so the Rust handle is dropped right after. Missing names warn;
+    /// a target the element lacks (e.g. `Fill` on a `Border`) warns too.
+    /// Called when the view's `NoesisBrushes` component changes.
+    pub(crate) fn apply_brushes_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<(String, crate::brushes::BrushTarget), crate::brushes::BrushSpec>,
+    ) {
+        use crate::brushes::{BrushSpec, BrushTarget};
+        use noesis_runtime::brushes::{GradientStop, LinearGradientBrush, SolidColorBrush};
+        use noesis_runtime::view::FrameworkElement;
+
+        if desired.is_empty() {
+            return;
+        }
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+
+        // Assign any `Brush` to `target`'s DP via the element's safe sugar.
+        fn assign(
+            target: BrushTarget,
+            el: &mut FrameworkElement,
+            brush: &impl noesis_runtime::brushes::Brush,
+        ) -> bool {
+            match target {
+                BrushTarget::Background => el.set_background(brush),
+                BrushTarget::Foreground => el.set_foreground(brush),
+                BrushTarget::Fill => el.set_fill(brush),
+                BrushTarget::Stroke => el.set_stroke(brush),
+            }
+        }
+
+        for ((name, target), spec) in desired {
+            let Some(mut element) = content.find_name(name) else {
+                warn!(
+                    "NoesisBrushes: x:Name {:?} not found in scene {:?}",
+                    name, scene.built_for_uri,
+                );
+                continue;
+            };
+            let ok = match spec {
+                BrushSpec::Solid(rgba) => {
+                    let brush = SolidColorBrush::new(*rgba);
+                    assign(*target, &mut element, &brush)
+                }
+                BrushSpec::LinearGradient { start, end, stops } => {
+                    let mut brush = LinearGradientBrush::new();
+                    brush.set_start_point(start[0], start[1]);
+                    brush.set_end_point(end[0], end[1]);
+                    for stop in stops {
+                        brush.add_stop(GradientStop::new(stop.offset, stop.color));
+                    }
+                    assign(*target, &mut element, &brush)
+                }
+            };
+            if !ok {
+                warn!(
+                    "NoesisBrushes: assigning {:?} to {name:?} failed (no such property on this element type)",
+                    target.property(),
+                );
+            }
+        }
+    }
+
+    /// Poll view `entity`'s named elements' live `RenderTransform`s, returning
+    /// `(name, spec)` for each that changed since last frame (deduped against the
+    /// per-scene snapshot). A name only reports while the element's current
+    /// `RenderTransform` is the exact object we assigned (pointer identity), so
+    /// the read-back is element-sourced proof the assignment took — not an echo
+    /// of the component. First poll after assignment always reports.
+    pub(crate) fn poll_transforms_for(
+        &mut self,
+        entity: Entity,
+        names: &[&str],
+    ) -> Vec<(String, crate::transforms::TransformSpec)> {
+        use crate::transforms::TransformSpec;
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .transform_snapshots
+            .retain(|name, _| names.contains(&name.as_str()));
+        if names.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for &name in names {
+            let Some(handle) = scene.transform_handles.get(name) else {
+                continue;
+            };
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            // Read the element's live RenderTransform; only trust it when it is
+            // the very object we assigned (Noesis stores our pointer, no clone).
+            let Some(live) = element.render_transform() else {
+                continue;
+            };
+            if live.raw() != handle.raw() {
+                continue;
+            }
+            let current = TransformSpec::from_fields(handle.get());
+            if scene.transform_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene.transform_snapshots.insert(name.to_string(), current);
+            changed.push((name.to_string(), current));
+        }
+        changed
+    }
+
+    /// Poll view `entity`'s painted targets, returning `(name, target, readback)`
+    /// for each whose live brush changed since last frame (deduped against the
+    /// per-scene snapshot). A `SolidColorBrush` reports its exact color
+    /// ([`BrushReadback::Solid`](crate::brushes::BrushReadback::Solid)); any other
+    /// live brush (e.g. a gradient) reports
+    /// [`BrushReadback::NonSolid`](crate::brushes::BrushReadback::NonSolid); a
+    /// target with no brush at all (unpainted / failed assign) reports nothing.
+    /// The read-back proves the assignment landed; first poll after a target is
+    /// painted always reports.
+    pub(crate) fn poll_brush_reads_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<(String, crate::brushes::BrushTarget), crate::brushes::BrushSpec>,
+    ) -> Vec<(
+        String,
+        crate::brushes::BrushTarget,
+        crate::brushes::BrushReadback,
+    )> {
+        use crate::brushes::BrushReadback;
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene.brush_snapshots.retain(|(name, property), _| {
+            desired
+                .keys()
+                .any(|(n, t)| n == name && t.property() == property)
+        });
+        if desired.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for (name, target) in desired.keys() {
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            let property = target.property();
+            // Solid: read the exact color. Otherwise, if a brush is present at
+            // all (non-null DP), it's a non-solid brush (e.g. a gradient) — the
+            // only gradient signal the unsafe-free crate can read. No brush ⇒
+            // nothing landed ⇒ stay silent.
+            let current = if let Some(color) = element.solid_brush_color(property) {
+                BrushReadback::Solid(color)
+            } else if element.get_component(property).is_some() {
+                BrushReadback::NonSolid
+            } else {
+                continue;
+            };
+            let key = (name.clone(), property.to_string());
+            if scene.brush_snapshots.get(&key) == Some(&current) {
+                continue;
+            }
+            scene.brush_snapshots.insert(key, current);
+            changed.push((name.clone(), *target, current));
+        }
+        changed
+    }
+
     /// Reapply per-frame tweakables that don't require a scene rebuild (the PPAA
     /// flag and the DPI scale). Called every frame before Noesis is driven.
     /// Cheap: a compare per knob; each FFI call only fires on change.
@@ -2041,6 +2525,11 @@ impl NoesisRenderState {
         if let Some(entry) = self.command_hosts.get_mut(&entity) {
             entry.reset_attach();
         }
+        for ((ent, _, _), entry) in &mut self.binding_entries {
+            if *ent == entity {
+                entry.reset_bind();
+            }
+        }
         let Some(mut scene) = self.scenes.remove(&entity) else {
             return;
         };
@@ -2080,6 +2569,7 @@ impl Drop for NoesisRenderState {
         self.items_sources.clear();
         self.plain_vms.clear();
         self.command_hosts.clear();
+        self.binding_entries.clear();
         self.teardown_bake_rig();
         drop(self.registered_device.take());
         drop(self.registered_provider.take());

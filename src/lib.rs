@@ -10,7 +10,10 @@
 
 use bevy::prelude::*;
 
+pub mod animation;
 pub mod bake;
+pub mod binding;
+pub mod brushes;
 pub mod classes;
 pub mod commands;
 pub mod dp;
@@ -30,12 +33,23 @@ pub mod render_device;
 pub mod routed_events;
 pub mod text;
 pub mod theme;
+pub mod transforms;
+pub mod typography;
 pub mod viewmodel;
 pub mod visibility;
 pub mod visual_state;
 pub mod xaml;
 
+pub use animation::{AnimationSpec, NoesisAnimation, NoesisAnimationPlugin};
 pub use bake::{NoesisLabelBaker, NoesisLabelBakerPlugin};
+pub use binding::{
+    BindingMode, ConvertArg, Converted, MultiValueConverter, NoesisBinding, NoesisBindingPlugin,
+    SourceSpec, ValueConverter,
+};
+pub use brushes::{
+    BrushReadback, BrushSpec, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes,
+    NoesisBrushesPlugin,
+};
 pub use classes::{NoesisClassPlugin, NoesisClassRegistry};
 pub use commands::{
     CommandForwarder, CommandsDef, NoesisCommandInvoked, NoesisCommands, NoesisCommandsPlugin,
@@ -70,6 +84,13 @@ pub use routed_events::{
 };
 pub use text::{NoesisText, NoesisTextChanged, NoesisTextPlugin};
 pub use theme::NoesisDefaultThemePlugin;
+pub use transforms::{
+    NoesisTransform, NoesisTransformChanged, NoesisTransformPlugin, TransformSpec,
+};
+pub use typography::{
+    FontStretch, FontStyle, FontStyling, FontWeight, NoesisTypography, NoesisTypographyChanged,
+    NoesisTypographyPlugin, TypographyField, TypographyValue, TypographyWatch,
+};
 pub use viewmodel::{
     NoesisViewModelChanged, NoesisViewModelPlugin, NoesisVm, SharedVmChangedQueue,
     ViewModelChangeForwarder, ViewModelDef, VmValue,
@@ -125,34 +146,42 @@ impl Plugin for NoesisPlugin {
         // + input forwarder. Safe to add unconditionally —
         // NoesisRenderPlugin no-ops if RenderApp isn't present (e.g. a
         // headless-test setup without a display).
-        // Grouped into two nested tuples: asset/render/input infrastructure, and
-        // the per-feature Bevy bridges. The nesting also keeps each tuple under
-        // Bevy's 15-element `Plugins` impl limit.
+        // Grouped into tuples kept under Bevy's 15-element `Plugins` impl limit:
+        // asset/render/input infrastructure, then the per-feature Bevy bridges
+        // split into two groups so new bridges have headroom (each new bridge
+        // appends to `bridge_group_b`).
         app.add_plugins((
-            (
-                xaml::XamlAssetPlugin,
-                font::FontAssetPlugin,
-                image::ImageAssetPlugin,
-                render::NoesisRenderPlugin,
-                input::NoesisInputPlugin,
-            ),
-            (
-                events::NoesisEventsPlugin,
-                routed_events::NoesisRoutedEventsPlugin,
-                classes::NoesisClassPlugin,
-                markup::NoesisMarkupExtensionPlugin,
-                visibility::NoesisVisibilityPlugin,
-                layout::NoesisLayoutPlugin,
-                text::NoesisTextPlugin,
-                geometry::NoesisGeometryPlugin,
-                focus::NoesisFocusPlugin,
-                visual_state::NoesisVisualStatePlugin,
-                focus_input::NoesisFocusControlPlugin,
-                viewmodel::NoesisViewModelPlugin,
-                commands::NoesisCommandsPlugin,
-                items::NoesisItemsPlugin,
-                dp::NoesisDpPlugin,
-            ),
+            xaml::XamlAssetPlugin,
+            font::FontAssetPlugin,
+            image::ImageAssetPlugin,
+            render::NoesisRenderPlugin,
+            input::NoesisInputPlugin,
+        ));
+        // Bridge group A — the foundational per-element bridges.
+        app.add_plugins((
+            events::NoesisEventsPlugin,
+            routed_events::NoesisRoutedEventsPlugin,
+            classes::NoesisClassPlugin,
+            markup::NoesisMarkupExtensionPlugin,
+            visibility::NoesisVisibilityPlugin,
+            layout::NoesisLayoutPlugin,
+            text::NoesisTextPlugin,
+            geometry::NoesisGeometryPlugin,
+        ));
+        // Bridge group B — interaction + data bridges. New bridges append here.
+        app.add_plugins((
+            focus::NoesisFocusPlugin,
+            visual_state::NoesisVisualStatePlugin,
+            focus_input::NoesisFocusControlPlugin,
+            viewmodel::NoesisViewModelPlugin,
+            commands::NoesisCommandsPlugin,
+            items::NoesisItemsPlugin,
+            dp::NoesisDpPlugin,
+            transforms::NoesisTransformPlugin,
+            brushes::NoesisBrushesPlugin,
+            animation::NoesisAnimationPlugin,
+            typography::NoesisTypographyPlugin,
+            binding::NoesisBindingPlugin,
         ));
     }
 }

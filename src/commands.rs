@@ -69,7 +69,7 @@ use bevy::prelude::*;
 use noesis_runtime::classes::{
     ClassBuilder, ClassInstance, ClassRegistration, Instance, PropertyChangeHandler, PropertyValue,
 };
-use noesis_runtime::commands::{Command, CommandHandler, CommandParameter};
+use noesis_runtime::commands::{Command, CommandHandler, CommandParameterValue};
 use noesis_runtime::ffi::{ClassBase, PropType};
 
 use crate::render::{NoesisRenderState, NoesisSet};
@@ -220,14 +220,11 @@ pub struct NoesisCommandInvoked {
     pub view: Entity,
     /// The command's name, as declared in [`CommandsDef::command`].
     pub name: String,
-    /// The decoded command parameter, when the bound control supplied one.
-    ///
-    /// Currently always `None`: the runtime hands the parameter to the Rust
-    /// handler as an opaque borrowed `BaseComponent*`
-    /// ([`CommandParameter`](noesis_runtime::commands::CommandParameter)), and
-    /// the `unsafe`-free Bevy crate has no safe way to unbox it (the runtime's
-    /// `ConvertArg::new` is `pub(crate)`). Decoding it is a small
-    /// `noesis_runtime` addition — see `NOTES.md` "OPEN RISKS".
+    /// The command parameter the bound control supplied, decoded to a string
+    /// (the usual XAML `CommandParameter="..."` literal). `None` when no
+    /// parameter was supplied. Non-string boxed parameters (`i32`/`f64`/`bool`)
+    /// are stringified; an unsupported boxed type also yields `None`. Decoded
+    /// via [`CommandParameterValue`](noesis_runtime::commands::CommandParameterValue).
     pub parameter: Option<String>,
 }
 
@@ -265,15 +262,36 @@ impl CommandForwarder {
 }
 
 impl CommandHandler for CommandForwarder {
-    fn can_execute(&self, _param: CommandParameter) -> bool {
+    fn can_execute(&self, _param: CommandParameterValue) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    fn execute(&self, _param: CommandParameter) {
-        // The parameter is an opaque borrowed `BaseComponent*` we can't safely
-        // unbox from this crate; surface `None` for now (see `NoesisCommandInvoked`).
-        self.queue.push(self.view, self.name.clone(), None);
+    fn execute(&self, param: CommandParameterValue) {
+        self.queue
+            .push(self.view, self.name.clone(), decode_command_param(&param));
     }
+}
+
+/// Decode a boxed command parameter to a string for [`NoesisCommandInvoked`].
+/// XAML `CommandParameter="..."` literals box as strings (the common case);
+/// `i32`/`f64`/`bool` are stringified; anything else (or no parameter) is `None`.
+fn decode_command_param(param: &CommandParameterValue) -> Option<String> {
+    if param.is_none() {
+        return None;
+    }
+    if let Some(s) = param.as_str() {
+        return Some(s.to_owned());
+    }
+    if let Some(i) = param.as_i32() {
+        return Some(i.to_string());
+    }
+    if let Some(f) = param.as_f64() {
+        return Some(f.to_string());
+    }
+    if let Some(b) = param.as_bool() {
+        return Some(b.to_string());
+    }
+    None
 }
 
 /// No-op [`PropertyChangeHandler`] for the command-host class. Command DPs are
