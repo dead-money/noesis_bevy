@@ -26,11 +26,11 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
-use dm_noesis_bevy::routed_events::{
+use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
+use noesis_bevy::routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, RoutedEvent,
 };
-use dm_noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
 
 const INJECT_AT_FRAME: usize = 14;
 const EXIT_AT_FRAME: usize = 50;

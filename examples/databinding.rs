@@ -23,7 +23,7 @@
 //! Run it (windowed):
 //!
 //! ```sh
-//! cargo run -p dm_noesis_bevy --example databinding
+//! cargo run -p noesis_bevy --example databinding
 //! ```
 //!
 //! The headless data round-trip is asserted by
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use dm_noesis_bevy::{
+use noesis_bevy::{
     FontRegistry, NoesisCamera, NoesisItems, NoesisItemsCurrent, NoesisPlugin, NoesisView,
     NoesisViewModel, NoesisViewModelAppExt, XamlRegistry,
 };
@@ -157,7 +157,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "dm_noesis_bevy — DataBinding (Solar System)".into(),
+                title: "noesis_bevy — DataBinding (Solar System)".into(),
                 resolution: (VIEW_W, VIEW_H).into(),
                 ..default()
             }),

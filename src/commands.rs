@@ -21,7 +21,7 @@
 //! object rather than a scalar value — and the direction of flow (UI → Rust).
 //!
 //! ```ignore
-//! use dm_noesis_bevy::commands::{NoesisCommands, CommandsDef, NoesisCommandInvoked};
+//! use noesis_bevy::commands::{NoesisCommands, CommandsDef, NoesisCommandInvoked};
 //!
 //! commands.entity(view).insert(NoesisCommands::new(
 //!     CommandsDef::new("MainMenu.Commands")

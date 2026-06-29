@@ -25,7 +25,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{NoesisCamera, NoesisDiagnostics, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisDiagnostics, NoesisPlugin, NoesisView, XamlRegistry};
 
 const EARLY_AT_FRAME: usize = 3;
 const SAMPLE_AT_FRAME: usize = 40;

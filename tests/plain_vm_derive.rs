@@ -1,5 +1,5 @@
 //! End-to-end test for the plain-struct `ViewModel` bridge + `#[derive(NoesisViewModel)]`
-//! (`dm_noesis_bevy::plain_vm`, TODO §3/§9 Phase C).
+//! (`noesis_bevy::plain_vm`, TODO §3/§9 Phase C).
 //!
 //! Two layers:
 //!
@@ -14,13 +14,13 @@
 //!
 //! Drives Noesis directly (no GPU), like the runtime's `plain_vm_twoway.rs`.
 //!
-//!   `cargo test -p dm_noesis_bevy --test plain_vm_derive -- --nocapture`
+//!   `cargo test -p noesis_bevy --test plain_vm_derive -- --nocapture`
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use dm_noesis_bevy::plain_vm::PlainVmBuilder;
-use dm_noesis_bevy::{NoesisViewModel, PlainType, PlainValue, PlainValueRef};
+use noesis_bevy::plain_vm::PlainVmBuilder;
+use noesis_bevy::{NoesisViewModel, PlainType, PlainValue, PlainValueRef};
 use noesis_runtime::binding::{Binding, BindingMode, UpdateSourceTrigger, set_binding};
 use noesis_runtime::view::{FrameworkElement, View};
 use noesis_runtime::xaml_provider::XamlProvider;

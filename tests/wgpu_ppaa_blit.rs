@@ -18,7 +18,7 @@
 //! alpha premultiplied source models Noesis's PPAA output; the composite (the
 //! part TODO §2 fixes) is exercised by the production pipeline.
 
-use dm_noesis_bevy::render::blit_composite_for_test;
+use noesis_bevy::render::blit_composite_for_test;
 
 const W: u32 = 4;
 const H: u32 = 1;

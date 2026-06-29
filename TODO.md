@@ -1,4 +1,4 @@
-# TODO — dm_noesis_bevy
+# TODO — noesis_bevy
 
 Open work owned by this crate: the wgpu render device, the render-graph compositing path, and the Bevy
 integration surface. Roughly ordered by likelihood we'll want each. Completed work is recorded in git

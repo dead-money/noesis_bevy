@@ -1,6 +1,6 @@
 //! `#[derive(NoesisViewModel)]` — generate the glue that lets a plain Rust
 //! struct be bound to XAML `{Binding field_name}` by field name, with two-way
-//! writeback, via `dm_noesis_bevy`'s plain-VM bridge.
+//! writeback, via `noesis_bevy`'s plain-VM bridge.
 //!
 //! The derive maps each field to a Noesis-reflected property:
 //!
@@ -34,8 +34,8 @@ fn field_kind(field: &proc_macro2::TokenStream, ty: &Type) -> Option<FieldKind> 
         Type::Path(tp) => tp.path.segments.last().map(|s| s.ident.to_string())?,
         _ => return None,
     };
-    let pv = quote!(dm_noesis_bevy::plain_vm::PlainValue);
-    let pt = quote!(dm_noesis_bevy::plain_vm::PlainType);
+    let pv = quote!(noesis_bevy::plain_vm::PlainValue);
+    let pt = quote!(noesis_bevy::plain_vm::PlainType);
     Some(match ident.as_str() {
         "f32" => FieldKind {
             plain_type: quote!(#pt::Double),
@@ -165,20 +165,20 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
-        impl dm_noesis_bevy::plain_vm::NoesisViewModel for #struct_ident {
+        impl noesis_bevy::plain_vm::NoesisViewModel for #struct_ident {
             fn noesis_type_name() -> &'static str {
                 #type_name
             }
 
-            fn noesis_properties() -> &'static [(&'static str, dm_noesis_bevy::plain_vm::PlainType)] {
+            fn noesis_properties() -> &'static [(&'static str, noesis_bevy::plain_vm::PlainType)] {
                 &[#(#prop_entries),*]
             }
 
-            fn noesis_snapshot(&self) -> ::std::vec::Vec<dm_noesis_bevy::plain_vm::PlainValue> {
+            fn noesis_snapshot(&self) -> ::std::vec::Vec<noesis_bevy::plain_vm::PlainValue> {
                 ::std::vec![#(#snapshot_pushes),*]
             }
 
-            fn noesis_apply(&mut self, prop_index: u32, value: &dm_noesis_bevy::plain_vm::PlainValue) {
+            fn noesis_apply(&mut self, prop_index: u32, value: &noesis_bevy::plain_vm::PlainValue) {
                 match prop_index {
                     #(#apply_arms),*
                     _ => {}

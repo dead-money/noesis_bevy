@@ -1,5 +1,5 @@
 //! Bevy-app-level integration test for the **system-integration bridge**
-//! ([`dm_noesis_bevy::integration`]), exercised end-to-end through the real
+//! ([`noesis_bevy::integration`]), exercised end-to-end through the real
 //! `NoesisPlugin` pipeline (headless, pipelined rendering on, no window).
 //!
 //! The bridge registers Noesis's three process-global host callbacks and
@@ -36,7 +36,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{
+use noesis_bevy::{
     CursorType, NoesisCamera, NoesisCursorRequested, NoesisInputEvent, NoesisInputQueue,
     NoesisOpenUrl, NoesisPlayAudio, NoesisPlugin, NoesisView, XamlRegistry, open_url, play_audio,
 };

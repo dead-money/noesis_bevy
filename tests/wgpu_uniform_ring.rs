@@ -14,7 +14,7 @@
 
 use std::ffi::c_void;
 
-use dm_noesis_bevy::render_device::WgpuRenderDevice;
+use noesis_bevy::render_device::WgpuRenderDevice;
 use noesis_runtime::render_device::RenderDevice;
 use noesis_runtime::render_device::types::{
     Batch, BlendMode, RenderState, SamplerState, Shader, StencilMode, UniformData,

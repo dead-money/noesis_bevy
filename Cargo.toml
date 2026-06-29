@@ -1,9 +1,9 @@
 [package]
-name = "dm_noesis_bevy"
+name = "noesis_bevy"
 version = "0.1.0"
 edition = "2024"
 description = "Bevy plugin that drives the Noesis GUI Native SDK and renders into Bevy via wgpu compositing."
-repository = "https://github.com/dead-money/dm_noesis_bevy"
+repository = "https://github.com/dead-money/noesis_bevy"
 license = "MIT"
 publish = false
 
@@ -13,7 +13,7 @@ publish = false
 bevy = { version = "0.18", features = ["debug"] }
 bevy_render = "0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
-dm_noesis_bevy_derive = { path = "./derive" }
+noesis_bevy_derive = { path = "./derive" }
 noesis_runtime = { path = "../noesis_runtime" }
 # Image decoding for the ImageBrush loader (Phase 4.E). PNG / JPEG cover the
 # SDK samples (BgTile.png, Aladin/aladin-atlas.png). Add more formats here as

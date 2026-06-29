@@ -1,8 +1,8 @@
-# dm_noesis_bevy
+# noesis_bevy
 
 A Bevy 0.18 plugin for [Noesis GUI](https://www.noesisengine.com/). It boots Noesis at startup, renders a XAML scene through an implementation of `Noesis::RenderDevice` on Bevy's wgpu device, and composites the result into your Bevy frame.
 
-It pairs with the FFI crate [`dm_noesis_runtime`](https://github.com/dead-money/dm_noesis_runtime), which owns the C++ shim and Rust bindings to the SDK.
+It pairs with the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which owns the C++ shim and Rust bindings to the SDK.
 
 Built for Dead Money's own games and mostly written by AI agents under human direction. We publish it for transparency and internal use, so expect changing interfaces and rough edges.
 
@@ -17,12 +17,12 @@ Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to your credentials. Without 
 ```toml
 [dependencies]
 bevy = "0.18"
-dm_noesis_bevy = { git = "https://github.com/dead-money/dm_noesis_bevy" }
+noesis_bevy = { git = "https://github.com/dead-money/noesis_bevy" }
 ```
 
 ```rust
 use bevy::prelude::*;
-use dm_noesis_bevy::{NoesisPlugin, NoesisScene};
+use noesis_bevy::{NoesisPlugin, NoesisScene};
 
 fn main() {
     App::new()
@@ -36,7 +36,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2d);
     // Keep the handle alive. Otherwise asset GC drops the XAML bytes
     // before Noesis's parser asks for them.
-    let _xaml = asset_server.load::<dm_noesis_bevy::XamlAsset>("MainMenu.xaml");
+    let _xaml = asset_server.load::<noesis_bevy::XamlAsset>("MainMenu.xaml");
     commands.insert_resource(NoesisScene {
         xaml_uri: "MainMenu.xaml".to_string(),
         size: UVec2::new(1920, 1080),
@@ -75,7 +75,7 @@ Register Rust-backed XAML types from a `Startup` system, then load XAML that use
 
 ```rust
 use bevy::prelude::*;
-use dm_noesis_bevy::classes::{
+use noesis_bevy::classes::{
     ClassBase, ClassBuilder, NoesisClassRegistry, PropType,
     PropertyChangeHandler, PropertyValue, Instance,
 };
@@ -96,7 +96,7 @@ fn register(mut registry: ResMut<NoesisClassRegistry>) {
 }
 ```
 
-`MarkupExtensionRegistration` works the same way via `NoesisMarkupExtensionRegistry`. See the `dm_noesis_runtime` README for the FFI-level details.
+`MarkupExtensionRegistration` works the same way via `NoesisMarkupExtensionRegistry`. See the `noesis_runtime` README for the FFI-level details.
 
 ## Data binding
 
@@ -104,7 +104,7 @@ Bind a plain Bevy `Resource` to XAML `{Binding field_name}` — derive `NoesisVi
 
 ```rust
 use bevy::prelude::*;
-use dm_noesis_bevy::{NoesisPlugin, NoesisViewModel, NoesisViewModelAppExt};
+use noesis_bevy::{NoesisPlugin, NoesisViewModel, NoesisViewModelAppExt};
 
 #[derive(Resource, NoesisViewModel)]
 struct SettingsVm {
@@ -127,7 +127,7 @@ For lower-level access there are also `NoesisViewModels` (a `DependencyObject`-b
 
 - **Noesis lives in the render world.** The main world owns the `NoesisScene` config, the asset registries, and the input event source. Everything Noesis touches (View, Renderer, RenderDevice, providers) sits on the render side behind `!Send` resources. Bevy's `ExtractResourcePlugin` mirrors the asset registries each frame.
 - **One intermediate texture, then a blit.** Noesis renders into an offscreen texture sized to the scene. A `NoesisNode` graph node then samples that into the camera's `ViewTarget` with the correct sRGB conversion. Rendering straight to `ViewTarget` is a future optimization.
-- **No unsafe here.** This crate is `forbid(unsafe_code)`. All `unsafe` lives in `dm_noesis_runtime` behind type-checked safe wrappers.
+- **No unsafe here.** This crate is `forbid(unsafe_code)`. All `unsafe` lives in `noesis_runtime` behind type-checked safe wrappers.
 - **Premultiplied alpha at decode time.** PNG and JPEG decode to straight alpha; we premultiply once at load so Noesis's `SrcOver` blend doesn't fringe transparent edges. The loader is idempotent and never sees its own output.
 - **Font fallback ordering.** Noesis's `CachedFontProvider` won't lazy-scan a folder for an explicit `FontFamily` reference. Listing your primary font in `NoesisScene::font_fallbacks` forces the scan early so those references resolve.
 
@@ -164,7 +164,7 @@ cargo run --example xaml_viewer
 
 Source in this repository is © 2026 Dead Money under the [MIT License](./LICENSE). Everything under `src/`, `tests/`, `examples/`, and `assets/` is original work; no Noesis SDK code is vendored.
 
-The Noesis Native SDK is not redistributed here. You obtain it from Noesis Technologies under their EULA, and `dm_noesis_runtime`'s `build.rs` links it from `NOESIS_SDK_DIR` at compile time. Use and distribution of binaries you build that link the SDK are governed by the Noesis EULA, not by the MIT License above.
+The Noesis Native SDK is not redistributed here. You obtain it from Noesis Technologies under their EULA, and `noesis_runtime`'s `build.rs` links it from `NOESIS_SDK_DIR` at compile time. Use and distribution of binaries you build that link the SDK are governed by the Noesis EULA, not by the MIT License above.
 
 ## Acknowledgements
 

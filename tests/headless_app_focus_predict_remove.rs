@@ -33,7 +33,7 @@
 //! Theme-free / font-free XAML (bare `TextBox`es, no glyphs asserted, no control
 //! templates), so the scene builds with no font gate and no theme dictionary.
 //!
-//!   `cargo test -p dm_noesis_bevy --test headless_app_focus_predict_remove -- --nocapture`
+//!   `cargo test -p noesis_bevy --test headless_app_focus_predict_remove -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,7 +41,7 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use dm_noesis_bevy::{
+use noesis_bevy::{
     FocusNavigationDirection, Key, ModifierKeys, NoesisCamera, NoesisFocus,
     NoesisFocusBindingFired, NoesisFocusControl, NoesisFocusPredicted, NoesisInputEvent,
     NoesisInputQueue, NoesisPlugin, NoesisView, XamlRegistry,

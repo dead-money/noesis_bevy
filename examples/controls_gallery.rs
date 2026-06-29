@@ -19,7 +19,7 @@
 //!     a cross-bridge round-trip).
 //!
 //! Run it windowed:
-//!   `cargo run -p dm_noesis_bevy --example controls_gallery`
+//!   `cargo run -p noesis_bevy --example controls_gallery`
 //!
 //! The headless smoke test (`tests/headless_controls_gallery.rs`) `#[path]`-
 //! includes this file and boots [`configure_gallery`] under the headless
@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use dm_noesis_bevy::{
+use noesis_bevy::{
     DpKind, DpValue, FontRegistry, NoesisCamera, NoesisClickWatch, NoesisClicked, NoesisDp,
     NoesisPlugin, NoesisText, NoesisView, XamlRegistry,
 };
