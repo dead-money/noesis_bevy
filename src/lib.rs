@@ -23,6 +23,7 @@ pub mod focus_input;
 pub mod font;
 pub mod geometry;
 pub mod image;
+pub mod imaging;
 pub mod input;
 pub mod items;
 pub mod layout;
@@ -72,6 +73,9 @@ pub use font::{BevyFontProvider, FontAsset, FontAssetLoader, FontAssetPlugin, Fo
 pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
 pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
+};
+pub use imaging::{
+    ImageBitmap, ImageReadback, NoesisImageChanged, NoesisImaging, NoesisImagingPlugin,
 };
 pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue};
 pub use items::{ItemValue, ItemsBinding, NoesisItems, NoesisItemsCurrent, NoesisItemsPlugin};
@@ -184,6 +188,7 @@ impl Plugin for NoesisPlugin {
             animation::NoesisAnimationPlugin,
             typography::NoesisTypographyPlugin,
             binding::NoesisBindingPlugin,
+            imaging::NoesisImagingPlugin,
             svg::NoesisSvgPlugin,
         ));
     }

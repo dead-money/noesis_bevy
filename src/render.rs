@@ -452,6 +452,10 @@ struct SceneInstance {
     /// [`crate::focus_input::NoesisFocusPredicted`] emissions. Resets on scene
     /// rebuild.
     predict_snapshots: HashMap<(String, i32, Option<String>), (bool, Option<String>, bool)>,
+    /// Last image read-back per `x:Name` watched by
+    /// [`crate::imaging::NoesisImaging`]. Dedupes
+    /// [`crate::imaging::NoesisImageChanged`] emissions; resets on scene rebuild.
+    image_snapshots: HashMap<String, crate::imaging::ImageReadback>,
 }
 
 /// One installed `KeyBinding`. Holds the `Command` *and* the `KeyBinding` at +1
@@ -1132,6 +1136,7 @@ impl NoesisRenderState {
                 typo_snapshots: HashMap::new(),
                 input_bindings: HashMap::new(),
                 predict_snapshots: HashMap::new(),
+                image_snapshots: HashMap::new(),
             },
         );
     }
@@ -2304,6 +2309,54 @@ impl NoesisRenderState {
             }
             scene.brush_snapshots.insert(key, current);
             changed.push((name.clone(), *target, current));
+        }
+        changed
+    }
+
+    /// Poll view `entity`'s watched `<Image>` elements, returning `(name,
+    /// readback)` for each whose resolved size / source presence changed since
+    /// last frame (deduped against the per-scene snapshot). The read-back is
+    /// element-sourced: `ActualWidth`/`ActualHeight` come from the live layout,
+    /// which Noesis derives from the source's pixel size via our texture
+    /// provider's `GetTextureInfo`. So once a staged bitmap resolves, a
+    /// `Stretch="None"` element reports the bitmap's exact dimensions; an
+    /// unresolvable source reports `[0.0, 0.0]`. First poll after a name is
+    /// watched always reports.
+    pub(crate) fn poll_image_reads_for(
+        &mut self,
+        entity: Entity,
+        desired: &HashMap<String, crate::imaging::ImageBitmap>,
+    ) -> Vec<(String, crate::imaging::ImageReadback)> {
+        use crate::imaging::ImageReadback;
+        let mut changed = Vec::new();
+        let Some(scene) = self.scenes.get_mut(&entity) else {
+            return changed;
+        };
+        scene
+            .image_snapshots
+            .retain(|name, _| desired.contains_key(name));
+        if desired.is_empty() {
+            return changed;
+        }
+        let Some(content) = scene.view.content() else {
+            return changed;
+        };
+        for name in desired.keys() {
+            let Some(element) = content.find_name(name) else {
+                continue;
+            };
+            let current = ImageReadback {
+                has_source: element.image_source().is_some(),
+                actual_size: [
+                    element.actual_width().unwrap_or(0.0),
+                    element.actual_height().unwrap_or(0.0),
+                ],
+            };
+            if scene.image_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            scene.image_snapshots.insert(name.clone(), current);
+            changed.push((name.clone(), current));
         }
         changed
     }
