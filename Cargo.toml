@@ -1,22 +1,48 @@
 [package]
 name = "noesis_bevy"
-version = "0.1.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.87"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
 description = "Bevy plugin that drives the Noesis GUI Native SDK and renders its UIs into a Bevy frame via wgpu compositing."
 repository = "https://github.com/dead-money/noesis_bevy"
+documentation = "https://docs.rs/noesis_bevy"
 license = "MIT"
+readme = "README.md"
+keywords = ["bevy", "noesis", "xaml", "gui", "ui"]
+categories = ["gui", "game-development", "graphics"]
+# Dev-only files that consumers of the published crate don't need. docs/ stays
+# (the README image) and assets/ + examples/ stay (the runnable samples).
+exclude = [".github/", ".claude/", "CLAUDE.md", "TODO.md", "RELEASING.md", "release.toml"]
+# Not published yet. Remove this (and the same line in derive/Cargo.toml) as the
+# deliberate go-live step; see RELEASING.md.
 publish = false
 
+# docs.rs has no Noesis SDK, so build.rs short-circuits on the DOCS_RS env var
+# and rustdoc builds the API without linking.
+[package.metadata.docs.rs]
+# No SDK on docs.rs; the doc build needs nothing extra, but pin the target so the
+# rpath branch in build.rs (Linux-only) is exercised consistently.
+default-target = "x86_64-unknown-linux-gnu"
+
+[features]
+default = []
+# Surface system / resource names in Bevy panic messages. A development
+# diagnostic; off by default so published consumers don't inherit Bevy's debug
+# overhead. Enable with `features = ["debug"]`.
+debug = ["bevy/debug"]
+
 [dependencies]
-# `debug` surfaces system / resource names in panic messages — a cheap
-# diagnostic for a small compile-time cost.
-bevy = { version = "0.18", features = ["debug"] }
+bevy = "0.18"
 bevy_render = "0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
-noesis_bevy_derive = { path = "./derive" }
-noesis_runtime = { path = "../noesis_runtime" }
+# The derive crate ships in this repo and releases in lockstep (path for local
+# dev, version for the published crate).
+noesis_bevy_derive = { path = "./derive", version = "0.10" }
+# The public crate from crates.io. This release needs 0.10 (it uses APIs not in
+# 0.9). For local co-development against an unpublished runtime, add a
+# `[patch.crates-io]` override pointing at your sibling checkout (see RELEASING.md).
+noesis_runtime = "0.10"
 # Image decoding for the ImageBrush loader. Add formats here as scenes demand.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"

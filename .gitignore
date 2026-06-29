@@ -22,3 +22,4 @@
 # `xaml_viewer` can cycle through SDK samples. Same rule: don't commit.
 /assets/Data
 .claude/worktrees/
+/derive/target

@@ -86,7 +86,7 @@ struct PsUniforms1 {
 #endif
 
 // ─── Vertex I/O ────────────────────────────────────────────────────────────
-// shader_location matches the VertexAttr enum index in dm_noesis. Each
+// shader_location matches the VertexAttr enum index in noesis_bevy. Each
 // attribute is independently gated by its HAS_* define so we can produce all
 // 16 vertex-format combinations from one source.
 

@@ -8,17 +8,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Opt in to Node 24 for any JS-based actions. Node 20 is deprecated
-  # and will be forced off by GitHub in June 2026; this flips the
-  # switch early so we're running on the same Node they'll default to.
+  # Opt in to Node 24 for any JS-based actions. Node 20 is deprecated and will be
+  # forced off by GitHub in June 2026; this flips the switch early so we run on
+  # the same Node they'll default to.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
-# fmt is the only build-step we can run on a hosted runner: cargo
-# build / clippy / test all transitively pull in dm_noesis_runtime,
-# whose build.rs requires the Noesis Native SDK (see
-# ../dm_noesis_runtime/README.md "Setup"). The SDK is closed-source
-# and not available on GitHub-hosted runners.
 jobs:
+  # Runs everywhere, including fork PRs. No SDK needed.
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -33,3 +29,50 @@ jobs:
 
       - name: cargo fmt
         run: cargo fmt --all --check
+
+  # Catches broken intra-doc links before they reach docs.rs. DOCS_RS makes both
+  # build scripts skip the native compile, so this needs no SDK and runs on hosted.
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    env:
+      DOCS_RS: "1"
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Bevy's transitive build scripts (wayland-sys, alsa-sys, libudev-sys) run
+      # pkg-config even under DOCS_RS, so the hosted runner needs these. The
+      # self-hosted runner has them provisioned.
+      - name: Install Bevy Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: cargo doc
+        run: cargo doc --no-deps
+
+  # build / clippy / test need the closed-source Noesis SDK, which only lives on
+  # our self-hosted runner. Never run untrusted fork-PR code there: skip any PR
+  # whose head is a fork. Same-repo branch PRs and pushes to main/tags are fine.
+  build-test:
+    name: build • clippy • test
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, noesis-sdk]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Keep target/ between runs for fast incremental builds.
+          clean: false
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-features

@@ -25,7 +25,7 @@ SOFTWARE.
 Note on the Noesis Native SDK
 -----------------------------
 
-This crate links (transitively, via the `dm_noesis_runtime` sibling crate)
+This crate links (transitively, via the `noesis_runtime` crate)
 against the Noesis Native SDK (libNoesis), which is closed-source commercial
 software distributed by Noesis Technologies S.L. under their own End User
 License Agreement. The Noesis SDK is **not** included in this repository; it

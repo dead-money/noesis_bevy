@@ -1,0 +1,73 @@
+name: Release
+
+# Publishes to crates.io when a version tag (vX.Y.Z) is pushed. cargo-release
+# creates and pushes that tag (see RELEASING.md). Runs on the self-hosted runner
+# that has the Noesis SDK, so the publish does a real verification build and the
+# full test suite gates the release.
+#
+# Two crates ship from this repo and publish in order: noesis_bevy_derive first
+# (noesis_bevy depends on it), then noesis_bevy. Both need crates.io Trusted
+# Publishing configured for this workflow. noesis_runtime must already be on
+# crates.io at the version this release requires.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # required for crates.io Trusted Publishing (OIDC)
+
+jobs:
+  publish:
+    name: publish to crates.io
+    runs-on: [self-hosted, noesis-sdk]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: cargo test
+        run: cargo test --all-features
+
+      # Publish the derive crate first; noesis_bevy depends on it. Skip if this
+      # version is already on crates.io (the first release is published manually,
+      # and a re-run stays idempotent).
+      - name: Check noesis_bevy_derive published
+        id: derive
+        run: |
+          ver=$(grep -m1 '^version' derive/Cargo.toml | cut -d'"' -f2)
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: noesis_bevy-release' \
+            "https://crates.io/api/v1/crates/noesis_bevy_derive/$ver")
+          [ "$code" = "200" ] && echo "skip=true" >> "$GITHUB_OUTPUT" || echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to crates.io for the derive crate
+        if: steps.derive.outputs.skip != 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+        id: derive-auth
+
+      - name: Publish noesis_bevy_derive
+        if: steps.derive.outputs.skip != 'true'
+        run: cargo publish --manifest-path derive/Cargo.toml
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.derive-auth.outputs.token }}
+
+      - name: Check noesis_bevy published
+        id: bevy
+        run: |
+          ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: noesis_bevy-release' \
+            "https://crates.io/api/v1/crates/noesis_bevy/$ver")
+          [ "$code" = "200" ] && echo "skip=true" >> "$GITHUB_OUTPUT" || echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to crates.io for noesis_bevy
+        if: steps.bevy.outputs.skip != 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+        id: bevy-auth
+
+      - name: Publish noesis_bevy
+        if: steps.bevy.outputs.skip != 'true'
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.bevy-auth.outputs.token }}
