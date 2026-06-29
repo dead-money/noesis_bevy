@@ -1,19 +1,9 @@
-//! Phase 4.F follow-up: reproduce the "child elements don't render" mystery
-//! headlessly. The leaf-Grid case (`tests/headless_xaml.rs`) renders a single
-//! `<Grid Background="Red"/>` and works. With nested content
-//! (`<Grid Background="Red"><Grid Background="Yellow" Width=64 Height=64/></Grid>`)
-//! we observe in the windowed example that only the outer Grid paints — the
-//! inner Grid is missing entirely.
+//! Headless diagnostic for nested-element rendering via a recording `RenderDevice`.
 //!
-//! This test answers a sharper question: is Noesis emitting only one
-//! `draw_batch` (so the bug is in how we drive the renderer / the View tree),
-//! or is Noesis emitting two but our device silently drops one (bug in
-//! `WgpuRenderDevice`)?
-//!
-//! It does that by wrapping `WgpuRenderDevice` in a `RecordingDevice` that
-//! tees every `RenderDevice` method into a counter / op-log, then forwards.
-//! It runs several scene variations through one Noesis init/shutdown pair so
-//! we can compare op traces directly.
+//! Wraps `WgpuRenderDevice` in `RecordingDevice` to capture draw-batch counts and
+//! pixel readbacks across XAML variations. The assertions encode two things:
+//! `SetProjectionMatrix` culls child elements (captured regression) and omitting it
+//! restores correct child rendering.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -251,8 +241,7 @@ impl<D: RenderDevice> RenderDevice for RecordingDevice<D> {
         if self.scratch_vertices.len() < bytes as usize {
             self.scratch_vertices.resize(bytes as usize, 0);
         }
-        // Hand the renderer our scratch buffer; on unmap we'll snapshot it
-        // and replay into the inner device.
+        // scratch buffer; forwarded to the inner device on unmap
         &mut self.scratch_vertices[..bytes as usize]
     }
 
@@ -262,7 +251,6 @@ impl<D: RenderDevice> RenderDevice for RecordingDevice<D> {
             .take()
             .expect("unmap_vertices without map_vertices");
         let snapshot = self.scratch_vertices[..bytes as usize].to_vec();
-        // Forward to inner: map → copy → unmap.
         let dst = self.inner.map_vertices(bytes);
         dst.copy_from_slice(&snapshot);
         self.inner.unmap_vertices();
@@ -370,10 +358,7 @@ fn print_trace(label: &str, ops: &[Op]) {
             }
             Op::VertexBuffer { bytes } => {
                 eprintln!("  [{i:3}] VertexBuffer {} bytes:", bytes.len());
-                // Decode as f32 pairs (most variants begin with vec2 pos at
-                // location 0); the rest of the per-vertex attributes vary by
-                // shader/format. Print every 8 bytes as 2 floats + 8 raw
-                // hex bytes so we can eyeball position + remainder.
+                // vec2 position at offset 0 for most shader variants; remainder varies by format
                 for (idx, chunk) in bytes.chunks(8).enumerate() {
                     if chunk.len() == 8 {
                         let x = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -437,15 +422,14 @@ fn nested_child_grid_diagnostic() {
     noesis_runtime::init();
 
     let scenarios: &[(&str, &[u8], ScenarioOptions)] = &[
-        // Baseline: leaf Grid. Should give 1 PATH_AA_SOLID painting the whole
-        // surface red. Confirms the rig works end to end.
+        // Sanity check: 1 PATH_AA_SOLID batch expected, whole surface red.
         (
             "leaf-grid-red",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red"/>"#,
             ScenarioOptions::default(),
         ),
-        // The bug: nested Grid with explicit Width/Height. Expectation is
-        // outer red + inner yellow; observation is outer red only.
+        // Nested Grid with explicit Width/Height: expected outer-red + inner-yellow,
+        // observed outer-red only.
         (
             "nested-grid-yellow-child",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -489,7 +473,6 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Border with content.
         (
             "border-with-rectangle",
             br#"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -507,9 +490,8 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Inner positioned top-left so the center pixel reads outer red and
-        // a top-left pixel reads inner yellow — disentangles "no draw" from
-        // "drew at unexpected position".
+        // Inner positioned top-left: center reads outer-red, top-left reads inner-yellow.
+        // Disentangles "no draw" from "drew at unexpected position".
         (
             "nested-grid-explicit-topleft",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -517,9 +499,8 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Inner larger than the view surface — forces overlap regardless of
-        // alignment. If this draws yellow, the issue is alignment math; if
-        // it doesn't, layout is genuinely dropping the inner.
+        // Inner larger than the view surface, forces overlap regardless of alignment.
+        // Yellow here means alignment math is wrong; no yellow means layout drops the inner.
         (
             "nested-grid-larger-inner",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -554,7 +535,6 @@ fn nested_child_grid_diagnostic() {
                 </Canvas>"#,
             ScenarioOptions::default(),
         ),
-        // StackPanel with two solid children.
         (
             "stackpanel-two-rects",
             br#"<StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -563,7 +543,7 @@ fn nested_child_grid_diagnostic() {
                 </StackPanel>"#,
             ScenarioOptions::default(),
         ),
-        // Outer with Width/Height ALSO set — does it draw the outer?
+        // Outer with explicit Width/Height: checks whether the outer element itself renders.
         (
             "outer-explicit-size",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red" Width="64" Height="64"/>"#,
@@ -577,10 +557,8 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Reference Noesis SDK pattern: never call SetProjectionMatrix.
-        // The IntegrationGLUT sample uses (Width=600, Height=400 root + nested
-        // children) and works. If our explicit projection is the trigger,
-        // these scenarios should produce inner draws.
+        // Tests the hypothesis that SetProjectionMatrix causes child culling.
+        // These should draw the inner element if the projection call is the trigger.
         (
             "no-projection-nested-yellow",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -633,8 +611,6 @@ fn nested_child_grid_diagnostic() {
         (entry.2, entry.3)
     };
 
-    // The fix (don't call SetProjectionMatrix) restores correct child
-    // rendering for previously-broken cases.
     let (center, corner) = by_name("no-projection-nested-yellow");
     assert!(
         center[0] > 200 && center[1] > 200 && center[2] < 50,
@@ -655,10 +631,8 @@ fn nested_child_grid_diagnostic() {
         "no-projection canvas-rect: corner should be outer-Red, got {corner:?}",
     );
 
-    // Documented regression: with our user-supplied projection, child elements
-    // get culled by Noesis's render-tree visibility pass. Until / unless we
-    // teach SetProjectionMatrix the right value, leave the bug captured here
-    // so a future fix flips this assertion.
+    // SetProjectionMatrix culls children in Noesis's visibility pass (captured regression).
+    // A fix should flip this assertion.
     let (center, corner) = by_name("nested-grid-yellow-child");
     assert_eq!(
         center,
@@ -749,15 +723,13 @@ async fn run_scenario(xaml: &[u8], opts: ScenarioOptions) -> (Vec<Op>, [u8; 4], 
         renderer.init(&registered_device);
     }
 
-    // Optional multi-tick to let layout converge in case one Update isn't
-    // enough.
+    // multi-tick to let layout converge
     for i in 0..opts.update_iterations {
         let _changed = view.update(f64::from(i) * 0.016);
         let mut renderer = view.renderer();
         let _new_tree = renderer.update_render_tree();
         if i + 1 < opts.update_iterations {
-            // For non-final ticks, just exercise the tree update; only the
-            // final tick paints into the target.
+            // only the final tick paints into the target
             continue;
         }
         let _off = renderer.render_offscreen();

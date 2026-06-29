@@ -1,16 +1,10 @@
 //! Render-device stencil-clip regression test.
 //!
-//! Drives the onscreen path the way Noesis builds a clip: a stencil-only
-//! `MASK` batch (`color_enable=0`, `StencilMode::EqualIncr`) raises the
-//! stencil to 1 over the left half, then a full-screen `PATH_SOLID` batch
-//! (`StencilMode::EqualKeep`, `stencil_ref=1`) paints red only where the
-//! stencil equals 1. The right half must keep its pre-clear blue.
-//!
-//! Before stencil was wired into the pipelines (`depth_stencil: None`,
-//! no attachment), the `EqualKeep` test couldn't gate anything and the
-//! content spilled past its clip — the themed-`ScrollViewer` blank/spill
-//! bug from TODO §1. This test fails (red everywhere) without the stencil
-//! attachment + pipeline state.
+//! A `MASK` batch (`color_enable=0`, `StencilMode::EqualIncr`) raises stencil
+//! to 1 over the left half; a `PATH_SOLID` batch (`StencilMode::EqualKeep`,
+//! `stencil_ref=1`) then paints red only where stencil equals 1. The right
+//! half must keep its pre-clear blue. Without the stencil attachment,
+//! `EqualKeep` gates nothing and red fills the whole target.
 
 use std::ffi::c_void;
 
@@ -118,9 +112,7 @@ async fn run_test() {
         0.0, 0.0, 0.0, 1.0,
     ];
 
-    // Vertex buffer: mask (Pos, 6 verts × 8B = 48B) then content (PosColor,
-    // 6 verts × 12B = 72B). Mask covers the left half (clip x ∈ [-1, 0]);
-    // content covers the full screen (x ∈ [-1, 1]).
+    // Mask quad covers left half (x ∈ [-1, 0]); content quad covers full screen (x ∈ [-1, 1]).
     let mut vb: Vec<u8> = Vec::new();
     let mask_quad = [
         [-1.0f32, -1.0],
@@ -149,8 +141,7 @@ async fn run_test() {
         vb.extend_from_slice(&RED); // u8x4 color
     }
 
-    // Index buffer: 0..6 for the mask, 0..6 for the content (relative to each
-    // batch's vertex slice; base_vertex is 0 in draw_batch).
+    // Indices reset to 0 per batch; vertex_offset shifts the vertex pointer.
     let mut ib: Vec<u8> = Vec::new();
     for i in 0u16..6 {
         ib.extend_from_slice(&i.to_le_bytes());
@@ -165,14 +156,11 @@ async fn run_test() {
     rd.map_indices(ib.len() as u32).copy_from_slice(&ib);
     rd.unmap_indices();
 
-    // 1) Stencil-only mask: raise stencil to 1 over the left half.
     rd.draw_batch(&mask_batch(&identity_mat));
-    // 2) Content gated to stencil == 1.
     rd.draw_batch(&content_batch(content_offset, 6, &identity_mat));
 
     rd.end_onscreen_render();
 
-    // Readback.
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(TARGET_H),
@@ -221,8 +209,6 @@ async fn run_test() {
         [data[o], data[o + 1], data[o + 2], data[o + 3]]
     };
 
-    // Left half is inside the stencil mask → red. Right half is outside →
-    // pre-clear blue survives.
     assert_eq!(
         pixel(64, 128),
         RED,
@@ -243,8 +229,7 @@ async fn run_test() {
     );
 }
 
-/// Stencil-only mask draw: `color_enable=0`, `EqualIncr` from ref 0 → writes
-/// stencil = 1 over the rasterized region.
+/// `color_enable=0`, `EqualIncr` from ref 0: writes stencil = 1 over the rasterized region.
 fn mask_batch(vs_uniforms: &[f32; 16]) -> Batch {
     Batch {
         shader: Shader::MASK,

@@ -1,9 +1,9 @@
-//! Per-view `ItemsSource` bridge — populate XAML list controls
+//! Per-view `ItemsSource` bridge: populate XAML list controls
 //! (`ComboBox` / `ListBox` / `ItemsControl`) from a Bevy app, with typed items.
 //!
 //! Add a [`NoesisItems`] component to the view's camera entity mapping each list
 //! control's `x:Name` to its desired items. The reconcile system keeps a
-//! Rust-owned [`ObservableCollection`](noesis_runtime::binding::ObservableCollection)
+//! Rust-owned [`ObservableCollection`]
 //! per `(view, x:Name)`, sets it to the desired list whenever the component
 //! changes, and binds it to the element's `ItemsSource` once the element exists
 //! (re-binding after a scene rebuild).
@@ -14,8 +14,8 @@
 //! `ObservableCollection` surface (`unsafe_code = forbid`) boxes each kind with
 //! the matching `push_*`, so a list can be e.g. integers (`<ListBox>` of port
 //! numbers) or strings (`ComboBox` of text options). [`with`](NoesisItems::with)
-//! stays string-compatible — `with("Combo", ["Low", "High"])` still works,
-//! because `&str` is `Into<ItemValue>` — and accepts any homogeneous typed
+//! stays string-compatible (`with("Combo", ["Low", "High"])` still works,
+//! because `&str` is `Into<ItemValue>`) and accepts any homogeneous typed
 //! iterator (`with("Ports", [80, 443])`); use
 //! [`with_items`](NoesisItems::with_items) for an explicit / mixed list.
 //!
@@ -34,7 +34,7 @@
 //! current item). Each frame the bridge emits a [`NoesisItemsCurrent`] message
 //! carrying the control's item `count`, its `selected_index`, the view's
 //! `current_position`, and the *typed* `current` item read back out of Noesis
-//! (via an `ICollectionView`'s `CurrentItem` accessors) — proving the typed
+//! (via an `ICollectionView`'s `CurrentItem` accessors), proving the typed
 //! value made the round trip through the engine, not just the Rust copy.
 //!
 //! # Collection-view navigation
@@ -47,7 +47,7 @@
 //! component changes; the resulting `current_position` / `current` item surface
 //! via [`NoesisItemsCurrent`]. Sorting, filtering and grouping are a genuine
 //! Noesis SDK limitation (no programmatic `SortDescription`/`Filter` is
-//! exposed), so they are intentionally absent — see
+//! exposed), so they are intentionally absent. See
 //! [`noesis_runtime::collection_view`].
 //!
 //! # Lifetime & threading
@@ -78,9 +78,13 @@ use crate::render::{NoesisRenderState, NoesisSet};
 /// unbox used when reading the current item back.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemValue {
+    /// A string item (`push_string`).
     Str(String),
+    /// A 32-bit integer item (`push_i32`).
     I32(i32),
+    /// A 64-bit float item (`push_f64`).
     F64(f64),
+    /// A boolean item (`push_bool`).
     Bool(bool),
 }
 
@@ -239,7 +243,7 @@ pub enum CollectionViewOp {
 
 impl CollectionViewOp {
     /// Apply this op to `view`, returning the raw `bool` Noesis reports (its
-    /// boundary meaning is an SDK detail — query the resulting position instead).
+    /// boundary meaning is an SDK detail; query the resulting position instead).
     fn apply(self, view: &CollectionView) -> bool {
         match self {
             Self::First => view.move_current_to_first(),
@@ -272,7 +276,7 @@ pub struct NoesisItems {
     /// control's default `ICollectionView` once each time the component changes;
     /// the resulting current item surfaces via [`NoesisItemsCurrent`].
     pub navigate: HashMap<String, CollectionViewOp>,
-    /// Desired bindable **object** items per `x:Name` — for lists whose
+    /// Desired bindable **object** items per `x:Name`, for lists whose
     /// `ItemTemplate`/`DataTemplate` binds per-item properties (`{Binding Name}`,
     /// `{Binding Score}`, ...). A control should appear in either [`Self::sources`]
     /// (primitive items) or here, not both.
@@ -280,6 +284,9 @@ pub struct NoesisItems {
 }
 
 impl NoesisItems {
+    /// An empty component with no sources, selection, navigation, or object
+    /// items. Build it up with [`with`](Self::with), [`select`](Self::select),
+    /// and the other builders.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -345,7 +352,7 @@ impl NoesisItems {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render-world binding — ItemsBinding
+// Render-world binding: ItemsBinding
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One element's Rust-owned items list: an [`ObservableCollection`], a
@@ -380,7 +387,7 @@ pub struct ItemsBinding {
     /// (`Next`/`Previous`) re-fire on each change rather than only on op change.
     nav_pending: bool,
     /// Last `(count, selected_index, current_position, current)` reported, to
-    /// emit a message only on change. Mirrors the DP bridge's snapshot.
+    /// emit a message only on change.
     last_readback: Option<(usize, i32, i32, Option<ItemValue>)>,
     /// Live object-item instances (for object sources). Holds a `+1` ref each;
     /// declared before `obj_registration` so they release before the class
@@ -443,7 +450,6 @@ impl ItemsBinding {
         for item in items {
             item.push_into(&mut self.coll);
         }
-        // A new list invalidates any previously-applied selection.
         self.applied_select = None;
     }
 
@@ -580,9 +586,8 @@ impl ItemsBinding {
         if self.applied_select == Some(index) {
             return;
         }
-        // Drive the control's selection...
         let ok = element.set_selected_index(index);
-        // ...and the view's current item, so the typed read-back reflects it.
+        // Mirror onto the view's current item so the typed read-back reflects it.
         if let Some(view) = self.view() {
             view.move_current_to_position(index);
         }

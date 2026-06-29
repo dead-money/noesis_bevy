@@ -1,20 +1,5 @@
-//! End-to-end test for the plain-struct `ViewModel` bridge + `#[derive(NoesisViewModel)]`
-//! (`noesis_bevy::plain_vm`, TODO §3/§9 Phase C).
-//!
-//! Two layers:
-//!
-//!   1. **Derive correctness (pure).** The macro maps fields to reflected
-//!      properties (honoring `#[noesis(skip)]`), and the generated
-//!      `noesis_snapshot` / `noesis_apply` round-trip owned values.
-//!   2. **Two-way through Noesis (headless).** Using only the derive's public
-//!      trait output, register the reflected plain VM, bind a `TextBox.Text` to
-//!      `{Binding title, Mode=TwoWay}`, seed it from the struct (Rust→UI), then
-//!      edit the control and assert the edit flows back into the struct
-//!      (UI→Rust) via `noesis_apply` — exactly what the render-side bridge wires.
-//!
-//! Drives Noesis directly (no GPU), like the runtime's `plain_vm_twoway.rs`.
-//!
-//!   `cargo test -p noesis_bevy --test plain_vm_derive -- --nocapture`
+//! Tests `#[derive(NoesisViewModel)]`: field reflection (honoring `#[noesis(skip)]`),
+//! snapshot/apply round-trip, and two-way binding through Noesis headless (no GPU).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -53,8 +38,6 @@ impl XamlProvider for InMem {
     }
 }
 
-/// Decode a `TwoWay` writeback value as its declared kind (mirrors the bridge's
-/// private `unbox`).
 fn decode(kind: PlainType, value: &PlainValueRef) -> PlainValue {
     match kind {
         PlainType::String => value
@@ -133,8 +116,6 @@ fn derived_plain_vm_binds_two_way() {
         }));
         let props = DemoVm::noesis_properties();
 
-        // Register the reflected plain VM from the derive's metadata, wiring the
-        // on_set writeback into `noesis_apply` (what the bridge does render-side).
         let vm_for_handler = Arc::clone(&vm);
         let mut builder = PlainVmBuilder::new(DemoVm::noesis_type_name());
         for (name, kind) in props {
@@ -152,7 +133,6 @@ fn derived_plain_vm_binds_two_way() {
             .create_instance()
             .expect("create_instance returned None");
 
-        // Seed the controls from the struct (Rust→UI), as `apply_snapshot` does.
         let snapshot = vm.lock().unwrap().noesis_snapshot();
         for (idx, (name, _)) in props.iter().enumerate() {
             let _ = instance.set_and_notify(idx as u32, name, snapshot[idx].clone());

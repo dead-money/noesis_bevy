@@ -1,16 +1,10 @@
-//! Phase 4.A regression test: two batches in one submit, each reading its
-//! own `ps_uniforms0` value. Before the uniform-ring refactor, per-batch
-//! `queue.write_buffer` calls all landed before the encoder ran, so every
-//! draw in the submit saw the *last* uniform value written. The ring +
-//! dynamic-offset bind groups fix that — each draw reads from its own slot.
+//! Regression: two batches in one submit, each reading its own `ps_uniforms0` slot.
+//! Before the uniform-ring fix, per-batch `queue.write_buffer` calls all landed before
+//! the encoder ran, so every draw saw the last value written. The ring + dynamic-offset
+//! bind groups ensure each draw reads from its own slot.
 //!
-//! Layout: 256×256 target, pre-cleared to dark blue.
-//!
-//! - Left half (x ∈ [0, 128)): `EFFECT_RGBA` with `values[0] = red`
-//! - Right half (x ∈ [128, 256)): `EFFECT_RGBA` with `values[0] = green`
-//!
-//! If the ring works, we see red / green split. If it doesn't, both halves
-//! collapse to the last written color (green).
+//! 256x256 target; left half drawn red, right half green.
+//! If the ring is broken, both halves collapse to green.
 
 use std::ffi::c_void;
 
@@ -109,11 +103,8 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // Two full-height triangle pairs covering the left and right halves in
-    // clip space. Vertex format `Pos` — 8 bytes per vertex.
-    //
-    // Left quad: x ∈ [-1, 0], y ∈ [-1, 1]  →  two triangles, 6 verts
-    // Right quad: x ∈ [0, 1],  y ∈ [-1, 1]  →  two triangles, 6 verts
+    // Vertex format `Pos`: 8 bytes per vertex (two f32).
+    // Left quad: x ∈ [-1, 0], y ∈ [-1, 1]; right quad: x ∈ [0, 1], y ∈ [-1, 1]
     let mut vb = Vec::with_capacity(96);
     for v in [
         [-1.0f32, -1.0],
@@ -170,7 +161,6 @@ async fn run_test() {
     rd.draw_batch(&right);
     rd.end_onscreen_render();
 
-    // Readback.
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(TARGET_H),
@@ -227,9 +217,6 @@ async fn run_test() {
         ]
     };
 
-    // Left half should be red; right half green. If the ring is broken, both
-    // halves would take the last-written color (green) and the left assert
-    // fails.
     assert_eq!(
         pixel(64, 128),
         [255, 0, 0, 255],
@@ -240,7 +227,6 @@ async fn run_test() {
         [0, 255, 0, 255],
         "right half should read green uniforms"
     );
-    // Sanity: pre-clear color survives nowhere inside the two quads.
     assert_eq!(
         pixel(0, 0),
         [255, 0, 0, 255],

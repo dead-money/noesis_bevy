@@ -1,12 +1,12 @@
-//! Per-view keyboard-focus bridge — give a named XAML element keyboard
-//! focus on a single [`NoesisView`].
+//! Per-view keyboard-focus bridge: give a named XAML element keyboard
+//! focus on a single [`crate::NoesisView`].
 //!
 //! Add a [`NoesisFocus`] component to the view's camera entity. Its
-//! `target` is the `x:Name` to focus — applied to the view's element
+//! `target` is the `x:Name` to focus, applied to the view's element
 //! whenever the component changes (Bevy change detection). Focus is an
 //! action: it fires once per change, not continuously. Drives the
 //! "open the console, give the input box keyboard focus" flow without a
-//! class registration or custom DP — just a name and one FFI call.
+//! class registration or custom DP, with just a name and one FFI call.
 //!
 //! ```ignore
 //! commands.entity(view).insert(NoesisFocus::new().focus("CommandInput"));
@@ -29,6 +29,8 @@ pub struct NoesisFocus {
 }
 
 impl NoesisFocus {
+    /// Empty focus bridge with no target. Chain [`focus`](Self::focus) to name
+    /// the element, or attach as-is and set `target` later.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -43,7 +45,7 @@ impl NoesisFocus {
 }
 
 /// Reconcile every view's [`NoesisFocus`]: apply the focus action when the
-/// component changed. Write-only — focus is applied once per change.
+/// component changed. Write-only: focus is applied once per change.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_focus_bridge(
     views: Query<(Entity, Ref<NoesisFocus>)>,

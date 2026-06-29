@@ -11,7 +11,7 @@
 //! - Supported: `#ifdef NAME`, `#ifndef NAME`, `#endif`. Nesting is fine.
 //! - Anything between an inactive `#ifdef`/`#ifndef` and its matching `#endif`
 //!   is dropped. Trailing whitespace on the directive is ignored.
-//! - Unmatched `#endif` panics — caller bug.
+//! - Unmatched `#endif` panics (caller bug).
 
 use std::collections::HashSet;
 use std::hash::BuildHasher;
@@ -27,8 +27,7 @@ use std::hash::BuildHasher;
 #[must_use]
 pub fn preprocess<S: BuildHasher>(source: &str, defines: &HashSet<&'static str, S>) -> String {
     let mut out = String::with_capacity(source.len());
-    // Stack of "is this branch currently emitting?" flags; the outer scope is
-    // always emitting.
+    // Per-branch "emitting?" flags; outer scope always emits.
     let mut stack: Vec<bool> = vec![true];
 
     for (lineno, line) in source.lines().enumerate() {

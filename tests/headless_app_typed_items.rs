@@ -1,32 +1,15 @@
-//! Bevy-app-level integration test for the **typed `ItemsSource`** bridge
-//! (`noesis_bevy::items`), exercised end-to-end through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for the typed `ItemsSource` bridge (`noesis_bevy::items`),
+//! run headless through the full `NoesisPlugin` pipeline.
 //!
-//! A [`NoesisItems`] populates a `ListBox` with **`i32`** items `[10, 20, 30]`
-//! and drives its selection to index `1`. The bridge boxes each item with
-//! Noesis's `push_i32` and reads the current item back out of the engine through
-//! an `ICollectionView`'s typed `CurrentItem::as_i32` accessor, surfacing it (with
-//! the control's `count` + `selected_index`) as a [`NoesisItemsCurrent`] message.
+//! Sets three `i32` items `[10, 20, 30]` on a `ListBox` and drives selection to
+//! index 1. Asserts the round-trip via `NoesisItemsCurrent`:
 //!
-//! Bluff-resistance — every assertion observes a value the engine round-trip
-//! provably produces and that the *un-driven default* does not:
+//!   * `count == 3`: items reached the live control (unbound reads 0).
+//!   * `selected_index == 1`: selection was applied (untouched default is -1).
+//!   * `current == ItemValue::I32(20)`: typed unbox at index 1; rules out a
+//!     string list, rules out the default position 0 (value 10).
 //!
-//!   * `count == 3` — the typed items reached the live `ItemsControl` (a no-op
-//!     apply / unbound collection reads `0`).
-//!   * `selected_index == 1` — the control's selection was driven (the default
-//!     for an untouched `ListBox` is `-1`, "nothing selected").
-//!   * `current == ItemValue::I32(20)` — the *typed* item at the selected index,
-//!     read back unboxed from Noesis. This pins down all of: the items are real
-//!     boxed `i32`s (a string list unboxes to `None` / `Str`, never `I32(20)`);
-//!     selection moved off the default position `0` (whose value is `10`, the
-//!     negative control); and the value matches the authored list.
-//!
-//! Theme-free / font-free XAML: a bare `<ListBox>` with no `ItemTemplate` needs
-//! no glyph rendering for the data round-trip we assert (item containers default
-//! to a `TextBlock`, but we never read pixels), so the scene builds with no font
-//! gate.
-//!
-//!   `cargo test -p noesis_bevy --test headless_app_typed_items -- --nocapture`
+//! Theme-free XAML with no `ItemTemplate`; no font gate needed.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,9 +25,7 @@ use noesis_bevy::{
 const VIEW_W: u32 = 120;
 const VIEW_H: u32 = 80;
 
-/// Set the typed items + selection only after the scene exists, so the
-/// component's one-shot change-detection apply isn't lost (mirrors the
-/// write-only bridge tests).
+// wait for scene to be live; one-shot change-detection apply is lost before the control exists
 const SET_AT_FRAME: usize = 12;
 const EXIT_AT_FRAME: usize = 60;
 
@@ -52,8 +33,7 @@ const XAML: &str = r##"<ListBox xmlns="http://schemas.microsoft.com/winfx/2006/x
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="Ports" Width="120" Height="80"/>"##;
 
-/// Observations of `(name, count, selected_index, current)` per view, with the
-/// frame they were seen on, so we can assert nothing arrived before the drive.
+// (frame, entity, name, count, selected_index, current); frame retained to verify drive ordering
 type Observed = Vec<(usize, Entity, String, usize, i32, Option<ItemValue>)>;
 
 #[test]
@@ -92,8 +72,7 @@ fn typed_items_populate_select_and_read_back() {
                         size: UVec2::new(VIEW_W, VIEW_H),
                         ..default()
                     },
-                    // Empty to start (no-op); filled in after the scene exists so
-                    // the one-shot apply lands on a live control.
+                    // empty; filled at SET_AT_FRAME once the scene is live
                     NoesisItems::new(),
                 ))
                 .id();
@@ -113,8 +92,8 @@ fn typed_items_populate_select_and_read_back() {
             if *frame == SET_AT_FRAME {
                 for mut items in &mut q {
                     *items = NoesisItems::new()
-                        .with("Ports", [10, 20, 30]) // typed i32 items
-                        .select("Ports", 1); // drive selection to index 1
+                        .with("Ports", [10, 20, 30])
+                        .select("Ports", 1);
                 }
             }
 
@@ -144,7 +123,6 @@ fn typed_items_populate_select_and_read_back() {
         eprintln!("  f{f} {e:?} {name} count={count} idx={idx} current={current:?}");
     }
 
-    // The latest snapshot seen for our control on our view.
     let latest = got
         .iter()
         .rfind(|(_, e, name, _, _, _)| *e == view && name == "Ports");

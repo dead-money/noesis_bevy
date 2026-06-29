@@ -1,36 +1,11 @@
-//! Bevy-app-level integration test for the *deep* styling slice of the
-//! code-built `Style` bridge ([`NoesisStyles`]): `BasedOn` inheritance chains,
-//! [`DataTriggerSpec`] (binding-value driven), and [`MultiTriggerSpec`]
-//! (all-conditions-hold). Exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on). Mirrors `headless_app_styles.rs`.
+//! Integration test for [`NoesisStyles`] deep features: `BasedOn` inheritance
+//! chains, [`DataTriggerSpec`] (binding-value driven), and [`MultiTriggerSpec`]
+//! (all-conditions-hold). Runs end-to-end through the real `NoesisPlugin`
+//! pipeline (headless). Assertions observe actual style effects via [`NoesisDp`]
+//! watches; element defaults serve as negative controls.
 //!
-//! `NoesisStyles` is write-only, so — like the other write-only bridges — every
-//! assertion observes the style's *actual effect* through a [`NoesisDp`] watch and
-//! asserts the exact value, with the element's *default* as the negative control:
-//!
-//!   * **`BasedOn` chain** → `Chain.Opacity` / `Height` / `Width`: a 3-level
-//!     `Border` style (own `Opacity=0.5`, `BasedOn` a middle style `Height=12`,
-//!     `BasedOn` a root style `Width=40`) drives all three values onto the
-//!     element. `Width=40` reaches it only through two `BasedOn` hops, so reading
-//!     `40` proves the chain links; a broken `set_based_on` leaves `Width` unset.
-//!   * **`DataTrigger`** → `Trig.Opacity` (`f32`): a style whose `DataTrigger`
-//!     binds `RelativeSource Self` `Path=Tag` with `Value="active"` and a
-//!     `Setter Opacity=0.5` fires because the element authors `Tag="active"`,
-//!     pulling `Opacity` to `0.5`.
-//!   * **`DataTrigger` negative control** → `TrigOff.Opacity`: the *same* style
-//!     on an element with `Tag="idle"` does **not** fire, so it stays at `1.0`.
-//!   * **`MultiTrigger`** → `Multi.Opacity` (`f32`): a `MultiTrigger` whose two
-//!     conditions (`IsEnabled=true` and `IsHitTestVisible=true`, both default
-//!     true) hold drives `Opacity` to `0.5`.
-//!   * **`MultiTrigger` negative control** → `MultiOff.Opacity`: the same style on
-//!     an element authored `IsEnabled="False"` breaks one condition, so it stays
-//!     at `1.0`.
-//!   * **overall negative control** → `Plain.Opacity`: an unstyled sibling stays
-//!     at the default `1.0`.
-//!
-//! Components start empty (no-op) and are filled in *after* the scene is built,
-//! because `set_style` applies only on Bevy change-detection (and a style is
-//! sealed on first apply). Font-free XAML (only DP values are asserted).
+//! Styles are applied at frame 10 rather than startup because `set_style` fires
+//! only on Bevy change-detection and a style is sealed on first apply.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -128,8 +103,7 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
-                // A 3-level BasedOn chain: own Opacity, +Height one hop up,
-                // +Width two hops up.
+                // 3-level BasedOn chain: own Opacity, Height one hop, Width two hops.
                 let chain = StyleSpec::new("Border")
                     .setter("Opacity", DpValue::F32(0.5))
                     .based_on(
@@ -137,13 +111,13 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
                             .setter("Height", DpValue::F32(12.0))
                             .based_on(StyleSpec::new("Border").setter("Width", DpValue::F32(40.0))),
                     );
-                // A DataTrigger keyed off the element's own Tag.
+                // DataTrigger: Tag binding, RelativeSource Self.
                 let trig = StyleSpec::new("Border").data_trigger(
                     DataTriggerSpec::new("Tag", DpValue::Str("active".into()))
                         .relative_source_self()
                         .setter("Opacity", DpValue::F32(0.5)),
                 );
-                // A MultiTrigger: two default-true conditions both hold.
+                // MultiTrigger: two conditions both true by default.
                 let multi = StyleSpec::new("Border").multi_trigger(
                     MultiTriggerSpec::new()
                         .condition("IsEnabled", DpValue::Bool(true))
@@ -191,7 +165,6 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // BasedOn chain: the derived style's own setter, plus one and two hops up.
     assert_eq!(
         latest("Chain", "Opacity"),
         Some(DpValue::F32(0.5)),
@@ -208,7 +181,6 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
         "BasedOn: Width=40 inherited two hops up the chain — proves the chain links",
     );
 
-    // DataTrigger: fires for Tag="active", not for Tag="idle".
     assert_eq!(
         latest("Trig", "Opacity"),
         Some(DpValue::F32(0.5)),
@@ -220,7 +192,6 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
         "DataTrigger negative control: Tag=idle does not match, so Opacity stays 1.0",
     );
 
-    // MultiTrigger: fires when both conditions hold, not when one is broken.
     assert_eq!(
         latest("Multi", "Opacity"),
         Some(DpValue::F32(0.5)),
@@ -232,7 +203,6 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
         "MultiTrigger negative control: IsEnabled=False breaks a condition, so Opacity stays 1.0",
     );
 
-    // Overall negative control.
     assert_eq!(
         latest("Plain", "Opacity"),
         Some(DpValue::F32(1.0)),

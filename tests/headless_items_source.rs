@@ -1,15 +1,9 @@
-//! End-to-end test for the `ItemsSource` bridge (`noesis_bevy::items`,
-//! TODO §3): populate a `ComboBox`'s items from Rust and mutate them live.
+//! Tests the `ItemsSource` bridge: populate a `ComboBox` from Rust and mutate live.
 //!
-//! Drives Noesis directly (no GPU), like the runtime's `binding.rs` /
-//! `observable_collection.rs`: the bridge's [`ItemsBinding`] wraps an
-//! `ObservableCollection`, and the safe
-//! `FrameworkElement::set_items_source(&ObservableCollection)` accessor binds it
-//! to a named `ItemsControl`. We assert the control sees the right item count
-//! after the initial `set` and after each incremental `push` / `remove` /
-//! `clear` — which only tracks if the collection is observable and actually
-//! bound. The plugin's main↔render queue plumbing is covered by the unit tests
-//! in `src/items.rs`.
+//! Drives Noesis directly (no GPU). Asserts item counts after `set`, `push`,
+//! `remove_at`, and `clear`. These assertions are only meaningful if the collection
+//! is observable and actually bound.
+//! Main/render queue plumbing is covered by unit tests in `src/items.rs`.
 //!
 //!   `cargo test -p noesis_bevy --test headless_items_source -- --nocapture`
 
@@ -45,9 +39,7 @@ fn items_source_populates_and_mutates_combobox() {
     noesis_runtime::init();
 
     {
-        // The bridge's per-element items list, exactly as the render systems own
-        // it. The app would drive this through `NoesisItemsSources`; here we call
-        // the same `ItemsBinding` methods the render-side apply pass calls.
+        // Calls the same ItemsBinding methods the render-side apply pass uses.
         let mut binding = ItemsBinding::new();
         binding.set(["Low", "Medium", "High"]);
 
@@ -62,8 +54,6 @@ fn items_source_populates_and_mutates_combobox() {
 
         let mut combo = view.content().expect("View::content returned None");
 
-        // Bind the Rust-owned collection as the ComboBox's ItemsSource — the
-        // safe accessor added for unsafe-free consumers.
         assert!(
             combo.set_items_source(binding.collection()),
             "set_items_source returned false (root not an ItemsControl?)",
@@ -78,8 +68,7 @@ fn items_source_populates_and_mutates_combobox() {
             "ComboBox did not see the 3 items set from Rust",
         );
 
-        // Incremental edits after binding must track live (the collection is
-        // observable, so the control's view of it updates without a rebuild).
+        // Observable: incremental edits must propagate without a rebuild.
         binding.push("Ultra");
         t += 0.016;
         view.update(t);
@@ -107,8 +96,7 @@ fn items_source_populates_and_mutates_combobox() {
             "clear did not reach the control"
         );
 
-        // Teardown: drop the view (releases the control's ItemsSource ref) before
-        // the binding's collection.
+        // Drop view before binding: releases ItemsSource ref first.
         drop(combo);
         view.deactivate();
         drop(view);

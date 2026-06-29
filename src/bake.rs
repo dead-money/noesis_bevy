@@ -1,28 +1,28 @@
 //! Bake an XAML view to an offscreen [`Handle<Image>`].
 //!
 //! The live overlay ([`crate::render`]) renders one Noesis view onto a camera
-//! every frame. Some hosts instead want a *static* texture rendered from XAML —
-//! a label, a badge, an in-world panel — that they map onto their own geometry.
+//! every frame. Some hosts instead want a *static* texture rendered from XAML
+//! (a label, a badge, an in-world panel) that they map onto their own geometry.
 //! [`NoesisLabelBaker`] provides that: call [`NoesisLabelBaker::bake_label`]
 //! with a template URI and the text to drop into its named elements, and get
 //! back a [`Handle<Image>`] whose GPU texture Noesis fills in within ~1 frame.
 //!
 //! Results are cached by an opaque `content_key`: identical keys return the
 //! same handle and bake nothing, so repeated content (every `74LS04` label)
-//! shares one texture — the same reuse discipline the mesh cache follows.
+//! shares one texture.
 //!
 //! # How it renders without a copy or readback
 //!
 //! The image is allocated up front as a Bevy [`Image`] (so Bevy owns its
 //! `GpuImage`), then Noesis renders *straight into* a `Rgba8Unorm` view of that
-//! texture via the device's `set_onscreen_target` contract — the same one the
-//! live intermediate uses. No `copy_texture_to_texture`, no CPU readback.
+//! texture via the device's `set_onscreen_target` contract. No
+//! `copy_texture_to_texture`, no CPU readback.
 //!
 //! The texture is created `Rgba8UnormSrgb` with `Rgba8Unorm` listed in
 //! `view_formats`. Noesis writes sRGB-encoded bytes raw through the `Rgba8Unorm`
 //! render alias; a `StandardMaterial` samples the sRGB texture and decodes them
-//! back. This is the inverse of `create_intermediate`'s dual-alias trick. Output
-//! is premultiplied alpha, so sample it with `AlphaMode::Premultiplied`.
+//! back. Output is premultiplied alpha, so sample it with
+//! `AlphaMode::Premultiplied`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,7 +42,7 @@ use crate::render::{NoesisRenderState, NoesisSet};
 /// Sampling format of a baked label. `StandardMaterial` color maps want sRGB;
 /// Noesis renders through the [`RENDER_FORMAT`] alias below.
 const SAMPLE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
-/// The `view_formats` alias Noesis renders into — its pipeline cache compiles
+/// The `view_formats` alias Noesis renders into: its pipeline cache compiles
 /// against `Rgba8Unorm`, and it writes sRGB bytes raw (no linearization).
 const RENDER_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 const RENDER_VIEW_FORMATS: &[TextureFormat] = &[RENDER_FORMAT];
@@ -64,7 +64,7 @@ struct BakerState {
     pending: Vec<BakeRequest>,
 }
 
-/// Main-world handle to the label baker. Cheap to clone — it wraps a shared
+/// Main-world handle to the label baker. Cheap to clone; it wraps a shared
 /// cache + request queue the render world drains. Insert via
 /// [`NoesisLabelBakerPlugin`].
 #[derive(Resource, Clone, Default)]
@@ -134,7 +134,7 @@ fn bake_target(size: UVec2) -> Image {
 }
 
 /// Render-world buffer of requests not yet baked (their `GpuImage` may not be
-/// prepared, or Noesis prerequisites — fonts/template — may not be ready). Held
+/// prepared, or Noesis prerequisites like fonts/template may not be ready). Held
 /// across frames so a request retries until it succeeds.
 #[derive(Resource, Default)]
 struct PendingBakes(Vec<BakeRequest>);
@@ -160,7 +160,7 @@ fn bake_pending_labels(
     let mut still_pending = Vec::new();
     for req in std::mem::take(&mut retry.0) {
         let Some(gpu) = gpu_images.get(req.target) else {
-            // GpuImage not prepared this frame yet — try again next frame.
+            // GpuImage not prepared yet; retry next frame.
             still_pending.push(req);
             continue;
         };
@@ -170,7 +170,7 @@ fn bake_pending_labels(
             ..Default::default()
         });
         if !state.bake_into(&render_view, &req.xaml_uri, req.size, &req.fields) {
-            // Fonts / template not ready — retry on a later frame.
+            // Fonts/template not ready; retry on a later frame.
             still_pending.push(req);
         }
     }

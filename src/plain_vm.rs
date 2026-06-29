@@ -1,13 +1,12 @@
-//! Per-view plain-struct `ViewModel` bridge (TODO §3 / §9, Phase C) — bind a
-//! plain Bevy `Component` to a view's XAML `{Binding field_name}` by field name,
-//! two-way.
+//! Per-view plain-struct `ViewModel` bridge: bind a plain Bevy `Component` to a
+//! view's XAML `{Binding field_name}` by field name, two-way.
 //!
 //! Where [`crate::viewmodel`] binds a `DependencyObject`-backed view model with
 //! explicitly-declared dependency properties, this binds an *ordinary* Rust
 //! struct: derive [`NoesisViewModel`] on it, make it a `Component`, register the
 //! type, and add the component to a [`NoesisView`](crate::NoesisView) entity. The
 //! runtime's reflected plain-VM (`noesis_runtime::plain_vm`) exposes each field
-//! to that view's binding engine by name — including `TwoWay` writeback and
+//! to that view's binding engine by name, including `TwoWay` writeback and
 //! `INotifyPropertyChanged`.
 //!
 //! ```ignore
@@ -36,7 +35,7 @@
 //!
 //! - **Rust → UI.** When the `Component` is mutated (Bevy change detection), the
 //!   reconcile system snapshots its fields and pushes them into that view's
-//!   plain-VM instance with `set_and_notify` — the bound controls update on the
+//!   plain-VM instance with `set_and_notify`; the bound controls update on the
 //!   next `View::update`.
 //! - **UI → Rust.** A `TwoWay` edit fires the runtime's `on_set` hook (on the
 //!   main thread, where the `View` lives); the bridge converts the boxed value to
@@ -87,10 +86,6 @@ pub(crate) fn unbox(kind: PlainType, value: &PlainValueRef) -> PlainValue {
     decoded.unwrap_or(PlainValue::Null)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The derive target
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Implemented by `#[derive(NoesisViewModel)]` (re-exported from the crate
 /// root). The derive maps each struct field to a reflected Noesis property and
 /// generates the snapshot (Rust→UI) and writeback (UI→Rust) glue. Hand-impl
@@ -120,10 +115,6 @@ pub trait NoesisViewModel: Send + Sync + 'static {
     /// whose variant doesn't match the field is ignored.
     fn noesis_apply(&mut self, prop_index: u32, value: &PlainValue);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Render-world entry
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// One live plain view model owned per `(view entity, type)` by
 /// [`NoesisRenderState`]. Field order matters: `instance` drops before `class`.
@@ -232,22 +223,14 @@ impl PlainVmEntry {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-type config
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Per-type config: where to attach the VM as `DataContext`. Set once at
 /// registration; applies to every view entity carrying a `T` component. Plain
-/// main-world resource (no extraction — the whole bridge runs main-world now).
+/// main-world resource (no extraction; the whole bridge runs main-world).
 #[derive(Resource)]
 pub struct PlainVmConfig<T: Send + Sync + 'static> {
     target: AttachTarget,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Reconcile every view's `T` plain view model: build/attach its render-side
 /// entry, snapshot the component into the instance when it changed (Rust→UI),
@@ -281,10 +264,6 @@ fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// App extension
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// `App` methods to register a plain-struct view model type. Add
 /// [`crate::NoesisPlugin`] first, then register the type; attach the `T`

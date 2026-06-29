@@ -1,4 +1,4 @@
-//! Per-view Rust-owned `ViewModel` / `DataContext` bridge (TODO §3).
+//! Per-view Rust-owned `ViewModel` / `DataContext` bridge.
 //!
 //! Drive a XAML scene's `{Binding ...}` controls from a Rust-owned view model
 //! without touching Noesis pointers. Add a [`NoesisVm`] component to the
@@ -56,9 +56,13 @@ use crate::render::{NoesisRenderState, NoesisSet};
 /// (`Str`). `Float` properties arrive widened to [`VmValue::Double`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum VmValue {
+    /// A `Double` property, such as a `Slider.Value`.
     Double(f64),
+    /// A `Bool` property, such as a `CheckBox.IsChecked`.
     Bool(bool),
+    /// An `Int32` property, such as a `ComboBox.SelectedIndex`.
     Int32(i32),
+    /// A `String` property, such as bound text.
     Str(String),
 }
 
@@ -88,7 +92,7 @@ impl VmValue {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ViewModelDef — declarative recipe
+// ViewModelDef: declarative recipe
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where the bridge attaches a view model's instance as `DataContext`.
@@ -115,7 +119,7 @@ pub struct ViewModelDef {
 
 impl ViewModelDef {
     /// Begin a def for the Noesis class `class_name`. Defaults to attaching at
-    /// the view root — override with [`Self::attach_to`].
+    /// the view root; override with [`Self::attach_to`].
     #[must_use]
     pub fn new(class_name: impl Into<String>) -> Self {
         Self {
@@ -208,7 +212,7 @@ impl NoesisVm {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Change side — shared queue + message + forwarding handler
+// Change side: shared queue + message + forwarding handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Queue between the (main-thread) [`ViewModelChangeForwarder`] callbacks and
@@ -238,7 +242,7 @@ impl SharedVmChangedQueue {
     }
 }
 
-/// Emitted when a view model's dependency property changes — from a two-way
+/// Emitted when a view model's dependency property changes, from a two-way
 /// bound control (a slider drag) or a Rust write that altered the value.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisViewModelChanged {
@@ -287,7 +291,7 @@ impl PropertyChangeHandler for ViewModelChangeForwarder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render-world entry — VmEntry
+// Render-world entry: VmEntry
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One live view model, owned per-view by [`NoesisRenderState`]. Field order

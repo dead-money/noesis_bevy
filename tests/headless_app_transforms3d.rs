@@ -1,37 +1,21 @@
-//! Bevy-app-level integration test for the **3D transform** bridge
-//! ([`NoesisTransform3D`]), exercised end-to-end through the real `NoesisPlugin`
-//! pipeline (headless, pipelined rendering on).
+//! Integration test for the [`NoesisTransform3D`] bridge, run through the real
+//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
-//! `Transform3D` (`UIElement::SetTransform3D`) is a post-layout property: it
-//! never changes an element's `ActualWidth`/`ActualHeight`, and its value lives
-//! on a nested `CompositeTransform3D` object — neither reachable through a scalar
-//! `NoesisDp` watch. So this bridge ships its own read-back: after assigning the
-//! transform it reads the element's *live* `Transform3D` back from Noesis and
-//! emits a [`NoesisTransform3DChanged`]. The read-back is element-sourced and
-//! gated on pointer identity with the object we assigned, so it is
-//! bluff-resistant:
+//! `Transform3D` (`UIElement::SetTransform3D`) is a post-layout property whose
+//! value lives on a nested `CompositeTransform3D` object, not reachable through
+//! a scalar `NoesisDp` watch. The bridge assigns the transform then reads the
+//! element's live `Transform3D` back from Noesis, gated on pointer identity with
+//! the assigned object.
 //!
-//!   * **positive** — assigning `rotate (10,20,30) · translate (5,6,-7) ·
-//!     scale (2,0.5,1.5) · center (1,2,3)` to `Box` reads those exact values
-//!     back. A no-op apply, wrong-entity routing, or inverted change-detection
-//!     leaves `Box` with no `Transform3D`, so no message is emitted and the
-//!     exact-value assertion fails.
-//!   * **negative control** — `Other` is never given a transform, so it must
-//!     never appear in any `NoesisTransform3DChanged`.
+//! Test contract:
+//! - `Box` receives rotate/translate/scale/center; the read-back must return the
+//!   exact values assigned.
+//! - `Other` is never given a transform and must never appear in any
+//!   [`NoesisTransform3DChanged`].
 //!
-//! The component starts empty (no-op) and is filled in *after* the scene is
-//! built, because the apply runs on Bevy change-detection.
-//!
-//! **Scope.** This test asserts the *data-model* bridge (assignment +
-//! element-sourced read-back), which is fully implemented. It does NOT assert
-//! the perspective *pixels*: compositing a `Transform3D` routes through the
-//! offscreen effects/projection render path whose Downsample/Upsample shaders
-//! are not yet implemented in our wgpu device. To keep the bridge test stable
-//! the transformed element is empty (no background/content) so the offscreen
-//! effect path is not exercised by the tiny scene; the visual aspect is covered
-//! by the `#[ignore]`d note below.
-//!
-//! Font-free XAML (only transform values are asserted, no glyph rendering).
+//! Only the data-model bridge is asserted here. Visual compositing (perspective
+//! pixels) requires Downsample/Upsample effect shaders not yet implemented; the
+//! ignored test below gates that path.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -175,12 +159,10 @@ fn transform3d_bridge_reads_back_assigned_transform() {
     );
 }
 
-/// Visual compositing of a `Transform3D` (the perspective-projected pixels)
-/// requires the offscreen effects/projection render path — Downsample/Upsample
-/// and the effect shaders — which our wgpu render device does not implement yet
-/// (`Shader(49)=DOWNSAMPLE` panics; see CLAUDE.md / TODO.md). The data-model
-/// bridge above is fully exercised; only the rendered output is gated. Re-enable
-/// once the effect shaders land.
+/// Compositing a `Transform3D` (perspective-projected pixels) requires the
+/// offscreen effects/projection render path: Downsample/Upsample and effect
+/// shaders. The wgpu render device does not implement these yet
+/// (`Shader(49)=DOWNSAMPLE` panics). Re-enable once the effect shaders land.
 #[test]
 #[ignore = "Transform3D perspective compositing needs the unimplemented Downsample/Upsample effect shaders"]
 fn transform3d_visual_render_is_gated_on_effect_shaders() {}

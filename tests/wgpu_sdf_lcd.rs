@@ -1,18 +1,8 @@
-//! Render-device test for the `SDF_LCD_SOLID` (30) shader — subpixel (LCD)
-//! text via dual-source blending (`@blend_src(0)` / `@blend_src(1)`) composited
-//! with the `SrcOver_Dual` blend mode.
-//!
-//! The SDK ships no GL/VK reference for the LCD path (those devices report
-//! `subpixelRendering = false`), so this test verifies the dual-source
-//! *mechanism* end-to-end at the two limit cases rather than pinning the exact
-//! subpixel-offset constants. A fully-inside glyph (coverage 1) over a green
-//! background produces the text color (`paint + dst*(1 - 1)`); a fully-outside
-//! glyph (coverage 0) leaves the background unchanged (`0 + dst*(1 - 0)`).
-//! Both rely on the per-channel `src1` factor, so a broken dual-source wiring
-//! (or a pipeline that fails to compile `@blend_src`) fails the assertions.
-//!
-//! Requires the wgpu `DUAL_SOURCE_BLENDING` feature; the test skips (passes
-//! trivially) on adapters without it.
+//! Tests dual-source blending for `SDF_LCD_SOLID` at coverage limit cases (0, 1).
+//! No SDK GL/VK reference exists for the LCD path, so limit cases are used
+//! instead of pinning subpixel constants. Broken `@blend_src` wiring or a
+//! failed pipeline compile causes the blend factors to disagree and the pixel
+//! assertions fail. Skips without `DUAL_SOURCE_BLENDING`.
 
 use std::ffi::c_void;
 
@@ -33,11 +23,8 @@ const IDENTITY: [f32; 16] = [
     0.0, 0.0, 1.0, 0.0, //
     0.0, 0.0, 0.0, 1.0,
 ];
-// Sized so `st1 = uv1 * glyph_size` has a screen-space gradient near 1 texel
-// per pixel across the 4-px quad (uv1 spans 0..1). A realistic gradient keeps
-// the SDF AA window narrow so the fully-inside / fully-outside distances
-// saturate coverage to 1 / 0 — an inflated gradient would widen the window and
-// leave fractional coverage.
+// uv1 spans 0..1 so `st1 = uv1 * glyph_size` gives ~1 texel/px gradient,
+// keeping the SDF AA window narrow enough that limit-case distances saturate.
 const GLYPH_SIZE: [f32; 2] = [4.0, 4.0];
 const GREEN_BG: wgpu::Color = wgpu::Color {
     r: 0.0,
@@ -121,7 +108,6 @@ async fn run_test() {
         data: Some(&outside_levels),
     });
 
-    // Red text over a green background. cov = 1 ⇒ red; cov = 0 ⇒ green.
     let red = [255u8, 0, 0, 255];
     let covered = run_lcd_draw(&device, &queue, &mut rd, inside.handle, nearest, red).await;
     assert_close(
@@ -140,8 +126,6 @@ async fn run_test() {
     );
 }
 
-/// Render one `SDF_LCD_SOLID` quad (`color` text) over a green-cleared RT using
-/// `glyph` at group(2), and read back the centre pixel.
 async fn run_lcd_draw(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -158,8 +142,7 @@ async fn run_lcd_draw(
         needs_stencil: false,
     });
 
-    // Pre-fill the RT with the green background; draw_batch loads (not clears)
-    // the color attachment, so the dual-source blend composites over this.
+    // draw_batch loads the color attachment, so pre-fill with the green background.
     clear_rt(device, queue, rd, rt.resolve_texture.handle, GREEN_BG);
 
     let vb = lcd_quad(color);
@@ -215,8 +198,6 @@ fn clear_rt(
     queue.submit(Some(enc.finish()));
 }
 
-// ── Geometry helpers ────────────────────────────────────────────────────
-
 fn full_tile() -> noesis_runtime::render_device::types::Tile {
     noesis_runtime::render_device::types::Tile {
         x: 0,
@@ -234,9 +215,8 @@ fn quad_indices() -> Vec<u8> {
     ib
 }
 
-/// Full-screen quad in `PosColorTex1` format (pos, color, uv1). uv1 tracks pos
-/// (0..1) so `st1 = uv1 * glyph_size` has a nonzero screen-space gradient (the
-/// SDF AA window divides by it).
+// uv1 tracks pos (0..1) so `st1 = uv1 * glyph_size` gives the nonzero gradient
+// the SDF AA window requires.
 fn lcd_quad(color: [u8; 4]) -> Vec<u8> {
     let verts = [
         ([-1.0f32, -1.0], [0.0f32, 0.0]),
@@ -293,8 +273,6 @@ fn lcd_batch() -> Batch {
         pixel_shader: std::ptr::null_mut(),
     }
 }
-
-// ── Readback ────────────────────────────────────────────────────────────
 
 async fn read_pixel(
     device: &wgpu::Device,

@@ -1,17 +1,15 @@
-//! Phase 4.B regression test: drive the offscreen frame phase end to end.
+//! Exercises the offscreen render-target path end to end.
 //!
 //! - `create_texture` + `update_texture` + `drop_texture` round-trip.
 //! - `create_render_target` (single-sampled, with stencil requested).
 //! - `begin_offscreen_render` → `set_render_target` → `begin_tile` (scissor)
 //!   → `map_vertices`/`map_indices` → `draw_batch` → `end_tile` →
 //!   `resolve_render_target` → `end_offscreen_render` → submit.
-//! - Readback from the resolve texture confirms:
-//!   - The tile scissor actually clipped rendering.
-//!   - Two batches in one offscreen submit get distinct uniforms (ring buffer
-//!     regression still holding after the refactor).
+//! - Readback confirms tile scissor clipped rendering and two batches in one
+//!   submit received distinct uniforms (ring-buffer regression).
 //!
-//! The onscreen path continues to be covered by `wgpu_first_triangle.rs`
-//! and `wgpu_multi_shader.rs`; this test exclusively exercises offscreen.
+//! The onscreen path is covered by `wgpu_first_triangle.rs` and
+//! `wgpu_multi_shader.rs`; this test exclusively exercises offscreen.
 
 use std::ffi::c_void;
 
@@ -61,11 +59,10 @@ async fn run_test() {
         })
         .await
         .expect("no wgpu device available");
-    // This test exercises the offscreen path only, so no onscreen target
-    // is needed — the new API makes the onscreen view optional.
+    // Offscreen path only; no onscreen target needed.
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
 
-    // ── Sanity-check texture lifecycle (no samplers yet; just allocation). ──
+    // Sanity-check texture lifecycle (no samplers; just allocation).
     let texel = [0xAB_u8; 4 * 4 * 4]; // 4x4 RGBA dummy
     let data = [&texel[..]];
     let tex_binding = rd.create_texture(TextureDesc {
@@ -94,7 +91,6 @@ async fn run_test() {
         "texture not dropped"
     );
 
-    // ── Create the render target. ──────────────────────────────────────────
     let rt = rd.create_render_target(RenderTargetDesc {
         label: "test rt",
         width: RT_SIZE,
@@ -104,10 +100,8 @@ async fn run_test() {
     });
     assert_eq!(rd.render_target_size(rt.handle), Some((RT_SIZE, RT_SIZE)));
 
-    // Pre-clear the resolve texture to a known color through a dedicated
-    // encoder (the RenderDevice doesn't expose a clear API; Noesis normally
-    // uses Shader::CLEAR via draw_batch). Done before drawing so we can tell
-    // clipped vs unclipped pixels apart on readback.
+    // RenderDevice has no clear API; separate encoder clears before drawing
+    // so readback can distinguish clipped from unclipped pixels.
     {
         let resolve = rd
             .texture(rt.resolve_texture.handle)
@@ -139,20 +133,13 @@ async fn run_test() {
         queue.submit(Some(enc.finish()));
     }
 
-    // ── Drive the offscreen phase. ────────────────────────────────────────
-    // One batch covers the whole RT with red via EFFECT_RGBA uniforms; tile
-    // scissor restricts it to the left half. Second batch covers the whole
-    // RT with green; scissored to the right half. If tiling + ring buffer
-    // both work, we see red left / green right / clear top-bottom borders.
-    //
-    // Layout (128×128 RT):
-    //   tile_a = (x=0,   y=32, w=64, h=64) → left-middle rect
-    //   tile_b = (x=64,  y=32, w=64, h=64) → right-middle rect
-    //
-    // Tile origin is lower-left; the device converts to wgpu's upper-left.
+    // tile_a: red batch, scissored to left half  (x=0,  y=32, w=64, h=64)
+    // tile_b: green batch, scissored to right half (x=64, y=32, w=64, h=64)
+    // Two batches verify both tiling (scissor) and the ring buffer (distinct uniforms).
+    // Tile origin lower-left; device converts to wgpu upper-left.
 
     let mut vb = Vec::with_capacity(96);
-    // Fullscreen quad (clip space -1..1) — two triangles, 6 verts, Pos format.
+    // Fullscreen quad (clip space -1..1): two triangles, 6 verts, Pos format.
     for v in [
         [-1.0f32, -1.0],
         [1.0, -1.0],
@@ -242,7 +229,6 @@ async fn run_test() {
     );
     rd.end_offscreen_render();
 
-    // ── Readback from the resolve texture. ────────────────────────────────
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(RT_SIZE),
@@ -302,12 +288,9 @@ async fn run_test() {
         ]
     };
 
-    // The tile covers y in [32, 96) in Noesis coords. Noesis origin is
-    // lower-left, wgpu readback is upper-left. Noesis y=32..96 maps to wgpu
-    // y=32..96 as well (height 128 − 96 = 32 from top).
-    //
-    //   wgpu y ∈ [32, 96): inside the tiles
-    //   outside that band: pre-clear color survives
+    // Noesis lower-left vs wgpu upper-left: for this 128-tall RT, y=32..96
+    // maps identically (128 - 96 = 32 from top). Pre-clear survives outside
+    // [32, 96).
     assert_eq!(pixel(32, 16), CLEAR, "above the tile band should be clear");
     assert_eq!(pixel(32, 112), CLEAR, "below the tile band should be clear");
     assert_eq!(
@@ -320,8 +303,7 @@ async fn run_test() {
         [0, 255, 0, 255],
         "right half inside tile should be green"
     );
-    // Edge within tile, just outside horizontal clip (same row, further right):
-    // column 64 is the seam between tiles; we check 62 (left) and 66 (right).
+    // Column 64 is the seam; 62 = left tile, 66 = right tile.
     assert_eq!(pixel(62, 64), [255, 0, 0, 255], "seam-left should be red");
     assert_eq!(
         pixel(66, 64),

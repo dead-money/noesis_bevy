@@ -1,27 +1,11 @@
-//! Headless smoke test for the `examples/scoreboard.rs` faithful port of the
-//! Noesis SDK **Scoreboard** sample. It `#[path]`-includes the example, stages
-//! the SDK's *real* `MainWindow.xaml` + fonts at runtime (never vendored), boots
-//! the same wiring under the headless `ScheduleRunnerPlugin`, pumps real
-//! `NoesisPlugin` frames, and asserts the scene builds + renders without panic
-//! while bound values round-trip through the crate's safe bridges.
+//! Smoke test for the scoreboard example.
 //!
-//! Two assertions, both through bridges (never raw FFI):
+//! Asserts two things via bridges (no raw FFI):
+//!   1. Ten player objects reach `Players` `ItemsControl` (`NoesisItemsCurrent` count == 10).
+//!   2. Mutating `Game.SelectedTeam` (frame 30, 0 -> 2) pushes through `{Binding SelectedTeam}`
+//!      to `VisibleTeam.SelectedIndex`, read back via `NoesisDp`, and only after the edit frame.
 //!
-//!   1. **Object `ItemsSource` bridge** ([`NoesisItems::with_objects`]). The ten
-//!      bindable player objects reach the live `Players` `ItemsControl`: the
-//!      engine read-back ([`NoesisItemsCurrent`]) reports `count == 10` (an
-//!      unbound list reads `0`).
-//!   2. **`DataContext` binding bridge** ([`NoesisVm`] + [`NoesisDp`]). The
-//!      `VisibleTeam` `ComboBox`'s `SelectedIndex="{Binding SelectedTeam}"` binds
-//!      to the Game view model. We mutate `Game.SelectedTeam` mid-run (0 -> 2)
-//!      and require [`NoesisDp`] to read the named combo's `SelectedIndex` back as
-//!      `2` — and *never* as `2` before the edit frame (bluff-catch). That is a
-//!      real bound value reaching a named element, read back via `NoesisDp`.
-//!
-//! When `$NOESIS_SDK_DIR` is unset the SDK assets can't be loaded, so the test
-//! skips (passes) — the same graceful no-op the example uses.
-//!
-//!   `cargo test -p noesis_bevy --test headless_example_scoreboard -- --nocapture`
+//! Skips gracefully when `$NOESIS_SDK_DIR` is unset.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,7 +17,6 @@ use noesis_bevy::{
     DpValue, FontRegistry, NoesisDpChanged, NoesisItemsCurrent, NoesisVm, XamlRegistry,
 };
 
-// The example is a binary; included as a module here only some items are used.
 #[allow(dead_code)]
 #[path = "../examples/scoreboard.rs"]
 mod scoreboard;
@@ -53,9 +36,7 @@ fn scoreboard_example_binds_players_and_selected_team() {
         return;
     }
 
-    // (frame, count) for the Players ItemsControl read-back.
     let player_counts: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
-    // (frame, selected_index) read back from VisibleTeam.SelectedIndex via DP.
     let selected_idx: Arc<Mutex<Vec<(usize, i32)>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
@@ -73,7 +54,7 @@ fn scoreboard_example_binds_players_and_selected_team() {
     );
     app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
     app.add_plugins(noesis_bevy::NoesisPlugin::default());
-    // The sample's `<Window>` root needs the content-host stand-in to parse.
+    // `<Window>` root needs the content-host stand-in to parse.
     app.add_plugins(noesis_bevy::NoesisWindowCompatPlugin);
 
     let view_startup = Arc::clone(&view_entity);
@@ -116,8 +97,6 @@ fn scoreboard_example_binds_players_and_selected_team() {
                 }
             }
 
-            // Mutate the bound Game.SelectedTeam mid-run (0 -> 2); the combo's
-            // {Binding SelectedTeam} must push it into SelectedIndex.
             if *frame == EDIT_AT_FRAME {
                 for mut vm in &mut vms {
                     vm.set_i32("SelectedTeam", EDIT_SELECTED_TEAM);
@@ -137,21 +116,18 @@ fn scoreboard_example_binds_players_and_selected_team() {
     eprintln!("--- Players counts: {counts:?}");
     eprintln!("--- VisibleTeam.SelectedIndex: {indices:?}");
 
-    // 1. Object ItemsSource bridge: the ten bindable players reached the control.
     assert!(
         counts.iter().any(|(_, c)| *c == 10),
         "Players ItemsControl never reported the 10 bindable player objects (an \
          unbound list reads 0); counts {counts:?}",
     );
 
-    // 2. DataContext binding bridge: the mutated SelectedTeam reached the named
-    //    combo's SelectedIndex via {Binding SelectedTeam}, read back via NoesisDp.
     assert!(
         indices.iter().any(|(_, v)| *v == EDIT_SELECTED_TEAM),
         "VisibleTeam.SelectedIndex never reached {EDIT_SELECTED_TEAM} after the \
          Game.SelectedTeam edit; bound value did not round-trip. got {indices:?}",
     );
-    // Bluff-catch: SelectedIndex must not have been the edited value beforehand.
+    // Bluff-catch: value must not appear before the edit frame.
     assert!(
         indices
             .iter()

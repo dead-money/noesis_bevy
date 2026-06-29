@@ -1,6 +1,6 @@
-//! `#[derive(NoesisViewModel)]` — generate the glue that lets a plain Rust
-//! struct be bound to XAML `{Binding field_name}` by field name, with two-way
-//! writeback, via `noesis_bevy`'s plain-VM bridge.
+//! `#[derive(NoesisViewModel)]` generates the glue that binds a plain Rust
+//! struct to XAML `{Binding field_name}` by field name, with two-way
+//! writeback, through `noesis_bevy`'s plain-VM bridge.
 //!
 //! The derive maps each field to a Noesis-reflected property:
 //!
@@ -11,7 +11,7 @@
 //! | `bool`                 | `Bool`               |
 //! | `String`               | `String`             |
 //!
-//! Unsupported field types are a compile error — annotate them `#[noesis(skip)]`
+//! Unsupported field types are a compile error; annotate them `#[noesis(skip)]`
 //! to exclude them from the view model. The Noesis type name defaults to the
 //! struct's identifier; override with `#[noesis(name = "...")]`.
 
@@ -76,7 +76,6 @@ fn is_skipped(attrs: &[syn::Attribute]) -> bool {
     let mut skip = false;
     for attr in attrs {
         if attr.path().is_ident("noesis") {
-            // `parse_nested_meta` walks the comma list inside `noesis(...)`.
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("skip") {
                     skip = true;

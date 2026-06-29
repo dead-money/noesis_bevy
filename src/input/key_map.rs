@@ -1,9 +1,9 @@
 //! Bevy [`KeyCode`] → Noesis [`Key`] mapping.
 //!
 //! Covers the keys Bevy produces on a standard US keyboard. Anything
-//! unmapped returns [`Key::None`] — the Noesis FFI swallows those rather
+//! unmapped returns [`Key::None`]. The Noesis FFI swallows those rather
 //! than routing them, so an unmapped key is a silent no-op and callers
-//! still get the matching `Char` event from [`KeyboardInput::text`].
+//! still get the matching `Char` event from `KeyboardInput::text`.
 //!
 //! If you find yourself wanting a key that's missing, add it both here
 //! AND to the explicit-discriminant enum in `noesis_runtime::view::Key` (and
@@ -12,6 +12,12 @@
 use bevy::input::keyboard::KeyCode;
 use noesis_runtime::view::Key;
 
+/// Translates a Bevy [`KeyCode`] into the Noesis [`Key`] the view expects.
+///
+/// The input bridge calls this on each [`KeyboardInput`](bevy::input::keyboard::KeyboardInput)
+/// before forwarding the press to the live scene. Keys outside the standard US
+/// layout return [`Key::None`], which the Noesis FFI drops; the matching `Char`
+/// event still arrives via the keyboard input's `text`.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn from_bevy(code: KeyCode) -> Key {
@@ -136,7 +142,7 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::NumpadDivide => Key::Divide,
         KeyCode::NumpadEnter => Key::Return,
 
-        // Punctuation (OEM keys — US layout).
+        // Punctuation (OEM keys, US layout).
         KeyCode::Semicolon => Key::OemSemicolon,
         KeyCode::Equal => Key::OemPlus,
         KeyCode::Comma => Key::OemComma,
@@ -181,7 +187,6 @@ mod tests {
 
     #[test]
     fn unmapped_falls_back_to_none() {
-        // A key not in the match arms (pick an obscure one Bevy exposes).
         assert_eq!(from_bevy(KeyCode::Fn), Key::None);
         assert_eq!(from_bevy(KeyCode::Lang1), Key::None);
     }

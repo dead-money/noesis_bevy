@@ -1,11 +1,11 @@
-//! XAML asset plumbing for the Bevy plugin (Phase 4.D.2).
+//! XAML asset plumbing for the Bevy plugin.
 //!
 //! Noesis expects to fetch XAML bytes by URI via a
 //! [`noesis_runtime::xaml_provider::XamlProvider`]. Bevy's asset system is the
 //! natural source for those bytes, but the lookup happens on the render-app
 //! thread during `FrameworkElement::load`, while assets live on the main app.
 //! We bridge the two sides through the canonical Bevy main↔render sync
-//! point — [`bevy_render::ExtractSchedule`] — never a cross-world lock.
+//! point, [`bevy_render::ExtractSchedule`], never a cross-world lock.
 //!
 //! Data flow:
 //!
@@ -20,12 +20,7 @@
 //!                                     │          │                 │
 //!                                     │          ▼                 │
 //!                                     │    BevyXamlProvider sync ──┘
-//!                                     │       (Phase 4.D.3)
 //! ```
-//!
-//! 4.D.2 lands the main-side types, the extract plumbing, and the
-//! [`BevyXamlProvider`] impl. Wiring the provider into Noesis + attaching
-//! the sync system to the render app is 4.D.3.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,7 +36,7 @@ use noesis_runtime::xaml_provider::XamlProvider;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Raw XAML bytes loaded from the asset system. Noesis parses the bytes
-/// directly — we never interpret them on the Rust side.
+/// directly; we never interpret them on the Rust side.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct XamlAsset {
     /// UTF-8 XAML markup. Wrapped in an `Arc` so [`XamlRegistry`] can share
@@ -49,7 +44,7 @@ pub struct XamlAsset {
     pub bytes: Arc<Vec<u8>>,
 }
 
-/// Loader for the `.xaml` extension. Reads the whole file into memory —
+/// Loader for the `.xaml` extension. Reads the whole file into memory:
 /// XAML files are small (kilobytes) and Noesis wants a contiguous slice.
 #[derive(Default, TypePath)]
 pub struct XamlAssetLoader;
@@ -78,7 +73,7 @@ impl AssetLoader for XamlAssetLoader {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// XamlRegistry — URI → bytes map, extracted main → render each frame
+// XamlRegistry: URI → bytes map, extracted main → render each frame
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Maps the URIs Noesis asks for (typically the asset path used with
@@ -118,7 +113,7 @@ impl XamlRegistry {
         self.entries.keys().map(String::as_str)
     }
 
-    /// Register XAML bytes for a URI directly — bypasses the
+    /// Register XAML bytes for a URI directly, bypassing the
     /// `AssetServer`-driven path. Useful when loading scenes from
     /// arbitrary filesystem locations (the `xaml_viewer` example uses
     /// this to point at `$NOESIS_SDK_DIR/Data/` or a standalone file).
@@ -132,7 +127,7 @@ impl XamlRegistry {
 /// XAML asset loads, changes, or unloads.
 ///
 /// Uses `AssetServer::get_path` to recover the canonical URI. Assets loaded
-/// without a path (e.g. `add_asset` directly) are skipped — Noesis needs a
+/// without a path (e.g. `add_asset` directly) are skipped: Noesis needs a
 /// URI to look them up.
 #[allow(clippy::needless_pass_by_value)] // Bevy systems take Res<T> by value
 pub fn update_xaml_registry(
@@ -171,12 +166,12 @@ pub fn update_xaml_registry(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BevyXamlProvider — the render-world XamlProvider impl
+// BevyXamlProvider: the render-world XamlProvider impl
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Shared URI → bytes map. Once a provider is handed to Noesis via
 /// [`noesis_runtime::xaml_provider::set_xaml_provider`], the [`Registered`] guard
-/// owns the boxed provider opaquely — we can't mutate its state through the
+/// owns the boxed provider opaquely; we can't mutate its state through the
 /// guard. The provider holds a clone of this `Arc`; a separate clone lives
 /// as a render-world resource so a sync system can update the map each
 /// frame from the extracted [`XamlRegistry`].
@@ -184,8 +179,7 @@ pub fn update_xaml_registry(
 /// The `Mutex` is **only** accessed from the render world (by the sync
 /// system in `ExtractSchedule` and the provider callback fired from
 /// `NoesisNode::run`); those two schedules run sequentially, so contention
-/// is always zero. No lock ever crosses the main↔render boundary —
-/// [`Rc`](std::rc::Rc) this is not.
+/// is always zero. No lock ever crosses the main↔render boundary.
 ///
 /// [`Registered`]: noesis_runtime::xaml_provider::Registered
 #[derive(Clone, Default)]
@@ -196,7 +190,7 @@ impl SharedXamlMap {
     ///
     /// # Panics
     ///
-    /// Panics if the internal mutex is poisoned — only possible if another
+    /// Panics if the internal mutex is poisoned, only possible if another
     /// holder panicked mid-modification, which in our architecture means
     /// programmer error (schedule violation) rather than recoverable
     /// runtime state.
@@ -213,7 +207,7 @@ impl SharedXamlMap {
 /// `load_xaml` clones the `Arc<Vec<u8>>` for the requested URI out of the
 /// shared map into `self.current`, releases the lock, and returns a borrow
 /// into `self.current`. The borrow stays valid until the *next* call
-/// rotates `self.current` — which covers Noesis's synchronous-parse
+/// rotates `self.current`, which covers Noesis's synchronous-parse
 /// contract and keeps the lock untouched during the parse itself.
 pub struct BevyXamlProvider {
     shared: SharedXamlMap,
@@ -260,15 +254,15 @@ impl XamlProvider for BevyXamlProvider {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// XamlAssetPlugin — wires main-app pieces + extract plumbing
+// XamlAssetPlugin: wires main-app pieces + extract plumbing
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Plugin that registers [`XamlAsset`] + [`XamlAssetLoader`], initializes
 /// [`XamlRegistry`], and installs the extract plumbing that mirrors the
 /// registry into the render world.
 ///
-/// Does *not* touch Noesis — the render-side provider registration happens
-/// in Phase 4.D.3's `NoesisRenderPlugin`.
+/// Does *not* touch Noesis; the render-side provider registration happens
+/// in the `NoesisRenderPlugin`.
 pub struct XamlAssetPlugin;
 
 impl Plugin for XamlAssetPlugin {
@@ -307,8 +301,7 @@ mod tests {
         assert_eq!(slice_a, bytes_a.as_slice());
 
         // Noesis contract: the slice must live until the parse returns, i.e.
-        // until the next load_xaml call. After the next load, `current`
-        // rotates to the new Arc — that's intentional, not a bug.
+        // until the next load_xaml call, which rotates `current` to the new Arc.
         let slice_b = provider.load_xaml("b.xaml").expect("b.xaml missing");
         assert_eq!(slice_b, bytes_b.as_slice());
 
@@ -325,15 +318,14 @@ mod tests {
         shared.sync_from(&registry);
         assert_eq!(provider.load_xaml("a.xaml"), Some(b"v1".as_slice()));
 
-        // Registry updates in place — simulating a hot-reload on the main
-        // side — and a fresh sync propagates.
+        // Registry updates in place (hot-reload on the main side); a fresh
+        // sync propagates.
         registry
             .entries
             .insert("a.xaml".into(), Arc::new(b"v2".to_vec()));
         shared.sync_from(&registry);
         assert_eq!(provider.load_xaml("a.xaml"), Some(b"v2".as_slice()));
 
-        // Removal is reflected on sync.
         registry.entries.remove("a.xaml");
         shared.sync_from(&registry);
         assert_eq!(provider.load_xaml("a.xaml"), None);
@@ -355,8 +347,8 @@ mod tests {
             extracted.entries.get("foo.xaml").map(|a| a.as_slice()),
             Some(b"hello".as_slice()),
         );
-        // Arc-level identity is preserved — the clone shares bytes, doesn't
-        // copy them. This is what makes the per-frame extract cheap.
+        // Arc identity is preserved: the clone shares bytes, doesn't copy
+        // them. This is what makes the per-frame extract cheap.
         assert!(Arc::ptr_eq(
             source.entries.get("foo.xaml").unwrap(),
             extracted.entries.get("foo.xaml").unwrap(),

@@ -6,18 +6,18 @@
 //! returning a `Drop`-guard. This plugin registers all three once, funnels their
 //! firings through a shared queue, and surfaces them as Bevy messages:
 //!
-//!   * [`NoesisCursorRequested`] — fired when the engine wants a cursor change
+//!   * [`NoesisCursorRequested`]: fired when the engine wants a cursor change
 //!     (e.g. the pointer moves over an element with a non-default `Cursor`). Also
 //!     applied to the primary window's [`CursorIcon`] as a convenience.
-//!   * [`NoesisOpenUrl`] — fired when a `Hyperlink` / command asks the host to
+//!   * [`NoesisOpenUrl`]: fired when a `Hyperlink` / command asks the host to
 //!     open a URL, or when the app calls [`open_url`].
-//!   * [`NoesisPlayAudio`] — fired when a `MediaElement` / sound asks the host to
+//!   * [`NoesisPlayAudio`]: fired when a `MediaElement` / sound asks the host to
 //!     play audio, or when the app calls [`play_audio`].
 //!
 //! # Threading
 //!
 //! Noesis is thread-affine to the main thread in this crate (see
-//! [`crate::render::NoesisRenderState`]), so every callback fires **synchronously
+//! `crate::render::NoesisRenderState`), so every callback fires **synchronously
 //! on the main thread** while the frame is driven in `PostUpdate`. The shared
 //! queue is therefore only ever touched from one thread; the `Mutex` exists to
 //! satisfy the runtime's `Send` bound on the closures, not to bridge threads.
@@ -27,9 +27,9 @@
 //! The three `*Callback` guards unregister via FFI on `Drop`, which crashes if
 //! it runs after `shutdown()`. Bevy gives no drop order between main-world
 //! resources, so the guards can't live in this plugin's own resource. Instead
-//! [`install_integration_guards`] hands them to [`crate::render::NoesisRenderState`]
+//! `install_integration_guards` hands them to `crate::render::NoesisRenderState`
 //! (via `own_integration_guards`), whose `Drop` releases them just before it
-//! calls `shutdown()` — the same ownership discipline as the render device and
+//! calls `shutdown()`, the same ownership discipline as the render device and
 //! provider guards.
 //!
 //! These hooks are **single-slot, last-registration-wins** process-globally
@@ -117,8 +117,8 @@ impl SharedIntegrationQueue {
 
 /// Register the three process-global callbacks once and hand their guards to
 /// [`NoesisRenderState`] for ordered teardown (see the module docs). Each
-/// closure pushes onto the shared queue. Runs in [`NoesisSet::Sync`] — before
-/// any view is built or driven — so the callbacks are live for the first frame.
+/// closure pushes onto the shared queue. Runs in [`NoesisSet::Sync`], before
+/// any view is built or driven, so the callbacks are live for the first frame.
 #[allow(clippy::needless_pass_by_value)]
 fn install_integration_guards(
     queue: Res<SharedIntegrationQueue>,
@@ -185,7 +185,7 @@ fn drain_integration_queue(
 }
 
 /// Apply the most recent cursor request to the primary window. No-op when there
-/// is no window (e.g. a headless app) — the [`NoesisCursorRequested`] message is
+/// is no window (e.g. a headless app); the [`NoesisCursorRequested`] message is
 /// still emitted for consumers that route the cursor themselves.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_cursor_to_window(
@@ -207,7 +207,7 @@ fn apply_cursor_to_window(
 
 /// Map a Noesis [`CursorType`] to the nearest Bevy [`SystemCursorIcon`].
 /// Returns `None` for cursors with no standard system equivalent (`None`,
-/// `Custom`, …) — those leave the window cursor unchanged.
+/// `Custom`, …). Those leave the window cursor unchanged.
 fn to_system_cursor(ty: CursorType) -> Option<SystemCursorIcon> {
     use CursorType as C;
     Some(match ty {
@@ -229,7 +229,7 @@ fn to_system_cursor(ty: CursorType) -> Option<SystemCursorIcon> {
         C::Wait => SystemCursorIcon::Wait,
         C::Hand => SystemCursorIcon::Pointer,
         // `None`, `Custom`, and any future (`non_exhaustive`) variant have no
-        // standard system equivalent — leave the window cursor unchanged.
+        // standard system equivalent; leave the window cursor unchanged.
         _ => return None,
     })
 }
@@ -249,9 +249,6 @@ impl Plugin for NoesisIntegrationPlugin {
             .add_message::<NoesisCursorRequested>()
             .add_message::<NoesisOpenUrl>()
             .add_message::<NoesisPlayAudio>()
-            // Register the callbacks in `Sync` (before scenes are built/driven);
-            // drain + apply after `Drive`, so a callback raised while driving a
-            // view this frame is surfaced the same frame.
             .add_systems(
                 PostUpdate,
                 (

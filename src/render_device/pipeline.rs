@@ -26,19 +26,28 @@ const NOESIS_WGSL: &str = include_str!("shaders/noesis.wgsl");
 /// through `HashMap`'s `Hash` cleanly).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PipelineKey {
+    /// Raw `Shader::Enum` value selecting which WGSL variant to compile.
     pub shader: u8,
+    /// Raw `RenderState` bits driving blend mode, stencil mode, color-write
+    /// mask, and wireframe flag.
     pub render_state: u8,
+    /// Raw `VertexFormat::Enum` value selecting the vertex stride and
+    /// attribute layout. Derived from `shader` but stored so it hashes.
     pub vertex_format: u8,
     /// Whether the render pass this pipeline draws into has a stencil
     /// attachment. wgpu requires the pipeline's `depth_stencil` presence to
     /// match the pass's `depth_stencil_attachment`, and the same
     /// `(shader, render_state, vertex_format)` can be drawn both into a
     /// stenciled offscreen RT (and the onscreen intermediate) and into a
-    /// stencil-less RT — so it has to be part of the key.
+    /// stencil-less RT, so it has to be part of the key.
     pub has_stencil: bool,
 }
 
 impl PipelineKey {
+    /// Derive the key for a draw `batch`, looking the vertex format up from
+    /// the batch's shader. `has_stencil` records whether the destination
+    /// render pass carries a stencil attachment so stenciled and stencil-less
+    /// passes get distinct pipelines.
     #[must_use]
     pub fn from_batch(batch: &Batch, has_stencil: bool) -> Self {
         let vshader = VERTEX_FOR_SHADER[batch.shader.0 as usize];
@@ -60,25 +69,24 @@ pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 
 /// Build the `wgpu::DepthStencilState` for a `RenderState`'s stencil mode.
 ///
-/// Ports `GLRenderDevice::SetRenderState`'s `StencilMode` dispatch
-/// (`glStencilFunc` / `glStencilOp`). The stencil *reference* is dynamic and
-/// applied per draw via `set_stencil_reference`, not baked here. Depth is
-/// always `Always` / no-write: `Stencil8` carries no depth aspect, and the
-/// `Disabled_ZTest` / `Equal_Keep_ZTest` modes (which need a depth buffer for
-/// 3D-transformed UI) degrade to their non-depth equivalents.
+/// The stencil *reference* is dynamic and applied per draw via
+/// `set_stencil_reference`, not baked here. Depth is always `Always` / no-write:
+/// `Stencil8` carries no depth aspect, and the `Disabled_ZTest` /
+/// `Equal_Keep_ZTest` modes (which need a depth buffer for 3D-transformed UI)
+/// degrade to their non-depth equivalents.
 fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
     use wgpu::{CompareFunction, StencilOperation};
 
     let (compare, pass_op) = match render_state.stencil_mode_raw() {
-        // Disabled / Disabled_ZTest — stencil test off (always pass, no write).
+        // Disabled / Disabled_ZTest: stencil test off (always pass, no write).
         0 | 5 => (CompareFunction::Always, StencilOperation::Keep),
-        // Equal_Keep / Equal_Keep_ZTest — pass where stencil == ref; keep.
+        // Equal_Keep / Equal_Keep_ZTest: pass where stencil == ref; keep.
         1 | 6 => (CompareFunction::Equal, StencilOperation::Keep),
-        // Equal_Incr — pass where == ref; increment (wrap) on pass.
+        // Equal_Incr: pass where == ref; increment (wrap) on pass.
         2 => (CompareFunction::Equal, StencilOperation::IncrementWrap),
-        // Equal_Decr — pass where == ref; decrement (wrap) on pass.
+        // Equal_Decr: pass where == ref; decrement (wrap) on pass.
         3 => (CompareFunction::Equal, StencilOperation::DecrementWrap),
-        // Clear — always pass; zero the stencil (GL: ALWAYS + ZERO/ZERO/ZERO).
+        // Clear: always pass; zero the stencil.
         4 => (CompareFunction::Always, StencilOperation::Zero),
         other => panic!("unknown StencilMode raw value: {other}"),
     };
@@ -109,7 +117,7 @@ fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
 /// The pipeline layout binds four groups: `group(0)` vs uniforms, `group(1)`
 /// ps uniforms (`cbuffer0_ps` + `cbuffer1_ps`), `group(2)` pattern texture +
 /// sampler, `group(3)` image + shadow textures + samplers. Shaders that don't
-/// use a group's bindings still share this layout — the Rust side binds a dummy
+/// use a group's bindings still share this layout; the Rust side binds a dummy
 /// bind group there since wgpu requires every declared group to be set.
 pub struct PipelineCache {
     device: wgpu::Device,
@@ -119,6 +127,9 @@ pub struct PipelineCache {
 }
 
 impl PipelineCache {
+    /// Create an empty cache. `device` and `pipeline_layout` build pipelines
+    /// on demand, and `target_format` is the color format every pipeline
+    /// writes into (the onscreen intermediate or an offscreen render target).
     #[must_use]
     pub fn new(
         device: wgpu::Device,
@@ -135,8 +146,8 @@ impl PipelineCache {
 
     /// Ensure a pipeline exists for `key`, building it if necessary.
     ///
-    /// Returns nothing — pair with [`Self::get`] to actually fetch the
-    /// pipeline; the split lets `draw_batch` borrow other fields of
+    /// Returns nothing; pair with [`Self::get`] to fetch the pipeline. The
+    /// split lets `draw_batch` borrow other fields of
     /// `WgpuRenderDevice` (the encoder) between the two calls without
     /// tripping the borrow checker.
     ///
@@ -166,12 +177,12 @@ impl PipelineCache {
 
 /// Map a Noesis `BlendMode::Enum` raw value to a wgpu `BlendState`.
 ///
-/// `None` means "no blending" (the wgpu default) — the source value
-/// overwrites the destination. That's `BlendMode::Src`. Every other variant
-/// returns `Some` with the appropriate factor / op pair.
+/// `None` means "no blending" (the wgpu default): the source value overwrites
+/// the destination. That's `BlendMode::Src`. Every other variant returns `Some`
+/// with the appropriate factor / op pair.
 ///
 /// `SrcOverDual` uses dual-source blending (a second `@location(0)
-/// @blend_src(1)` fragment output) for SDF LCD subpixel rendering — the second
+/// @blend_src(1)` fragment output) for SDF LCD subpixel rendering; the second
 /// output carries per-channel coverage that drives the `OneMinusSrc1` factor.
 fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
     let comp = |src, dst| wgpu::BlendComponent {
@@ -182,9 +193,9 @@ fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
     let src_over_alpha = comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha);
 
     match blend_mode_raw {
-        0 => None, // BlendMode::Src — straight overwrite
+        0 => None, // BlendMode::Src: straight overwrite
         1 => Some(wgpu::BlendState {
-            // BlendMode::SrcOver: cs + cd*(1-as), as + ad*(1-as) — premultiplied alpha
+            // BlendMode::SrcOver: cs + cd*(1-as), as + ad*(1-as); premultiplied alpha
             color: src_over_alpha,
             alpha: src_over_alpha,
         }),
@@ -238,14 +249,12 @@ fn build_pipeline(
         attributes: &attrs,
     };
 
-    // BlendMode comes from RenderState bits 1–3. ColorEnable gates color
-    // writes — Noesis emits stencil-only MASK draws with `color_enable=0`,
-    // and those write `vec4(1.0)` from the fragment shader; without
-    // honoring the flag here, those white pixels land in the color
-    // attachment and obscure subsequent draws (manifested for hommlet's
-    // dev console as a white panel covering the log surface on the
-    // second open). StencilMode / wireframe wiring lands in later
-    // sub-phases when stencil clipping earns its keep.
+    // BlendMode comes from RenderState bits 1-3. ColorEnable gates color
+    // writes: Noesis emits stencil-only MASK draws with `color_enable=0` that
+    // write `vec4(1.0)` from the fragment shader. Without honoring the flag,
+    // those white pixels land in the color attachment and obscure subsequent
+    // draws (seen as a white panel over hommlet's dev console log on the
+    // second open).
     let render_state = RenderState(key.render_state);
     let blend = blend_state_for(render_state.blend_mode_raw());
     let write_mask = if render_state.color_enable() {

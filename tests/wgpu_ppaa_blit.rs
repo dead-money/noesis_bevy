@@ -1,30 +1,18 @@
-//! TODO §2 — PPAA premultiplied blit.
+//! Tests the premultiplied composite blit used when `RenderFlag::Ppaa` is on.
 //!
-//! With `RenderFlag::Ppaa` on, Noesis paints anti-aliased edges with fractional
-//! alpha into the intermediate, *premultiplied* (its `BlendMode::SrcOver` is
-//! `One, OneMinusSrcAlpha`). The compositing blit must therefore composite the
-//! intermediate over the camera's cleared `ViewTarget` using a premultiplied
-//! "over" blend. The old Core2d path overwrote the target 1:1, which discarded
-//! the camera clear colour and left premultiplied bytes for a downstream
-//! straight-alpha step to re-multiply — letting the clear colour bleed through
-//! PPAA edges (edges too dark / wrongly tinted).
+//! Drives [`blit_composite_for_test`], which builds the same `BlitPipeline` and
+//! premultiplied "over" blend (`One, OneMinusSrcAlpha`) the render-graph nodes
+//! use. Each test composites a fractional-alpha premultiplied source over a
+//! target pre-cleared to a distinct colour, reads back pixels, and asserts exact
+//! premultiplied blend values with no clear-colour bleed.
 //!
-//! These tests drive the real production blit ([`blit_composite_for_test`],
-//! which builds the same `BlitPipeline` + blend + `LoadOp::Load` the render-graph
-//! nodes use) over a target cleared to a distinct colour, then read the result
-//! back and assert the exact premultiplied composite — no clear-colour bleed.
-//!
-//! Pure wgpu: no Noesis FFI calls, so no `init()`/license needed. A fractional-
-//! alpha premultiplied source models Noesis's PPAA output; the composite (the
-//! part TODO §2 fixes) is exercised by the production pipeline.
+//! Pure wgpu: no Noesis FFI, no init/license needed.
 
 use noesis_bevy::render::blit_composite_for_test;
 
 const W: u32 = 4;
 const H: u32 = 1;
-// Format matches the camera ViewTarget the LDR examples composite onto, and the
-// raw `Rgba8Unorm` intermediate path (no sRGB round-trip) so the composite is
-// an exact, deterministic premultiplied blend.
+// Rgba8Unorm: no sRGB round-trip, so the premultiplied blend is exact and deterministic.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 // 4 px * 4 bytes = 16, padded up to COPY_BYTES_PER_ROW_ALIGNMENT (256).
 const BYTES_PER_ROW: u32 = 256;
@@ -108,7 +96,6 @@ fn composite(gpu: &Gpu, src_pixels: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     );
     let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Target ViewTarget.
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("composite target"),
         size: wgpu::Extent3d {
@@ -128,10 +115,8 @@ fn composite(gpu: &Gpu, src_pixels: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("ppaa blit"),
     });
-    // Camera clear pass — establishes the distinct clear colour the blit must
-    // composite over (the production node runs with `LoadOp::Load`). The pass is
-    // a statement temporary: dropped at the `;`, releasing the `&mut encoder`
-    // borrow so the blit below can record onto the same encoder.
+    // Camera clear: production blit runs LoadOp::Load against this.
+    // Block scope: drops the pass at ';' to release &mut encoder for the blit.
     {
         let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("camera clear"),
@@ -232,8 +217,8 @@ fn assert_rgb_close(label: &str, got: [u8; 4], want: [u8; 3]) {
 fn ppaa_fractional_edges_composite_premultiplied_no_clear_bleed() {
     let gpu = pollster::block_on(gpu());
 
-    // Premultiplied red UI at varying coverage — what Noesis emits for an
-    // anti-aliased red edge with PPAA on: rgb = colour * coverage, a = coverage.
+    // Premultiplied red at varying coverage (what Noesis emits for a PPAA edge):
+    // rgb = colour * coverage, a = coverage.
     let src = [
         [255, 0, 0, 255], // interior: fully opaque red
         [128, 0, 0, 128], // ~50% AA edge
@@ -246,8 +231,7 @@ fn ppaa_fractional_edges_composite_premultiplied_no_clear_bleed() {
         assert_rgb_close(&format!("px{i}"), got[i], premul_over(*s, CLEAR));
     }
 
-    // Spell out the load-bearing properties so a regression names itself:
-    // 1. Opaque interior shows pure UI red — the clear colour does NOT bleed in.
+    // 1. Opaque interior: pure UI red, no clear-colour bleed.
     assert_rgb_close("opaque interior", got[0], [255, 0, 0]);
     // 2. The 50% edge keeps full UI red contribution (R=128). A straight-alpha
     //    blend re-multiplies the premultiplied bytes and would drop R to ~64.
@@ -257,8 +241,7 @@ fn ppaa_fractional_edges_composite_premultiplied_no_clear_bleed() {
          (straight-alpha bug)",
         got[1][0],
     );
-    // 3. The 50% edge also shows the clear colour through the uncovered half
-    //    (B>0). The old 1:1 overwrite discarded it (B==0).
+    // 3. The 50% edge shows clear colour through the uncovered half (B>0).
     assert!(
         got[1][2] > 0,
         "50% edge B={} — clear colour overwritten instead of composited",
@@ -271,8 +254,8 @@ fn ppaa_fractional_edges_composite_premultiplied_no_clear_bleed() {
 #[test]
 fn ppaa_off_hard_edges_preserve_overwrite_behavior() {
     // With PPAA off, Noesis emits only hard alpha (0 or 255). The premultiplied
-    // "over" blend must then reduce exactly to the old behaviour: opaque texels
-    // overwrite the target, transparent texels leave it as the clear colour.
+    // "over" blend reduces to: opaque texels overwrite the target, transparent
+    // texels pass through the clear colour unchanged.
     let gpu = pollster::block_on(gpu());
 
     let src = [

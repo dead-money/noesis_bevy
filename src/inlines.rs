@@ -1,11 +1,11 @@
-//! Per-view **formatted text** bridge — give a named `TextBlock` rich inline
+//! Per-view **formatted text** bridge: give a named `TextBlock` rich inline
 //! content (`Run` / `Bold` / `Italic` / `Underline` / `Span` / `Hyperlink` /
 //! `LineBreak`) from Bevy, then read the resulting live structure back.
 //!
 //! This is the [`crate::typography`] bridge's sibling: typography restyles the
 //! *font* attached properties of an element, while this bridge replaces a
-//! `TextBlock`'s **`Inlines`** — the flow-content tree behind WPF-style
-//! `<TextBlock><Run/><Bold>…</Bold></TextBlock>` markup — built entirely in code.
+//! `TextBlock`'s **`Inlines`**, the flow-content tree behind WPF-style
+//! `<TextBlock><Run/><Bold>…</Bold></TextBlock>` markup, built entirely in code.
 //! (It is distinct from `noesis_runtime::formatted_text`, which is a standalone
 //! text *measurement* object, not a `TextBlock`'s content.)
 //!
@@ -41,13 +41,13 @@
 //! A changed [`NoesisInlines`] component is fully re-applied: for each named
 //! `TextBlock` in `set`, the bridge **clears** the live `InlineCollection`
 //! (`InlineCollection::clear`, exposed since runtime 0.10) and repopulates it
-//! from the new spec, replacing whatever was there — whether built by an earlier
+//! from the new spec, replacing whatever was there, whether built by an earlier
 //! apply or authored in XAML. Editing a spec therefore swaps the rendered
 //! content in place without rebuilding the scene.
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies the writes /
-//! polls the reads against that view's live scene — no cross-world queues.
+//! polls the reads against that view's live scene; no cross-world queues.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -481,6 +481,8 @@ pub struct NoesisInlines {
 }
 
 impl NoesisInlines {
+    /// An empty bridge: no `set` entries, no watches. Chain [`set`](Self::set)
+    /// and [`watching`](Self::watching) to fill it in.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

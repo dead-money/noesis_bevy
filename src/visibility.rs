@@ -1,16 +1,14 @@
-//! Per-view `Visibility` bridge — show / hide named XAML elements on a single
+//! Per-view visibility bridge: show or hide named XAML elements on a single
 //! [`NoesisView`](crate::NoesisView).
 //!
-//! The class-FFI custom-control path covers a lot of ground, but the
-//! "show / hide a panel that already exists in the scene" case doesn't benefit
-//! from it: the panel is just a plain `<Border>` / `<UserControl>` /
-//! `<aor:GamePanel>` whose visibility we want to flip from gameplay code.
+//! Use this to flip a panel that already exists in the scene (a plain
+//! `<Border>`, `<UserControl>`, or `<aor:GamePanel>`) from gameplay code.
 //! Registering a Rust class purely to drive an `IsOpen` bool DP and a Style
 //! trigger would be heavier than the primitive itself.
 //!
 //! Add a [`NoesisVisibility`] component to the view's camera entity. Its `set`
 //! map is the desired visibility per `x:Name` (`true` = `Visible`,
-//! `false` = `Collapsed`) — applied to the view's elements whenever the
+//! `false` = `Collapsed`), applied to the view's elements whenever the
 //! component changes (Bevy change detection).
 //!
 //! ```ignore
@@ -21,9 +19,9 @@
 //! );
 //! ```
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives
-//! there): the reconcile system reads each view's component and applies the
-//! writes against that view's live scene — no cross-world queues.
+//! Everything runs on the main thread (Noesis is thread-affine): the reconcile
+//! system reads each view's component and applies the writes against that view's
+//! live scene, with no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -42,6 +40,9 @@ pub struct NoesisVisibility {
 }
 
 impl NoesisVisibility {
+    /// Starts an empty visibility set. Chain [`show`](Self::show),
+    /// [`hide`](Self::hide), or [`set`](Self::set) to fill it, then insert the
+    /// result on the [`NoesisView`](crate::NoesisView) camera.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

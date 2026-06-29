@@ -1,5 +1,5 @@
-//! Per-view `RenderTransform` writes against named XAML elements — the
-//! post-layout scale / skew / rotate / translate that drives juicy UI motion
+//! Per-view `RenderTransform` writes against named XAML elements: the
+//! post-layout scale / skew / rotate / translate that drives UI motion
 //! (a button that pops on hover, a panel that slides in, a spinning loader)
 //! without touching layout.
 //!
@@ -14,7 +14,7 @@
 //! untouched, so it never disturbs surrounding layout.
 //!
 //! Add a [`NoesisTransform`] component to the view's camera entity. Its
-//! `transforms` map is the desired [`TransformSpec`] per `x:Name` — applied to
+//! `transforms` map is the desired [`TransformSpec`] per `x:Name`, applied to
 //! the view's elements whenever the component changes (Bevy change detection).
 //!
 //! ```ignore
@@ -31,12 +31,12 @@
 //! [`NoesisTransformChanged`] carrying the values Noesis actually stored. The
 //! read-back is element-sourced (it goes element → `RenderTransform` DP →
 //! `CompositeTransform` object), so it confirms the write reached the engine
-//! rather than echoing the component — an un-applied / mis-routed write leaves
+//! rather than echoing the component. An un-applied or mis-routed write leaves
 //! the element with no `RenderTransform` and emits nothing.
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies + polls against
-//! that view's live scene — no cross-world queues.
+//! that view's live scene, with no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -44,10 +44,6 @@ use bevy::prelude::*;
 use noesis_runtime::transforms::CompositeFields;
 
 use crate::render::{NoesisRenderState, NoesisSet};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Spec
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A 2D composite render transform: scale → skew → rotate → translate, applied
 /// in that canonical order about a shared center `(CenterX, CenterY)`. Mirrors
@@ -97,7 +93,7 @@ impl TransformSpec {
     }
 
     /// Rebuild a spec from the runtime's [`CompositeFields`] read back off a live
-    /// element — the inverse of [`Self::to_fields`].
+    /// element. The inverse of [`Self::to_fields`].
     #[must_use]
     pub(crate) fn from_fields(f: CompositeFields) -> Self {
         Self {
@@ -110,10 +106,6 @@ impl TransformSpec {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Per-view render-transform bridge. Attach to a [`NoesisView`](crate::NoesisView)
 /// entity. The builder methods *merge* into the per-name spec, so `translate`
 /// then `scale` on the same element compose into one `CompositeTransform`.
@@ -125,6 +117,8 @@ pub struct NoesisTransform {
 }
 
 impl NoesisTransform {
+    /// An empty bridge with no transforms queued. Chain the builder methods
+    /// ([`translate`](Self::translate), [`scale`](Self::scale), etc.) to fill it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -178,10 +172,6 @@ impl NoesisTransform {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back message
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Emitted when a transformed element's live `RenderTransform` differs from the
 /// previous frame's snapshot (and on the first poll after it is assigned). The
 /// `spec` is read back from Noesis, so it reflects what the engine stored.
@@ -195,10 +185,6 @@ pub struct NoesisTransformChanged {
     /// The transform Noesis currently holds on the element.
     pub spec: TransformSpec,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Reconcile every view's [`NoesisTransform`]: assign desired render transforms
 /// when the component changed, then poll the assigned elements' live transforms
@@ -227,10 +213,6 @@ pub(crate) fn sync_transform_bridge(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Wires the per-view render-transform bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisTransformPlugin;
@@ -258,13 +240,12 @@ mod tests {
         assert_eq!(a.translate, [10.0, 20.0]);
         assert_eq!(a.scale, [2.0, 3.0]);
         assert_eq!(a.rotation, 45.0);
-        // Untouched fields keep their identity defaults.
         assert_eq!(a.center, [0.0, 0.0]);
         assert_eq!(a.skew, [0.0, 0.0]);
 
         let b = t.transforms.get("B").copied().unwrap();
         assert_eq!(b.translate, [1.0, 2.0]);
-        assert_eq!(b.scale, [1.0, 1.0]); // default
+        assert_eq!(b.scale, [1.0, 1.0]);
     }
 
     #[test]

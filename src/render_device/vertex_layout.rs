@@ -4,7 +4,7 @@
 //!
 //! Each Noesis vertex format is a bitmask of [`VertexAttr`] values; the
 //! attributes appear in the buffer in `VertexAttr` enum order with no padding.
-//! `shader_location` matches the `VertexAttr` index — that's the convention
+//! `shader_location` matches the `VertexAttr` index, the convention
 //! `shaders/noesis.wgsl` uses.
 //!
 //! [`VertexAttr`]: noesis_runtime::render_device::types::VertexAttr
@@ -13,7 +13,7 @@ use noesis_runtime::render_device::types::{
     ATTRIBUTES_FOR_FORMAT, SIZE_FOR_FORMAT, SIZE_FOR_TYPE, TYPE_FOR_ATTR, VERTEX_ATTR_COUNT,
 };
 
-/// Owned attribute list for the `format_idx` vertex format — ordering and
+/// Owned attribute list for the `format_idx` vertex format. Ordering and
 /// `shader_location` match the `noesis.wgsl` `VsIn` struct.
 #[must_use]
 pub fn attributes_for_format(format_idx: u8) -> Vec<wgpu::VertexAttribute> {
@@ -40,6 +40,7 @@ pub fn attributes_for_format(format_idx: u8) -> Vec<wgpu::VertexAttribute> {
     attrs
 }
 
+/// Byte stride of one vertex in the `format_idx` format.
 #[must_use]
 pub fn stride_for_format(format_idx: u8) -> u64 {
     u64::from(SIZE_FOR_FORMAT[format_idx as usize])

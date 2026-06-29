@@ -1,6 +1,6 @@
 //! Per-view value-converter / multi-binding bridge: install a code-built
-//! `{Binding}` — driven by a **Rust** [`ValueConverter`] / [`MultiValueConverter`]
-//! — onto a named element's dependency property.
+//! `{Binding}`, driven by a **Rust** [`ValueConverter`] / [`MultiValueConverter`],
+//! onto a named element's dependency property.
 //!
 //! Where [`crate::viewmodel`] supplies the *source* data a binding resolves
 //! against, this bridge installs the *binding itself*: it wires a target
@@ -14,7 +14,7 @@
 //! names a target `(x:Name, property)`, a [`SourceSpec`] (path + where to read
 //! it), and the converter. The bridge builds the Noesis [`Binding`] /
 //! [`MultiBinding`] + [`Converter`] / [`MultiConverter`] once (Rust → Noesis),
-//! then attaches it to the element when the scene exists — re-attaching after a
+//! then attaches it to the element when the scene exists, re-attaching after a
 //! scene rebuild, exactly like [`crate::items`].
 //!
 //! ```ignore
@@ -49,11 +49,11 @@
 //!
 //! # Scope
 //!
-//! This slice installs **one-way** bindings (source → target) by default — the
-//! natural shape for a Rust converter that formats / maps a source value for
-//! display. The binding [`mode`](NoesisBinding::mode) is overridable, but
-//! `convert_back` for `TwoWay` is reachable only through the [`ValueConverter`]
-//! trait's default (it returns `None`); a richer two-way ergonomic is deferred.
+//! Bindings are **one-way** (source → target) by default, the natural shape for
+//! a Rust converter that formats or maps a source value for display. The binding
+//! [`mode`](NoesisBinding::mode) is overridable, but `convert_back` for `TwoWay`
+//! is reachable only through the [`ValueConverter`] trait's default, which
+//! returns `None`.
 //!
 //! # Lifetime & threading
 //!
@@ -91,7 +91,7 @@ enum BindingSource {
 }
 
 /// A binding's source: the property `path` plus where to resolve it
-/// ([`BindingSource`]). Build with [`Self::data_context`], [`Self::element`], or
+/// (`BindingSource`). Build with [`Self::data_context`], [`Self::element`], or
 /// [`Self::own`].
 #[derive(Clone, Debug)]
 pub struct SourceSpec {
@@ -100,7 +100,7 @@ pub struct SourceSpec {
 }
 
 impl SourceSpec {
-    /// Read `path` off the target's inherited `DataContext` — a plain
+    /// Read `path` off the target's inherited `DataContext`, a plain
     /// `{Binding path}`.
     #[must_use]
     pub fn data_context(path: impl Into<String>) -> Self {
@@ -110,7 +110,7 @@ impl SourceSpec {
         }
     }
 
-    /// Read `path` off the element named `name` — `{Binding path,
+    /// Read `path` off the element named `name`: `{Binding path,
     /// ElementName=name}`. Resolves within the loaded scene's namescope.
     #[must_use]
     pub fn element(name: impl Into<String>, path: impl Into<String>) -> Self {
@@ -120,7 +120,7 @@ impl SourceSpec {
         }
     }
 
-    /// Read `path` off the target element itself — `{Binding path, RelativeSource
+    /// Read `path` off the target element itself: `{Binding path, RelativeSource
     /// Self}`.
     #[must_use]
     pub fn own(path: impl Into<String>) -> Self {
@@ -142,7 +142,7 @@ impl SourceSpec {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Converter newtypes — adapt boxed trait objects to the runtime's by-value API
+// Converter newtypes: adapt boxed trait objects to the runtime's by-value API
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A `Sync` boxed [`ValueConverter`] (the component-storable form). `Sync` is
@@ -325,12 +325,12 @@ impl NoesisBinding {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render-world entry — BindingEntry
+// Render-world entry: BindingEntry
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A built, live binding plus the converter it references — kept alive so the
-/// binding keeps working. `_converter` outlives `binding` field-order-wise,
-/// mirroring the rule that a converter releases after the binding that uses it.
+/// A built, live binding plus the converter it references, kept alive so the
+/// binding keeps working. `_converter` is declared after `binding` so it drops
+/// last: a converter must release after the binding that uses it.
 pub(crate) enum BuiltBinding {
     Single {
         binding: Binding,
@@ -401,8 +401,8 @@ pub(crate) fn sync_binding_bridge(
         return;
     };
     for (entity, mut comp) in &mut views {
-        // Building only consumes the converter (Option::take) — it doesn't
-        // logically change the component, so don't trip change detection.
+        // Build only consumes the converter (Option::take); it doesn't logically
+        // change the component, so don't trip change detection.
         let comp = comp.bypass_change_detection();
         for target in &mut comp.targets {
             if state.has_binding(entity, &target.element, &target.property) {

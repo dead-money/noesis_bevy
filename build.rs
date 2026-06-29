@@ -1,6 +1,6 @@
 // Re-emit the libNoesis rpath for binaries linked from this crate (examples,
 // integration tests). Cargo's `cargo:rustc-link-arg` from noesis_runtime's build.rs
-// only applies to its OWN binaries, not to downstream consumers — so without
+// only applies to its OWN binaries, not to downstream consumers, so without
 // this, `cargo run --example hello_xaml` builds fine but fails at runtime with
 // "libNoesis.so: cannot open shared object file".
 //
@@ -11,7 +11,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DEP_NOESIS_LIB_DIR");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
-        // Windows: Noesis.dll must sit next to the .exe. Phase 8 handles that.
+        // Windows: Noesis.dll must sit next to the .exe, not via rpath.
         return;
     }
 

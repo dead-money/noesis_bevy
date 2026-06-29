@@ -1,28 +1,23 @@
-//! Custom `MarkupExtension` registration (Phase 5.D) — Bevy wrapper.
+//! Custom `MarkupExtension` registration for Bevy.
 //!
-//! Lets you register Rust-backed `{myns:Foo positional_arg}` markup
-//! extensions from Bevy systems, with the resulting
-//! [`MarkupExtensionRegistration`] managed by the Bevy resource lifecycle.
+//! Register Rust-backed `{myns:Foo positional_arg}` markup extensions from
+//! Bevy systems. The resulting [`MarkupExtensionRegistration`] is owned by
+//! [`NoesisMarkupExtensionRegistry`], tied to the Bevy resource lifecycle.
 //!
-//! # Why this layer is intentionally thin
-//!
-//! The heavy lifting lives in [`noesis_runtime::markup`] —
-//! `MarkupExtensionRegistration`, `MarkupExtensionHandler`, `MarkupValue`,
-//! all re-exported here. The Bevy side adds:
-//!   * [`NoesisMarkupExtensionPlugin`] to declare the dependency explicitly
-//!     and install the registry resource.
-//!   * [`NoesisMarkupExtensionRegistry`] resource to own the live
-//!     `MarkupExtensionRegistration` instances. Drop order matches
-//!     resource cleanup, which Bevy 0.18 runs before the !Send
-//!     `NoesisShutdownGuard` Drop, so registrations clean up before
-//!     Noesis shuts down.
+//! The primitives ([`MarkupExtensionRegistration`], [`MarkupExtensionHandler`],
+//! [`MarkupValue`]) come from [`noesis_runtime::markup`] and are re-exported
+//! here. The Bevy layer adds [`NoesisMarkupExtensionPlugin`] to install the
+//! registry resource and [`NoesisMarkupExtensionRegistry`] to own the live
+//! registrations. Registrations drop during resource cleanup, which Bevy 0.18
+//! runs before the `!Send` `NoesisShutdownGuard` Drop, so they clean up before
+//! Noesis shuts down.
 //!
 //! # Threading
 //!
 //! Callbacks fire from inside Noesis's XAML parser, on whichever thread
-//! triggered the load. In a Bevy app that's the **render thread** (which
-//! drives the View). Handlers must be `Send`; if you need cross-thread
-//! fan-out (e.g. Bevy ECS state), keep the body small and queue the work.
+//! triggered the load. In a Bevy app that's the render thread (which drives the
+//! View). Handlers must be `Send`; if you need cross-thread fan-out (e.g. Bevy
+//! ECS state), keep the body small and queue the work.
 
 use bevy::prelude::*;
 
@@ -35,13 +30,13 @@ pub use noesis_runtime::markup::{
 /// resource drops them at app teardown, before [`noesis_runtime::shutdown`]
 /// runs.
 ///
-/// Registrations must be added BEFORE any XAML referencing the extension
-/// loads — in practice that means a `Startup` system ordered after
-/// [`crate::NoesisPlugin`] initialization (Bevy's default startup order
-/// suffices unless explicitly overridden).
-/// **Non-send** resource: [`MarkupExtensionRegistration`] holds `!Send`/`!Sync`
+/// Add registrations BEFORE any XAML referencing the extension loads. In
+/// practice that means a `Startup` system ordered after [`crate::NoesisPlugin`]
+/// initialization (Bevy's default startup order suffices unless overridden).
+///
+/// Non-send resource: [`MarkupExtensionRegistration`] holds `!Send`/`!Sync`
 /// Noesis handles, so this is stored via `init_non_send_resource` and accessed
-/// through `NonSendMut`. Mirrors [`crate::classes::NoesisClassRegistry`].
+/// through `NonSendMut`.
 #[derive(Default)]
 pub struct NoesisMarkupExtensionRegistry {
     registrations: Vec<MarkupExtensionRegistration>,
@@ -60,6 +55,7 @@ impl NoesisMarkupExtensionRegistry {
         self.registrations.len()
     }
 
+    /// Whether no extensions are registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.registrations.is_empty()

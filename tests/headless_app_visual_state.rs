@@ -1,30 +1,12 @@
-//! Bevy-app-level integration test for the **write-only** `NoesisVisualState`
-//! bridge (`VisualStateManager::GoToState`), exercised end-to-end through the
-//! real `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for the `NoesisVisualState` bridge (`VisualStateManager::GoToState`),
+//! run end-to-end through the real `NoesisPlugin` pipeline (headless, pipelined rendering on).
 //!
-//! The bridge has no read-back message of its own, so — like the other
-//! write-only element bridges — we observe its *actual effect* through a
-//! `NoesisDp` watch on a scalar dependency property the transition provably
-//! changes, and assert the exact value:
+//! The bridge has no read-back message, so its effect is observed via a `NoesisDp` watch on
+//! `ActualWidth`. Driving "Widget" to "Big" must yield `ActualWidth = 50`; "Other" is left
+//! undriven and must stay at `10` (negative control for wrong-entity routing regressions).
 //!
-//!   * Two `ContentControl`s ("Widget", "Other") share a `ControlTemplate`
-//!     whose root `Border` (`RootBorder`, Width=10) carries a `SizeStates`
-//!     `VisualStateGroup`. The "Big" state runs a zero-duration animation that
-//!     drives `RootBorder.Width` to 50; each control is `Left`/`Top`-aligned
-//!     and sized to its template, so its `ActualWidth` tracks `RootBorder`.
-//!   * Driving **only** "Widget" to "Big" ⇒ `Widget.ActualWidth = 50`, not the
-//!     default `10`. The default `10` is the built-in negative control: a
-//!     missing apply / wrong-entity routing / inverted change-detection reads
-//!     back `10` and fails.
-//!   * "Other" is left undriven ⇒ stays `ActualWidth = 10`. A "go everything to
-//!     Big" or wrong-name-resolution regression would grow it to `50`.
-//!
-//! The write-only component starts empty (no-op) and is filled in *after* the
-//! scene is built, because it applies only on Bevy change-detection — mutating
-//! it before the view exists would drop the one-shot apply.
-//!
-//! Font-free XAML (only DP values are asserted, no glyph rendering), so the
-//! scene builds with no font gate.
+//! The write-only component starts empty and is filled after the scene is built, because it
+//! applies only on change-detection and mutating it before the view exists drops the apply.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,10 +99,8 @@ fn visual_state_bridge_transitions_named_control() {
                         size: UVec2::new(64, 64),
                         ..default()
                     },
-                    // Write-only component starts empty (no-op); filled in after
-                    // the scene exists so its one-shot apply isn't lost.
+                    // Starts empty; filled after the scene exists so the one-shot apply isn't dropped.
                     NoesisVisualState::new(),
-                    // The DP watcher polls every frame regardless of changes.
                     watcher(),
                 ))
                 .id();
@@ -168,7 +148,6 @@ fn visual_state_bridge_transitions_named_control() {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
 
-    // Latest value seen for a watched (name, property) on our view.
     let latest = |name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)

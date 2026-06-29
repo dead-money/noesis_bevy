@@ -1,4 +1,4 @@
-//! Per-view `Margin` writes against named XAML elements — the positioning
+//! Per-view `Margin` writes against named XAML elements: the positioning
 //! primitive for floating panels (context menus, popups, tooltips) that must
 //! follow gameplay coordinates.
 //!
@@ -8,10 +8,10 @@
 //! at `(x, y)`, so a single margin write positions a floating element anywhere
 //! in the view. Coordinates are Noesis *view* DIPs (the `NoesisScene::size`
 //! space), so a caller working in window pixels scales by `view_size /
-//! window_size` first — exactly the mapping the input bridge uses.
+//! window_size` first, the same mapping the input bridge uses.
 //!
 //! Add a [`NoesisLayout`] component to the view's camera entity. Its `margins`
-//! map is the desired `Margin` per `x:Name` — applied to the view's elements
+//! map is the desired `Margin` per `x:Name`, applied to the view's elements
 //! whenever the component changes (Bevy change detection). This is a write-only
 //! bridge: there is no read-back message.
 //!
@@ -23,7 +23,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and applies the margin
-//! writes against that view's live scene — no cross-world queues.
+//! writes against that view's live scene, no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -43,6 +43,8 @@ pub struct NoesisLayout {
 }
 
 impl NoesisLayout {
+    /// An empty layout with no element margins. Build one up with
+    /// [`margin`](Self::margin), then insert it on the [`NoesisView`](crate::NoesisView) camera.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -58,7 +60,7 @@ impl NoesisLayout {
 }
 
 /// Reconcile every view's [`NoesisLayout`]: apply desired margin writes when the
-/// component changed. Write-only — no read-back message.
+/// component changed. Write-only, no read-back message.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_layout_bridge(
     views: Query<(Entity, Ref<NoesisLayout>)>,
@@ -73,10 +75,6 @@ pub(crate) fn sync_layout_bridge(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Wires the per-view layout bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisLayoutPlugin;

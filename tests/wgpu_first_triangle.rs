@@ -1,12 +1,10 @@
-//! Phase 2 integration test: drive [`WgpuRenderDevice`] directly (bypassing
-//! Noesis init) to render one `Path_Solid` triangle, read the target back,
-//! and assert that pixels inside the triangle are red and pixels outside are
-//! the pre-clear color.
+//! Drives [`WgpuRenderDevice`] directly to render a `Path_Solid` triangle,
+//! reads the target back, and asserts pixels inside are red and pixels outside
+//! keep the pre-clear color.
 //!
-//! This test does NOT depend on `noesis_test_run_frame_scenario` or
-//! `libNoesis.so` for the rendering path — Noesis is only needed for the
-//! lifecycle (`init` / `shutdown`) so the linker is satisfied. The Batch
-//! handed to `draw_batch` is hand-built.
+//! Noesis is only used for `init`/`shutdown`; the `Batch` is hand-built, so
+//! this test exercises the render device without `libNoesis.so` doing any
+//! rendering work.
 
 use std::ffi::c_void;
 
@@ -110,7 +108,6 @@ async fn run_test() {
         queue.submit(Some(clear_encoder.finish()));
     }
 
-    // Construct WgpuRenderDevice with a fresh view of the target.
     let device_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
@@ -210,7 +207,6 @@ async fn run_test() {
         ]
     };
 
-    // Inside the triangle (centroid region).
     assert_eq!(
         pixel(128, 149),
         [255, 0, 0, 255],
@@ -228,7 +224,6 @@ async fn run_test() {
         "(120, 160) should be red"
     );
 
-    // Well outside the triangle — corners should keep the clear color.
     let clear = [CLEAR_R, CLEAR_G, CLEAR_B, CLEAR_A];
     assert_eq!(pixel(10, 10), clear, "top-left should be clear");
     assert_eq!(pixel(245, 10), clear, "top-right should be clear");

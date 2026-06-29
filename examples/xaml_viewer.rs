@@ -1,12 +1,10 @@
-//! Phase 5.D — generalized XAML viewer, the one-tool replacement for
-//! `hello_xaml`, `hello_xaml_screenshot`, and `hello_text`.
+//! Generalized XAML viewer: load a single `.xaml` file or a directory of
+//! them and page through scenes interactively.
 //!
-//! Accepts either a single `.xaml` file or a directory of them; cycles
-//! between scenes with `[` / `]`, jumps with `Home` / `End`, reloads the
-//! current one with `R`, and triggers a screenshot with `S`. With
+//! Cycle between scenes with `[` / `]`, jump with `Home` / `End`, reload the
+//! current one with `R`, and trigger a screenshot with `S`. With
 //! `NOESIS_VIEWER_EXIT_AFTER=1` set, it waits a few frames, shoots the
-//! configured target (`NOESIS_SCREENSHOT`) and exits — same contract the
-//! retired `hello_xaml_screenshot` used for Claude-in-the-loop eval.
+//! configured target (`NOESIS_SCREENSHOT`) and exits, for headless eval.
 //!
 //! `P` toggles PPAA (Noesis per-primitive edge anti-aliasing) by flipping
 //! `NoesisScene.ppaa`; the render-world picks the change up per frame via
@@ -23,7 +21,7 @@
 //! # Single file
 //! cargo run -p noesis_bevy --example xaml_viewer assets/viewer_samples/01_button_hover.xaml
 //!
-//! # Directory — cycle with [/]
+//! # Directory (cycle with [/])
 //! cargo run -p noesis_bevy --example xaml_viewer assets/viewer_samples
 //!
 //! # Point at the SDK's Data/ (symlink assets/Data -> $NOESIS_SDK_DIR/Data first)
@@ -35,11 +33,11 @@
 //! ```
 //!
 //! Environment:
-//! - `NOESIS_VIEWER_PATH`         — fallback for the positional arg.
-//! - `NOESIS_SCREENSHOT`          — screenshot output path (default: `<stem>.png`).
-//! - `NOESIS_SCREENSHOT_FRAMES`   — frame to shoot on in headless mode (default 120).
-//! - `NOESIS_VIEWER_EXIT_AFTER`   — any value → take one screenshot and exit.
-//! - `NOESIS_VIEWER_SIZE`         — `WxH` override for the Noesis view size
+//! - `NOESIS_VIEWER_PATH`:        fallback for the positional arg.
+//! - `NOESIS_SCREENSHOT`:         screenshot output path (default: `<stem>.png`).
+//! - `NOESIS_SCREENSHOT_FRAMES`:  frame to shoot on in headless mode (default 120).
+//! - `NOESIS_VIEWER_EXIT_AFTER`:  any value takes one screenshot and exits.
+//! - `NOESIS_VIEWER_SIZE`:        `WxH` override for the Noesis view size
 //!   (default: match the window's initial physical size).
 
 use std::path::{Path, PathBuf};
@@ -53,8 +51,7 @@ use bevy::window::PrimaryWindow;
 use noesis_bevy::{FontRegistry, ImageAsset, NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
 
 /// Carries the initial [`NoesisView`] config from `main` to `setup_camera`,
-/// which spawns it onto the camera entity. (The view config is per-entity now,
-/// not a global resource.)
+/// which spawns it onto the camera entity.
 #[derive(Resource)]
 struct InitialView(NoesisView);
 
@@ -70,7 +67,7 @@ struct Viewer {
 
 #[derive(Clone, Debug)]
 struct ScenePath {
-    /// URI Noesis asks for — matches the `XamlRegistry` key.
+    /// URI Noesis asks for; matches the `XamlRegistry` key.
     uri: String,
     /// On-disk absolute path. Kept for reload + default screenshot naming.
     fs_path: PathBuf,
@@ -172,11 +169,10 @@ fn parse_size_env() -> Option<UVec2> {
     Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
 }
 
-/// Resolved theme XAML + font paths, discovered off
-/// `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`. Cached inside a
+/// Resolved theme XAML + font paths, discovered under
+/// `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`. Cached in a
 /// `StagedTheme` resource and pushed into `XamlRegistry` / `FontRegistry`
-/// at startup so Noesis's `LoadApplicationResources(...)` → our XAML
-/// provider → registry resolution pipeline has everything it needs.
+/// at startup so theme resolution has everything it needs.
 #[derive(Default, Clone)]
 struct StagedThemeFiles {
     xamls: Vec<(String, PathBuf)>,
@@ -200,7 +196,7 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
     let mut files = StagedThemeFiles::default();
 
     // Pull every *.xaml in the theme dir into the registry under its plain
-    // filename — the theme's nested `<ResourceDictionary Source="..."/>`
+    // filename; the theme's nested `<ResourceDictionary Source="..."/>`
     // uses the same bare-name form.
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let path = entry.path();
@@ -213,8 +209,7 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
 
     // PT Root UI goes into the `Fonts/` folder so NoesisTheme.Fonts.xaml's
     // `FontFamily="Fonts/#PT Root UI"` resolves. Single folder shared with
-    // any scene fonts the user already has under assets/Fonts — same
-    // convention the Noesis SDK samples use.
+    // any scene fonts the user already has under assets/Fonts.
     let fonts_dir = root.join("Fonts");
     for entry in std::fs::read_dir(&fonts_dir)
         .into_iter()
@@ -238,7 +233,6 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
         root.display(),
     );
 
-    // Validate the requested theme file actually exists in the staged set.
     let want = format!("NoesisTheme.{theme}.xaml");
     if !files.xamls.iter().any(|(n, _)| n == &want) {
         warn!(
@@ -324,7 +318,7 @@ fn collect_scenes(arg: &str) -> Vec<ScenePath> {
 fn scene_from_file(abs: &Path) -> Option<ScenePath> {
     let file_name = abs.file_name()?.to_string_lossy().into_owned();
     Some(ScenePath {
-        // Use the bare filename as the URI — matches how Noesis.xaml references
+        // Use the bare filename as the URI; matches how Noesis.xaml references
         // other XAMLs (`Source="Styles.xaml"`) and how `AssetServer::load`
         // pathways shape their keys.
         uri: file_name,
@@ -333,7 +327,6 @@ fn scene_from_file(abs: &Path) -> Option<ScenePath> {
 }
 
 fn setup_camera(mut commands: Commands, asset_server: Res<AssetServer>, initial: Res<InitialView>) {
-    // One view: the scene config + Noesis marker live on the camera entity.
     commands.spawn((
         Camera2d,
         Camera {
@@ -344,7 +337,7 @@ fn setup_camera(mut commands: Commands, asset_server: Res<AssetServer>, initial:
         initial.0.clone(),
     ));
     // Pull Fonts/ into the asset system so the Bevy FontProvider populates
-    // FontRegistry — any scene that references `FontFamily="Fonts/#..."`
+    // FontRegistry; any scene that references `FontFamily="Fonts/#..."`
     // will then resolve. Handle is kept alive by the resource below.
     let fonts_handle = asset_server.load_folder("Fonts");
     commands.insert_resource(KeepFonts(fonts_handle));
@@ -354,10 +347,8 @@ fn setup_camera(mut commands: Commands, asset_server: Res<AssetServer>, initial:
     // resolves pixels Noesis asks for *after* the asset server has
     // populated ImageRegistry, so we need an explicit trigger.
     //
-    // Default list covers the SDK samples that reference common image
-    // paths — lets `xaml_viewer assets/Data/Transform3D.xaml` Just Work
-    // (until Phase 6 effects land; shader-variant-wise everything but
-    // DOWNSAMPLE is already in place).
+    // Default list covers the SDK samples that reference common image paths,
+    // letting `xaml_viewer assets/Data/Transform3D.xaml` work out of the box.
     let image_list = std::env::var("NOESIS_VIEWER_IMAGES")
         .unwrap_or_else(|_| "Data/Images/BgTile.png".to_string());
     let mut image_handles = Vec::new();

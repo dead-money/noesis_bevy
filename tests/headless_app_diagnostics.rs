@@ -1,23 +1,10 @@
-//! Bevy-app-level test for the **app-level** diagnostics bridge, exercised
-//! end-to-end through the real `NoesisPlugin` pipeline (headless, pipelined
-//! rendering on).
+//! Tests that `NoesisDiagnostics` mirrors Noesis allocator counters into the
+//! resource each frame.
 //!
-//! The bridge has no element target: it mirrors Noesis's process-global
-//! allocator counters into the `NoesisDiagnostics` resource each frame. To make
-//! the assertion bluff-*resistant* the resource's all-zero `Default` is the
-//! negative control — a missing/broken refresh system (or a no-op plugin) leaves
-//! every counter at `0`. We boot the app, build a font-free scene so Noesis
-//! actually allocates a view + visual tree, pump frames, then assert the
-//! mirrored counters are plausibly non-zero and internally consistent
-//! (`accum >= allocated`, since `accum` is cumulative and `allocated` is live).
-//!
-//! We snapshot the resource at two points: once early (frame `EARLY_AT_FRAME`,
-//! before the scene is guaranteed built) and once late (`SAMPLE_AT_FRAME`, well
-//! after). The late sample must be non-zero; capturing both also proves the
-//! refresh runs every frame rather than one-shot.
-//!
-//! Font-free XAML (a colored `Border` in a `Grid`, no glyphs) so the scene
-//! builds with no font gate.
+//! The all-zero `Default` is the negative control: a broken or missing refresh
+//! leaves every counter at 0. Two snapshots (early and late) prove the refresh
+//! runs every frame, not one-shot. Font-free XAML so the scene builds without a
+//! font gate.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,7 +28,6 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 fn diagnostics_resource_mirrors_allocator_counters() {
     noesis_license_from_env();
 
-    // (early, late) snapshots of the resource captured from inside the loop.
     let early: Arc<Mutex<Option<NoesisDiagnostics>>> = Arc::new(Mutex::new(None));
     let late: Arc<Mutex<Option<NoesisDiagnostics>>> = Arc::new(Mutex::new(None));
 
@@ -102,8 +88,6 @@ fn diagnostics_resource_mirrors_allocator_counters() {
     let early = snapshot(&early, "early");
     eprintln!("--- NoesisDiagnostics early={early:?} late={late:?} ---");
 
-    // The negative control is the all-zero Default: a no-op/broken refresh keeps
-    // every counter at 0. A live engine with a built scene allocates plenty.
     assert!(
         late.allocated_memory > 0,
         "allocated_memory should be non-zero after a scene builds (default 0); got {}",
@@ -114,16 +98,14 @@ fn diagnostics_resource_mirrors_allocator_counters() {
         "allocations_count should be non-zero after a scene builds (default 0); got {}",
         late.allocations_count,
     );
-    // `accum` is cumulative-ever, `allocated` is live; the live figure can never
-    // exceed the cumulative total. Catches a transposed/garbage read.
+    // accum is cumulative-ever, allocated is live; catches a transposed/garbage read.
     assert!(
         late.allocated_memory_accum >= late.allocated_memory,
         "accum ({}) must be >= live allocated ({})",
         late.allocated_memory_accum,
         late.allocated_memory,
     );
-    // The early sample also being non-zero proves the refresh runs every frame,
-    // not just once: init() alone already allocates before any scene exists.
+    // early non-zero proves refresh runs every frame; init() allocates before any scene.
     assert!(
         early.allocations_count > 0,
         "early allocations_count should be non-zero (engine init allocates); got {}",

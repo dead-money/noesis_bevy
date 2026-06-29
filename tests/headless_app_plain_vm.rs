@@ -1,35 +1,16 @@
-//! Bevy-app-level integration test for the **per-entity** plain-struct view
-//! model bridge (`#[derive(Component, NoesisViewModel)]` +
-//! `add_noesis_view_model::<T>()`), exercised end-to-end through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! End-to-end test of the per-entity plain-struct view model bridge
+//! (`#[derive(Component, NoesisViewModel)]` + `add_noesis_view_model::<T>()`).
 //!
-//! It couples the new component bridge with two existing read-back paths so the
-//! assertion is bluff-*resistant* in both directions:
+//! Two assertion directions:
+//!   * **Rust→UI.** `DemoVm.title = "Hello"` binds to a `<TextBox>` via
+//!     `{Binding title}`; a [`NoesisText`] watch confirms the control sees it.
+//!   * **UI→Rust.** A [`NoesisDp`] write sets the `TextBox`'s `Text` to `"World"`;
+//!     the `TwoWay/PropertyChanged` binding must push that back into the `DemoVm`
+//!     component via the reconcile system.
 //!
-//!   * **Rust → UI.** The view entity carries a `DemoVm` component (a plain
-//!     struct) with `title = "Hello"`. A `<TextBox Text="{Binding title}"/>`
-//!     binds to it, and a [`NoesisText`] watch observes that box. The snapshot
-//!     path must push `title` into the bound control for the watch to ever
-//!     report `"Hello"`.
-//!   * **UI → Rust.** A [`NoesisDp`] write sets the box's `Text` to `"World"`
-//!     (simulating a user edit); the `TwoWay`/`PropertyChanged` binding pushes
-//!     that into the plain-VM source, whose `on_set` writeback must flow back
-//!     into the *ECS component* via the reconcile system. We assert the
-//!     `DemoVm` component itself ends at `"World"`.
-//!
-//! A broken snapshot (Rust→UI never fires), a broken writeback drain (the
-//! component never updates), or an unregistered reconcile system each fail this.
-//!
-//! Scope: this is a **single-view** round-trip. Two-view per-entity *routing*
-//! isolation is covered by `headless_app_bridges.rs` (which exercises the same
-//! `render_state` per-entity keying via the DO-backed `NoesisVm`). It can't be
-//! re-tested here with the *same* plain-VM type on two views: Noesis registers a
-//! reflected plain-VM class **globally by type name**, so a second instance of
-//! the same `#[derive(NoesisViewModel)]` type collides at registration — a
-//! Noesis-level constraint, not a keying gap.
-//!
-//! Font-free XAML (only DP/text values are asserted, no glyph rendering), so the
-//! scene builds with no font gate.
+//! Two-view routing is covered by `headless_app_bridges.rs`. A second instance of
+//! the same `#[derive(NoesisViewModel)]` type cannot be tested here: Noesis
+//! registers plain-VM classes globally by type name, so two instances collide.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -55,8 +36,7 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
            Text="{Binding title, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
 </Grid>"##;
 
-/// A plain Bevy component bound to XAML by field name. The derive provides the
-/// `NoesisViewModel` glue; the bridge attaches it as the view-root `DataContext`.
+/// Bridge attaches this as the view-root `DataContext`.
 #[derive(Component, NoesisViewModel)]
 struct DemoVm {
     title: String,
@@ -66,9 +46,8 @@ struct DemoVm {
 fn plain_vm_component_round_trips_two_way() {
     noesis_license_from_env();
 
-    // (view entity, latest `title` snapshot of its DemoVm component).
     let titles: Arc<Mutex<HashMap<Entity, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    // (view entity, Box text) reported by the NoesisText watch (Rust→UI proof).
+    // Rust→UI proof: Box text from the NoesisText watch
     let text_changes: Arc<Mutex<Vec<(Entity, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
@@ -122,21 +101,19 @@ fn plain_vm_component_round_trips_two_way() {
               mut exit: MessageWriter<AppExit>| {
             *frame += 1;
 
-            // Record every view's current component title (UI→Rust readback).
+            // UI→Rust readback
             {
                 let mut snap = titles_sys.lock().unwrap();
                 for (e, vm) in &vms {
                     snap.insert(e, vm.title.clone());
                 }
             }
-            // Record Box text changes (Rust→UI readback through the watch).
+            // Rust→UI readback
             for ev in changes.read() {
                 text_sys.lock().unwrap().push((ev.view, ev.text.clone()));
             }
 
-            // Simulate a user edit: drive the bound TextBox's Text via the DP
-            // bridge. The TwoWay/PropertyChanged binding pushes it to the plain
-            // VM, whose writeback must land back in the DemoVm component.
+            // simulate user edit via DP; TwoWay/PropertyChanged must push back to DemoVm
             if *frame == EDIT_AT_FRAME {
                 for mut dp in &mut dps {
                     *dp = NoesisDp::new().set_string("Box", "Text", EDIT);
@@ -155,13 +132,11 @@ fn plain_vm_component_round_trips_two_way() {
     let final_titles = titles.lock().unwrap().clone();
     let texts = text_changes.lock().unwrap().clone();
 
-    // Rust → UI: the seeded title reached the bound TextBox (observed via watch).
     assert!(
         texts.iter().any(|(e, t)| *e == view && t == SEED),
         "Rust→UI snapshot never reached the bound TextBox; got text changes {texts:?}",
     );
 
-    // UI → Rust: the simulated edit flowed back into the ECS component.
     assert_eq!(
         final_titles.get(&view).map(String::as_str),
         Some(EDIT),

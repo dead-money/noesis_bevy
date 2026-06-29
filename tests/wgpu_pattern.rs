@@ -1,21 +1,10 @@
-//! Phase 4.B.2 regression test: a `PATH_PATTERN` batch samples from a real
-//! `wgpu::Texture` created via `create_texture` and drawn through the group(2)
-//! pattern bind group.
-//!
-//! Setup:
-//! - 4×4 offscreen RT, pre-cleared to dark blue.
-//! - 2×2 pattern texture with distinct per-texel colors (red/green/blue/yellow).
-//! - Full-screen quad in clip space with UVs mapping corners to texel centers.
-//! - Nearest-neighbour sampler so the per-quadrant readback is exact.
-//!
-//! Expected readback (wgpu top-left origin; clip `y = +1` maps to row 0):
+//! Tests `PATH_PATTERN` sampling from a registered `wgpu::Texture` via the group(2)
+//! bind group. Setup: 4×4 RT, 2×2 pattern texture (red/green/blue/yellow), full-screen
+//! quad, nearest sampler. Expected readback (clip `y=+1` maps to row 0):
 //! ```
 //!   row 0 | red   green
 //!   row 3 | blue  yellow
 //! ```
-//!
-//! Together with `wgpu_offscreen_rt.rs`, this confirms the Phase 4.B
-//! texture + render-target + sampler / bind-group machinery all works.
 
 use std::ffi::c_void;
 
@@ -66,13 +55,9 @@ async fn run_test() {
         })
         .await
         .expect("no wgpu device");
-    // Offscreen-only test; no onscreen target needed with the new API.
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
 
-    // ── Upload the 2×2 pattern texture. ───────────────────────────────────
-    // Row-major Rgba8:
-    //   (0,0) red    (1,0) green
-    //   (0,1) blue   (1,1) yellow
+    // Row-major Rgba8: (0,0) red, (1,0) green, (0,1) blue, (1,1) yellow
     let pattern_texels: [u8; 2 * 2 * 4] = [
         255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
     ];
@@ -86,7 +71,6 @@ async fn run_test() {
         data: Some(&level_data),
     });
 
-    // ── Create the RT. ────────────────────────────────────────────────────
     let rt = rd.create_render_target(RenderTargetDesc {
         label: "pattern test rt",
         width: RT_SIZE,
@@ -95,8 +79,7 @@ async fn run_test() {
         needs_stencil: false,
     });
 
-    // Pre-clear the resolve texture. (Noesis would issue a Shader::CLEAR
-    // batch to do this; the harness doesn't drive Noesis.)
+    // Noesis would issue Shader::CLEAR; the test harness doesn't drive Noesis.
     {
         let resolve = rd.texture(rt.resolve_texture.handle).expect("resolve");
         let view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
@@ -126,19 +109,9 @@ async fn run_test() {
         queue.submit(Some(enc.finish()));
     }
 
-    // ── PosTex0 full-screen quad. ─────────────────────────────────────────
-    // wgpu: clip Y=+1 → top of target (row 0); texture V=0 → top row.
-    // Sampling centre of each texel needs UV = (0.25, 0.25) .. (0.75, 0.75).
-    // With nearest filtering, UVs at (0, 0) / (0.5, 0.5) / (1, 1) still pick
-    // the nearest texel. Use UVs at texel corners (0..1) with a fudge inside
-    // each quadrant so rounding picks the intended texel.
-    //
-    // Actually: with nearest + integer RT coords, each 2×2 block of output
-    // pixels samples one texel. For a 4×4 output over the 2×2 texture with
-    // UVs [0..1], wgpu samples UV at the pixel centre → (x+0.5)/4 in [0..1].
-    // x=0 → u=0.125 → texel 0; x=1 → u=0.375 → texel 0; x=2 → u=0.625 → texel 1;
-    // x=3 → u=0.875 → texel 1. Same for Y. So each quadrant of the 4×4 RT
-    // shows its corresponding texel — exactly what we want.
+    // wgpu: clip Y=+1 → row 0; V=0 → top row. With nearest filter on a 4×4 output
+    // over a 2×2 texture, pixel centres (x+0.5)/4 land at u=0.125/0.375 (texel 0)
+    // or u=0.625/0.875 (texel 1), so each 2×2 quadrant samples one texel exactly.
     let vertices: [f32; 6 * 4] = [
         // x, y, u, v
         -1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 1.0,
@@ -164,18 +137,15 @@ async fn run_test() {
     // PAINT_PATTERN reads opacity from ps_uniforms0.values[0].x.
     let ps_uniform0: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
-    // Sampler: ClampToEdge + Nearest + MipDisabled.
     let sampler_state = SamplerState::new(
         WrapMode::ClampToEdge,
         MinMagFilter::Nearest,
         MipFilter::Disabled,
     );
 
-    // Standalone wgpu tests can't produce a Noesis-owned `Texture*` so we
-    // route around `batch.pattern_handle()` via the test-only
-    // `test_set_forced_pattern` hook. The Batch's `pattern` pointer is still
-    // set non-null so the sanity check inside `draw_batch` is satisfied; the
-    // pointer is never dereferenced because the forced pattern takes priority.
+    // Can't produce a Noesis-owned Texture* in standalone wgpu tests; pattern
+    // resolution goes through test_set_forced_pattern. The non-null pointer
+    // satisfies shader_uses_pattern assertions but is never dereferenced.
     rd.test_set_forced_pattern(Some((pattern_binding.handle, sampler_state)));
 
     rd.begin_offscreen_render();
@@ -204,7 +174,6 @@ async fn run_test() {
     rd.end_offscreen_render();
     rd.test_set_forced_pattern(None);
 
-    // ── Readback the 4×4 resolve. ─────────────────────────────────────────
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(RT_SIZE),
@@ -262,28 +231,24 @@ async fn run_test() {
         ]
     };
 
-    // Top-left 2×2 quadrant: samples texel (0,0) = red.
     assert_eq!(pixel(0, 0), [255, 0, 0, 255], "top-left quadrant = red");
     assert_eq!(
         pixel(1, 1),
         [255, 0, 0, 255],
         "top-left quadrant inner = red"
     );
-    // Top-right 2×2 quadrant: samples texel (1,0) = green.
     assert_eq!(pixel(2, 0), [0, 255, 0, 255], "top-right quadrant = green");
     assert_eq!(
         pixel(3, 1),
         [0, 255, 0, 255],
         "top-right quadrant inner = green"
     );
-    // Bottom-left 2×2: samples texel (0,1) = blue.
     assert_eq!(pixel(0, 2), [0, 0, 255, 255], "bottom-left quadrant = blue");
     assert_eq!(
         pixel(1, 3),
         [0, 0, 255, 255],
         "bottom-left quadrant inner = blue"
     );
-    // Bottom-right 2×2: samples texel (1,1) = yellow.
     assert_eq!(
         pixel(2, 2),
         [255, 255, 0, 255],
@@ -313,9 +278,8 @@ fn make_pattern_batch(
         num_vertices: 6,
         start_index: 0,
         num_indices: 6,
-        // Set to a non-null value so `shader_uses_pattern` assertions pass.
-        // The actual handle resolution goes through the test hook
-        // `test_set_forced_pattern`; the pointer is never dereferenced.
+        // Non-null so shader_uses_pattern assertions pass; never dereferenced
+        // (test_set_forced_pattern handles actual resolution).
         pattern: std::ptr::dangling_mut(),
         ramps: std::ptr::null_mut(),
         image: std::ptr::null_mut(),

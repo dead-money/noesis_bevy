@@ -1,33 +1,10 @@
-//! Bevy-app-level integration test for the **app-level application-resources
-//! bridge** ([`NoesisResources`]), exercised end-to-end through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for [`NoesisResources`]: registers app-level resources through
+//! `NoesisPlugin` (headless) and verifies `{StaticResource}` references resolve.
 //!
-//! The bridge registers Rust-built resources into the process-global
-//! application resources so XAML `{StaticResource Key}` references resolve them.
-//! To make the assertion bluff-resistant we observe the resolved value's
-//! *actual effect* through a [`NoesisDp`] watch on a derived scalar the resource
-//! provably changes, and assert the exact value against a negative control:
-//!
-//!   * A `<Border x:Name="Themed">` sets `Width="{StaticResource PanelWidth}"`
-//!     where `PanelWidth` is a registered `Single`/`f32` of `40` (Noesis's
-//!     `Border.Width` is a `Single`). Left-aligned in a
-//!     64-wide grid, it lays out to `ActualWidth = 40` — *not* the negative
-//!     control's authored `20`. A missing install / unresolved `StaticResource`
-//!     would leave the Border with no explicit width (Grid-stretched to 64, or
-//!     `NaN`/auto), so `40` is positive proof the resource resolved.
-//!   * A sibling `<Border x:Name="Plain" Width="20">` carries no `StaticResource`
-//!     — its `ActualWidth` stays `20`, proving the resource only feeds the
-//!     element that references it.
-//!
-//! The `Themed` border also paints `Background="{StaticResource AccentBrush}"`
-//! (a registered `SolidColorBrush`); a brush has no scalar DP to read back, so we
-//! prove the brush *registered* through the bridge's [`NoesisResourcesInstalled`]
-//! read-back (its `present` list is confirmed against the live
-//! `GUI::GetApplicationResources`), and the value assertion above proves the
-//! `{StaticResource}` resolution mechanism the brush rides on.
-//!
-//! Font-free XAML (only layout-derived DP values are asserted, no glyphs), so the
-//! scene builds with no font gate.
+//! Asserts `Themed.ActualWidth == 40` (set by `{StaticResource PanelWidth}`; unset
+//! would Grid-stretch to 64 or auto), `Plain.ActualWidth == 20` (negative control,
+//! no resource reference), and that [`NoesisResourcesInstalled`] confirms both keys
+//! present in the live application resources.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -84,9 +61,8 @@ fn app_resources_resolve_static_resource() {
     app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
     app.add_plugins(NoesisPlugin::default());
 
-    // Register the application resources up front. The bridge installs them in
-    // the `Sync` phase, before the scene builds in `Ensure`, so the scene's
-    // `{StaticResource}` references resolve at parse time.
+    // Registered before the scene builds: bridge installs in Sync, scene builds in Ensure,
+    // so {StaticResource} references resolve at parse time.
     app.insert_resource(
         NoesisResources::new()
             .solid("AccentBrush", [1.0, 0.0, 0.0, 1.0])
@@ -162,9 +138,8 @@ fn app_resources_resolve_static_resource() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // The bridge installed once and confirmed both keys present in the live
-    // application resources — proves the brush + value registered (the brush has
-    // no scalar DP to read back, so this is its proof of registration).
+    // AccentBrush has no scalar DP to read back; NoesisResourcesInstalled is the
+    // only proof it registered.
     let present = installs.last().expect("a NoesisResourcesInstalled message");
     assert!(
         present.contains(&"AccentBrush".to_string()),
@@ -175,15 +150,13 @@ fn app_resources_resolve_static_resource() {
         "the value resource should be installed + confirmed; got {present:?}",
     );
 
-    // The StaticResource value drove Themed's Width to 40 (default/unset would
-    // Grid-stretch to 64 or read as auto — neither is 40).
+    // Unset would Grid-stretch to 64 or auto; 40 proves the resource resolved.
     assert_eq!(
         latest("Themed", "ActualWidth"),
         Some(DpValue::F32(40.0)),
         "resources: Width={{StaticResource PanelWidth}} (40) should give ActualWidth 40",
     );
-    // Negative control: the sibling without the StaticResource keeps its authored
-    // width, proving the resource feeds only the element that references it.
+    // Negative control: no StaticResource, so authored width unchanged.
     assert_eq!(
         latest("Plain", "ActualWidth"),
         Some(DpValue::F32(20.0)),

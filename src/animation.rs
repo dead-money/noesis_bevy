@@ -1,4 +1,4 @@
-//! Per-view code-built property animations — the runtime-driven counterpart to a
+//! Per-view code-built property animations: the runtime-driven counterpart to a
 //! XAML `<Storyboard>`/`<DoubleAnimation>` declared inline in a `ControlTemplate`
 //! or `Style.Triggers`.
 //!
@@ -13,12 +13,12 @@
 //! without authoring a Storyboard in XAML or routing a fake trigger.
 //!
 //! Add a [`NoesisAnimation`] component to the view's camera entity. Its
-//! `animations` map is the desired [`AnimationSpec`] per `x:Name` — each
-//! `(From?, To, Duration)` on a target property — begun against the view's
+//! `animations` map is the desired [`AnimationSpec`] per `x:Name` (each
+//! `(From?, To, Duration)` on a target property), begun against the view's
 //! elements whenever the component changes (Bevy change detection). The animation
 //! then advances off the view clock pumped by `View::Update`; with the default
 //! `HoldEnd` fill behavior the property holds its `To` value after the duration
-//! elapses. This is a write-only bridge: there is no read-back message — observe
+//! elapses. This is a write-only bridge: there is no read-back message. Observe
 //! the animated value through a [`NoesisDp`](crate::dp::NoesisDp) watch.
 //!
 //! ```ignore
@@ -35,7 +35,7 @@
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component and begins the animations
-//! against that view's live scene — no cross-world queues.
+//! against that view's live scene, no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -69,6 +69,8 @@ pub struct NoesisAnimation {
 }
 
 impl NoesisAnimation {
+    /// Empty bridge with no animations. Chain [`animate`](Self::animate) or
+    /// [`animate_from`](Self::animate_from) to add specs.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -124,7 +126,7 @@ impl NoesisAnimation {
 }
 
 /// Reconcile every view's [`NoesisAnimation`]: begin the requested animations
-/// when the component changed. Write-only — no read-back message.
+/// when the component changed. Write-only: no read-back message.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_animation_bridge(
     views: Query<(Entity, Ref<NoesisAnimation>)>,
@@ -139,10 +141,6 @@ pub(crate) fn sync_animation_bridge(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Wires the per-view animation bridge. Added transitively by
 /// [`crate::NoesisPlugin`].

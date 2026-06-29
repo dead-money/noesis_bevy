@@ -1,29 +1,21 @@
-//! Maps `Noesis::Shader::Enum` values to the WGSL preprocessor define set
-//! that produces the right shader variant. Mirrors the `Shader.140.frag` /
-//! `Shader.140.vert` `#define` cascade in the `GLRenderDevice` reference.
-//!
-//! Phase 3.A coverage: only [`Shader::PATH_SOLID`]. Phase 3.B fills in
-//! `Path_AA_Solid`, `Mask`, `RGBA`, `Clear`. Phase 4.B.2 adds the plain
-//! [`Shader::PATH_PATTERN`] + [`Shader::PATH_AA_PATTERN`] variants (no
-//! explicit wrap / clamp). Linear/Radial/SDF/Opacity/wrap variants still
-//! need additional resource bindings and land later.
+//! Maps a [`Shader`] variant to the WGSL preprocessor defines that select the
+//! matching shader in `noesis.wgsl`.
 
 use std::collections::HashSet;
 
 use noesis_runtime::render_device::types::Shader;
 
-/// Returns the define set for `shader`.
+/// Returns the WGSL define set for `shader`.
 ///
 /// # Panics
 ///
-/// Panics if `shader` hasn't been ported to `noesis.wgsl` yet — the panic
-/// names the missing variant so it doubles as a TODO list.
+/// Panics if `shader` has no `noesis.wgsl` variant yet; the message names the
+/// missing one.
 #[must_use]
 #[allow(clippy::too_many_lines)] // one arm per shader variant, no abstraction buys clarity here
 pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
     let mut d: HashSet<&'static str> = HashSet::new();
     match shader.0 {
-        // ─── Effect-only (no paint) ────────────────────────────────────────
         n if n == Shader::RGBA.0 => {
             d.insert("EFFECT_RGBA");
         }
@@ -34,14 +26,12 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_CLEAR");
         }
 
-        // ─── EFFECT_PATH × PAINT_SOLID ─────────────────────────────────────
         n if n == Shader::PATH_SOLID.0 => {
             d.insert("HAS_COLOR");
             d.insert("PAINT_SOLID");
             d.insert("EFFECT_PATH");
         }
 
-        // ─── EFFECT_PATH_AA × PAINT_SOLID ──────────────────────────────────
         n if n == Shader::PATH_AA_SOLID.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_COVERAGE");
@@ -49,7 +39,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // ─── EFFECT_PATH × PAINT_PATTERN (plain — sampler wrap does it) ────
         // PAINT_PATTERN_PLAIN gates the no-wrap branch in noesis.wgsl; each
         // CLAMP / REPEAT / MIRROR_{U,V} / MIRROR variant below gates its own
         // block instead.
@@ -61,7 +50,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH");
         }
 
-        // ─── EFFECT_PATH_AA × PAINT_PATTERN (plain) ────────────────────────
         n if n == Shader::PATH_AA_PATTERN.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_COVERAGE");
@@ -171,7 +159,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // ─── EFFECT_PATH × PAINT_LINEAR (samples `ramps` texture) ──────────
+        // PAINT_LINEAR samples the `ramps` gradient texture.
         n if n == Shader::PATH_LINEAR.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_PAINT_TEXTURE");
@@ -179,7 +167,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH");
         }
 
-        // ─── EFFECT_PATH_AA × PAINT_LINEAR ─────────────────────────────────
         n if n == Shader::PATH_AA_LINEAR.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_COVERAGE");
@@ -188,7 +175,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // ─── EFFECT_PATH × PAINT_RADIAL (samples `ramps` at computed radius)
+        // PAINT_RADIAL samples `ramps` at a computed radius.
         n if n == Shader::PATH_RADIAL.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_PAINT_TEXTURE");
@@ -196,7 +183,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH");
         }
 
-        // ─── EFFECT_PATH_AA × PAINT_RADIAL ─────────────────────────────────
         n if n == Shader::PATH_AA_RADIAL.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_COVERAGE");
@@ -205,8 +191,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // ─── EFFECT_SDF × PAINT_SOLID (text) ───────────────────────────────
-        // Vertex format PosColorTex1: pos (loc 0), color (loc 1), uv1 (loc 3).
+        // SDF text. Vertex format PosColorTex1: pos (loc 0), color (loc 1), uv1 (loc 3).
         // The "paint texture" at group(2) carries the glyph atlas rather than
         // a pattern/ramp; the Rust side picks the right batch slot to bind.
         n if n == Shader::SDF_SOLID.0 => {
@@ -218,8 +203,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SDF");
         }
 
-        // ─── EFFECT_SDF_LCD × PAINT_SOLID (subpixel text) ──────────────────
-        // Same vertex format as SDF_SOLID (PosColorTex1) and the same glyph
+        // Subpixel text. Same vertex format as SDF_SOLID (PosColorTex1) and the same glyph
         // atlas at group(2); the difference is a dual-source fragment output
         // (`@blend_src(0)` / `@blend_src(1)`) carrying per-channel subpixel
         // coverage, composited with the `SrcOver_Dual` blend mode. Requires
@@ -234,7 +218,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SDF_LCD");
         }
 
-        // ─── EFFECT_OPACITY × paint variants ───────────────────────────────
         // GL ref Shader.140.frag EFFECT_OPACITY block:
         //   fragColor = texture(image, uv1) * (opacity_ * paint.a)
         // `image` is the offscreen-rendered pass of the layer being
@@ -244,11 +227,8 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
         // texture+sampler pair the WGSL declares at group(3); HAS_UV1
         // carries the sample coords for that texture (location 3).
         //
-        // Triggered by Noesis whenever a layer needs to composite back
-        // through an Opacity property animation, an opacity mask, or
-        // a focus-visual fade — the dev console hits this on the second
-        // open after a focused TextBox's caret blink animation kicks
-        // in (CaretBrush opacity 1 → 0 every blink interval).
+        // Noesis emits these when a layer composites back through an Opacity
+        // animation, an opacity mask, or a focus-visual fade.
         n if n == Shader::OPACITY_SOLID.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_UV1");
@@ -330,8 +310,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_OPACITY");
         }
 
-        // ─── EFFECT_DOWNSAMPLE / EFFECT_UPSAMPLE (blur/effect resolve) ─────
-        // GL ref FSHADER(DOWNSAMPLE) / FSHADER(UPSAMPLE) — no PAINT. These
+        // GL ref FSHADER(DOWNSAMPLE) / FSHADER(UPSAMPLE), no PAINT. These
         // form the separable-blur resolve chain Noesis runs in the offscreen
         // phase. DOWNSAMPLE box-filters four taps of `pattern` (group 2) at
         // VS-computed UVs (vertex shader sets the DOWNSAMPLE flag to spread
@@ -353,8 +332,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_UPSAMPLE");
         }
 
-        // ─── EFFECT_SHADOW × PAINT_SOLID (drop shadow) ─────────────────────
-        // GL ref FSHADER2(SHADOW, SOLID). Vertex format PosColorTex1Rect:
+        // Drop shadow. GL ref FSHADER2(SHADOW, SOLID). Vertex format PosColorTex1Rect:
         // pos, color, uv1 (layer sample coords), rect (clamp bounds). Reads
         // both the layer `image` (group 3 binding 0/1) and the blurred
         // `shadow` (group 3 binding 2/3), plus cbuffer1_ps (group 1 binding 1)
@@ -370,8 +348,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SHADOW");
         }
 
-        // ─── EFFECT_BLUR × PAINT_SOLID (gaussian blur resolve) ─────────────
-        // GL ref FSHADER2(BLUR, SOLID). Vertex format PosColorTex1:
+        // Gaussian blur resolve. GL ref FSHADER2(BLUR, SOLID). Vertex format PosColorTex1:
         // pos, color, uv1. Crossfades the layer `image` with the blurred
         // `shadow` by cbuffer1_ps[0].
         n if n == Shader::BLUR.0 => {

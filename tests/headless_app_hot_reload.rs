@@ -1,21 +1,11 @@
-//! Bevy-app-level integration test for **XAML hot-reload** (TODO §3), exercised
-//! end-to-end through the real `NoesisPlugin` pipeline (headless, pipelined
-//! rendering on).
+//! Integration test for XAML hot-reload through the real `NoesisPlugin` pipeline.
 //!
-//! A live [`NoesisView`] is built from an in-memory XAML whose `Label` element
-//! reads `Text="VERSION ONE"`. We pump frames and observe that value through a
-//! [`NoesisText`] watch. Then we replace the *same URI*'s bytes in
-//! [`XamlRegistry`] with markup reading `Text="VERSION TWO"` (the path an asset
-//! `Modified` event drives) and pump more frames.
+//! Asserts two things: VERSION ONE is observed before the reload (view built against
+//! the original bytes), and VERSION TWO is the last observed value after reload. A
+//! no-op reload would keep reporting VERSION ONE, failing the second assertion; a view
+//! that never built against the original bytes would fail the first.
 //!
-//! The assertion is bluff-resistant: the new value differs from the old, and a
-//! no-op hot-reload would keep the view built from the first bytes — its watch
-//! would keep reporting `VERSION ONE` and never `VERSION TWO`, failing the test.
-//! We also assert the *old* value was genuinely observed first, so the test
-//! can't pass by the view never having built against the original bytes.
-//!
-//! Font-free assertion path: we only read the `Text` dependency property, no
-//! glyph rendering, so the scene builds with no font gate.
+//! Only reads the `Text` dependency property (no glyph rendering), so no font setup is needed.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -95,9 +85,7 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
               mut exit: MessageWriter<AppExit>| {
             *frame += 1;
 
-            // Replace the SAME URI's bytes with new markup — the path an asset
-            // `Modified` event drives through `update_xaml_registry`. The render
-            // state must notice the bytes changed and rebuild the view.
+            // Same URI, new bytes: simulates what update_xaml_registry does on an asset Modified event.
             if *frame == RELOAD_AT_FRAME {
                 reg.insert(URI.to_string(), Arc::new(xaml("VERSION TWO").into_bytes()));
             }
