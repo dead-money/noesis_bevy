@@ -65,6 +65,15 @@ fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
 
 `NoesisPlugin::default()` reads `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` from the environment. Pass `NoesisLicense { name, key }` to set them explicitly.
 
+## How the UI fits Bevy
+
+The mental model is closer to "Bevy hosts an embedded retained-mode GUI runtime and renders its output" than "Bevy UI describes the widgets." XAML is authoritative for structure and layout; the ECS supplies data and intent across a small typed bridge surface.
+
+- **The XAML tree lives inside Noesis, not the ECS.** Noesis parses your XAML and owns the live tree of controls (buttons, grids, text blocks), along with the visual and logical trees, the dependency-property system, styles, triggers, and animations. None of those controls are Bevy entities; there is no entity per `<Button>`.
+- **One entity per view.** The only ECS-visible part is the `NoesisView` camera entity. It renders one XAML document into the frame, and the whole tree behind it is opaque to the ECS.
+- **You reach the controls through bridges, not entities.** Instead of querying widget entities, you attach bridge components to the view entity, and reconcile systems in `NoesisSet::Apply` push values into and pull them out of the live scene: `NoesisText` for text, `NoesisDp` for dependency properties, `NoesisVm` for view models, `NoesisCommands` for commands, and so on. Read-backs arrive as `Message { view, .. }` events, not as changed components on a widget. Data binding, commands, and view models are the seam, the idiomatic XAML/WPF approach rather than immediate-mode or an entity per widget.
+- **The tradeoff.** You don't get ECS-native features like per-widget `Transform`, picking, or change detection for free. Anything you want to drive from gameplay goes through the bridge layer, or means adding to it.
+
 ## Driving the UI from systems
 
 Each piece of UI state (text, visibility, list contents, and more) is a bridge component on the view entity. Spawning a `NoesisView` auto-attaches every per-view bridge as a Bevy required component, each defaulting to empty at no cost, so you write to them without spawning them by hand. A write set from `Startup` or `OnEnter`, before the scene exists, lands once the scene builds. The two binding bridges `NoesisVm` and `NoesisCommands` are the exception: add those yourself, since they need a class or command name.
