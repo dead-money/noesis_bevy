@@ -111,7 +111,7 @@ pub struct NoesisRoutedEvent {
 
 /// Observer-facing twin of [`NoesisRoutedEvent`]: a routed event surfaced as an
 /// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
-/// entity by default). Read the target with [`On::event_target`].
+/// entity by default). Read the target with `On::event_target`.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct UiRoutedEvent {
     /// Trigger target: the watch entry's `target` (the view entity by default).

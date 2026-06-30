@@ -38,14 +38,14 @@
 //! every bound component's [`NoesisViewModel::noesis_properties`], concatenated at
 //! stable index offsets:
 //!
-//! 1. **Collect (parallel).** A per-type [`collect_panel_field`] system notes each
+//! 1. **Collect (parallel).** A per-type `collect_panel_field` system notes each
 //!    registered field type present on the panel and, when the component changed,
-//!    stashes its snapshot, all into a plain `Send` [`PanelAggregate`] component.
-//! 2. **Push (serial).** [`sync_panels`] freezes the layout on first sight, then
+//!    stashes its snapshot, all into a plain `Send` `PanelAggregate` component.
+//! 2. **Push (serial).** `sync_panels` freezes the layout on first sight, then
 //!    drives [`NoesisRenderState::sync_panel`](crate::render): build the class +
 //!    fragment, push the changed properties, mount the fragment into the host
 //!    scene, and drain UI→Rust writebacks (keyed by *global* property index).
-//! 3. **Writeback (parallel).** A per-type [`apply_panel_writeback`] system routes
+//! 3. **Writeback (parallel).** A per-type `apply_panel_writeback` system routes
 //!    each writeback back to the originating component by its frozen index range.
 //!
 //! This mirrors the "diff in parallel, push serially" convention in
@@ -246,7 +246,7 @@ pub enum NoesisPanelSet {
     Writeback,
 }
 
-/// Collect one registered field type `T` into each panel's [`PanelAggregate`]:
+/// Collect one registered field type `T` into each panel's `PanelAggregate`:
 /// note it present (pre-freeze) and, when it changed, stash its snapshot. Pure
 /// ECS, no Noesis state; parallelizes freely.
 #[allow(clippy::needless_pass_by_value)]
@@ -371,7 +371,7 @@ pub struct NoesisPanelTextChanged {
 }
 
 /// Poll each panel's [`NoesisPanelText`] watch list and emit
-/// [`NoesisPanelTextChanged`]. Runs after [`sync_panels`] so a freshly-pushed
+/// [`NoesisPanelTextChanged`]. Runs after `sync_panels` so a freshly-pushed
 /// value is observable.
 #[allow(clippy::needless_pass_by_value)]
 fn poll_panel_text(
@@ -427,7 +427,7 @@ impl NoesisPanelAppExt for App {
 }
 
 /// Installs the panel-reconcile pipeline: orders the collect/writeback sets around
-/// [`NoesisSet::Apply`] and adds the serial [`sync_panels`] push. Added by
+/// [`NoesisSet::Apply`] and adds the serial `sync_panels` push. Added by
 /// [`NoesisPlugin`](crate::NoesisPlugin); register field types with
 /// [`NoesisPanelAppExt::add_noesis_panel_field`].
 #[derive(Default)]

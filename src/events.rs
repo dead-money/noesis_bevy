@@ -10,7 +10,7 @@
 //!   originating `view` entity (the original, pull-based API), and
 //! * as a [`UiClicked`] / [`UiKeyDown`] **`EntityEvent`** targeting the watch
 //!   entry's `target` entity (defaulting to the `view` entity), so an observer
-//!   recovers the clicked entity via [`On::event_target`].
+//!   recovers the clicked entity via `On::event_target`.
 //!
 //! ```ignore
 //! commands.entity(view).insert((
@@ -57,7 +57,7 @@ pub struct NoesisClicked {
 /// Observer-facing twin of [`NoesisClicked`]: a click surfaced as an
 /// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
 /// entity by default, or a per-row entity for templated list rows). Read the
-/// target with [`On::event_target`].
+/// target with `On::event_target`.
 ///
 /// Fired via the global self-targeting `commands.trigger`, so a stale/despawned
 /// target is safe: no entity-targeted observer exists for it.
@@ -206,7 +206,7 @@ pub struct NoesisKeyDown {
 
 /// Observer-facing twin of [`NoesisKeyDown`]: a keydown surfaced as an
 /// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
-/// entity by default). Read the target with [`On::event_target`].
+/// entity by default). Read the target with `On::event_target`.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct UiKeyDown {
     /// Trigger target: the watch entry's `target` (the view entity by default).

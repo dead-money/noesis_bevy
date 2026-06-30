@@ -14,7 +14,7 @@
 //!    the reconcile key being [`Entity`]) and compute a *desired delta*: the
 //!    minimal set of engine operations that would bring Noesis in line with the
 //!    world. They write that delta into plain `Send` storage: a per-entity
-//!    [`NoesisDelta<Op>`] component, or a resource. No FFI happens here, so it
+//!    `NoesisDelta<Op>` component, or a resource. No FFI happens here, so it
 //!    parallelizes against the rest of the app for free.
 //!
 //! 2. **Push serially.** A single system in [`NoesisSet::Apply`](crate::NoesisSet::Apply),
@@ -55,7 +55,7 @@
 //! The existing per-element bridges (`text`, `dp`, …) predate this split and
 //! still diff inline inside their Apply system; they are cheap enough that it
 //! does not matter. New, heavier reconcile bridges should follow the pattern above
-//! and carry their delta in [`NoesisDelta<Op>`].
+//! and carry their delta in `NoesisDelta<Op>`.
 
 use bevy::prelude::*;
 

@@ -49,9 +49,9 @@
 //!
 //! Mirrors [`crate::reconcile`]: a parallel `PostUpdate` diff system
 //! ([`NoesisListSet::Diff`]) builds the desired ordered `Vec` of `(Entity, field
-//! snapshot)` into a plain `Send` [`ListDesired`] component (no Noesis handles in
-//! sight), and the single serial [`sync_lists`] system in
-//! [`NoesisSet::Apply`](crate::NoesisSet::Apply) drains it through FFI against the
+//! snapshot)` into a plain `Send` `ListDesired` component (no Noesis handles in
+//! sight), and the single serial `sync_lists` system in
+//! [`NoesisSet::Apply`] drains it through FFI against the
 //! view's live `ObservableCollection`, which is owned by
 //! [`NoesisRenderState`](crate::render) (thread-affine to the `View`) and released
 //! before `noesis_runtime::shutdown`.
@@ -245,7 +245,7 @@ pub(crate) struct DesiredRow {
 /// The parallel→serial hand-off for one view's list: the desired ordered rows,
 /// the row schema, and which row (if any) the app marked [`Selected`]. A plain
 /// `Send` component (auto-required by [`UiList`]); holds no Noesis handles. Rebuilt
-/// every frame by [`diff_list`] and drained by [`sync_lists`].
+/// every frame by [`diff_list`] and drained by `sync_lists`.
 #[derive(Component, Default)]
 pub(crate) struct ListDesired {
     /// Desired rows in final order (query order, optionally sorted Rust-side).
@@ -825,7 +825,7 @@ fn diff_list<T: NoesisViewModel + Component>(
     }
 }
 
-/// Serial push: drain each view's [`ListDesired`] through the reconciler, bind the
+/// Serial push: drain each view's `ListDesired` through the reconciler, bind the
 /// `ItemsSource` once the control exists, reconcile the [`Selected`] marker to any
 /// UI-driven selection, and emit [`NoesisListOps`] / [`NoesisListSelection`]. The
 /// only list system that touches Noesis state.
@@ -910,7 +910,7 @@ impl NoesisListAppExt for App {
 
 /// Installs the entity-keyed list reconcile pipeline: orders the parallel
 /// [`NoesisListSet::Diff`] before [`NoesisSet::Apply`] and adds the serial
-/// [`sync_lists`] push. Added by [`crate::NoesisPlugin`]; register row types with
+/// `sync_lists` push. Added by [`crate::NoesisPlugin`]; register row types with
 /// [`NoesisListAppExt::add_noesis_list`].
 #[derive(Default)]
 pub struct NoesisListPlugin;
