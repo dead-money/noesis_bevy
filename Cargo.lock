@@ -3391,6 +3391,8 @@ dependencies = [
  "noesis_runtime",
  "pollster",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
  "wgpu",
 ]
 

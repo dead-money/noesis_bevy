@@ -352,7 +352,7 @@ fn collect_panel_field<T: NoesisViewModel + Component>(
 /// [`NoesisRenderState::sync_panel`] (build/mount the fragment, push changed
 /// properties, drain writebacks). The only system here that touches Noesis state.
 #[allow(clippy::needless_pass_by_value)]
-fn sync_panels(
+pub(crate) fn sync_panels(
     mut commands: Commands,
     mut panels: Query<(Entity, &UiPanel, &mut PanelAggregate, Has<SealPanel>)>,
     state: Option<NonSendMut<NoesisRenderState>>,

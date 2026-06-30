@@ -506,6 +506,11 @@ pub(crate) struct NoesisRenderState {
     /// bridge's apply against the current component state. Cleared at the top of
     /// each Ensure pass.
     scenes_built_this_frame: HashSet<Entity>,
+    /// Panel entities whose fragment first mounted into its host this frame. The
+    /// focus bridge ORs this so a once-set `NoesisFocus` on a panel still lands
+    /// once the fragment exists (a panel has no scene, so `scenes_built_this_frame`
+    /// never covers it). Cleared alongside `scenes_built_this_frame`.
+    panels_mounted_this_frame: HashSet<Entity>,
     /// One-time flag for `SetFontFallbacks`/`SetFontDefaultProperties`;
     /// must fire AFTER Bevy has loaded at least one font into
     /// `SharedFontMap`, because Noesis's `SetFontFallbacks` eagerly runs
@@ -999,6 +1004,7 @@ impl NoesisRenderState {
             registered_textures: Some(registered_textures),
             scenes: HashMap::new(),
             scenes_built_this_frame: HashSet::new(),
+            panels_mounted_this_frame: HashSet::new(),
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
             loaded_app_resources_chain: None,
@@ -1541,17 +1547,47 @@ impl NoesisRenderState {
         pushes: &[(u32, PlainValue)],
     ) -> Vec<(u32, PlainValue)> {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.panels.entry(entity) {
-            match PanelEntry::build(uri, host, host_name, props) {
+            // F5b: a malformed-but-loadable fragment (e.g. a tag mismatch) loads as a
+            // partial tree and only warns through Noesis's parser, so capture any error
+            // raised on this (render) thread during the load and surface it as a Bevy
+            // error! rather than leaving a silent half-render.
+            let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let captured = std::sync::Arc::clone(&sink);
+            let built = {
+                let _guard = noesis_runtime::diagnostics::set_thread_error_handler(
+                    move |_file, _line, message, _fatal, ctx| {
+                        let at = ctx
+                            .filter(|c| c.line != 0)
+                            .map(|c| format!(" (line {}, col {})", c.line, c.column))
+                            .unwrap_or_default();
+                        captured.lock().unwrap().push(format!("{message}{at}"));
+                    },
+                );
+                PanelEntry::build(uri, host, host_name, props)
+                // guard drops here, restoring the prior handler before any ECS access
+            };
+            let warnings = std::mem::take(&mut *sink.lock().unwrap());
+            match built {
                 Some(built) => {
                     slot.insert(built);
                     self.failed_fragments.remove(&(entity, uri.to_owned()));
+                    if !warnings.is_empty() {
+                        error!(
+                            "UiPanel {entity:?}: fragment {uri:?} loaded with parser warning(s): {}",
+                            warnings.join("; "),
+                        );
+                    }
                 }
                 None => {
                     // Vacant slot retries every frame; dedupe the log to once per (entity, uri).
                     if self.failed_fragments.insert((entity, uri.to_owned())) {
+                        let why = if warnings.is_empty() {
+                            "unregistered/typo'd URI, or XAML Noesis rejected outright".to_owned()
+                        } else {
+                            warnings.join("; ")
+                        };
                         error!(
-                            "UiPanel {entity:?}: fragment {uri:?} failed to load \
-                             (unregistered/typo'd URI, or XAML Noesis rejected outright). \
+                            "UiPanel {entity:?}: fragment {uri:?} failed to load: {why}. \
                              The panel will not mount until it resolves.",
                         );
                     }
@@ -1584,6 +1620,7 @@ impl NoesisRenderState {
                         record_ffi_hop();
                         if children.add(&entry.fragment).is_some() {
                             entry.mounted_for_uri = Some(host_uri);
+                            self.panels_mounted_this_frame.insert(entity);
                         } else {
                             warn!(
                                 "UiPanel: failed to add fragment to host {:?} for panel {entity:?}",
@@ -1935,6 +1972,13 @@ impl NoesisRenderState {
     /// current component state. See [`Self::scenes_built_this_frame`].
     pub(crate) fn scene_rebuilt_this_frame(&self, entity: Entity) -> bool {
         self.scenes_built_this_frame.contains(&entity)
+    }
+
+    /// Whether `entity`'s panel fragment first mounted this frame. The focus bridge
+    /// ORs this so a once-set panel `NoesisFocus` re-applies once the fragment
+    /// exists. See [`Self::panels_mounted_this_frame`].
+    pub(crate) fn panel_mounted_this_frame(&self, entity: Entity) -> bool {
+        self.panels_mounted_this_frame.contains(&entity)
     }
 
     /// Apply view `entity`'s desired element visibility (`x:Name → visible`).
@@ -4620,6 +4664,7 @@ fn ensure_noesis_scene(
     // Reset the per-frame rebuild set before this pass repopulates it; the
     // Apply systems that follow read it within the same frame.
     state.scenes_built_this_frame.clear();
+    state.panels_mounted_this_frame.clear();
     for (entity, config) in &views {
         state.ensure_scene(entity, config);
     }

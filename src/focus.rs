@@ -68,7 +68,10 @@ pub(crate) fn sync_focus_bridge(
         return;
     };
     for (entity, focus) in &views {
-        if focus.is_changed() || state.scene_rebuilt_this_frame(entity) {
+        if focus.is_changed()
+            || state.scene_rebuilt_this_frame(entity)
+            || state.panel_mounted_this_frame(entity)
+        {
             state.apply_focus_for(entity, focus.target.as_deref());
         }
     }
@@ -79,7 +82,14 @@ pub struct NoesisFocusPlugin;
 
 impl Plugin for NoesisFocusPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, sync_focus_bridge.in_set(NoesisSet::Apply));
+        // After `sync_panels` so a panel's `NoesisFocus` re-applies the same frame
+        // its fragment mounts (panel focus reads `panel_mounted_this_frame`).
+        app.add_systems(
+            PostUpdate,
+            sync_focus_bridge
+                .in_set(NoesisSet::Apply)
+                .after(crate::panel::sync_panels),
+        );
     }
 }
 
