@@ -1949,6 +1949,16 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // NoesisLayout on a mounted UiPanel entity resolves fragment-internal names.
+            if let Some(panel) = self.panels.get(&entity) {
+                for (name, &[left, top, right, bottom]) in desired {
+                    let Some(mut element) = resolve_named(&panel.fragment, name) else {
+                        warn!("NoesisLayout: x:Name {name:?} not found in panel fragment");
+                        continue;
+                    };
+                    element.set_margin(left, top, right, bottom);
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2696,6 +2706,21 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // NoesisGeometry on a mounted UiPanel entity: resolve against the
+            // fragment's private namescope (a host-view FindName can't see inside).
+            if let Some(panel) = self.panels.get(&entity) {
+                for (name, points) in desired {
+                    let Some(mut element) = resolve_named(&panel.fragment, name) else {
+                        warn!("NoesisGeometry: x:Name {name:?} not found in panel fragment");
+                        continue;
+                    };
+                    if !element.set_path_points(points) {
+                        warn!(
+                            "NoesisGeometry: element {name:?} is not a Path (or < 2 points); skipped"
+                        );
+                    }
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2859,6 +2884,17 @@ impl NoesisRenderState {
             return;
         };
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // NoesisFocus on a mounted UiPanel entity resolves fragment-internal names.
+            if let Some(panel) = self.panels.get(&entity) {
+                match resolve_named(&panel.fragment, name) {
+                    Some(mut element) => {
+                        if !element.focus() {
+                            warn!("NoesisFocus: element {name:?} refused focus (non-focusable?)");
+                        }
+                    }
+                    None => warn!("NoesisFocus: x:Name {name:?} not found in panel fragment"),
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2888,6 +2924,24 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // NoesisFocusControl moves on a mounted UiPanel entity resolve fragment names.
+            if let Some(panel) = self.panels.get(&entity) {
+                for m in moves {
+                    let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
+                        warn!(
+                            "NoesisFocusControl: move-from x:Name {:?} not found in panel fragment",
+                            m.from,
+                        );
+                        continue;
+                    };
+                    if !element.move_focus(m.direction, m.wrapped) {
+                        warn!(
+                            "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
+                            m.direction, m.wrapped, m.from,
+                        );
+                    }
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2921,6 +2975,24 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // NoesisFocusControl engages on a mounted UiPanel entity resolve fragment names.
+            if let Some(panel) = self.panels.get(&entity) {
+                for e in engages {
+                    let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
+                        warn!(
+                            "NoesisFocusControl: engage x:Name {:?} not found in panel fragment",
+                            e.name,
+                        );
+                        continue;
+                    };
+                    if !element.focus_engage(e.engage) {
+                        warn!(
+                            "NoesisFocusControl: element {:?} refused focus(engage={})",
+                            e.name, e.engage,
+                        );
+                    }
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -3214,6 +3286,23 @@ impl NoesisRenderState {
         desired: &HashMap<String, crate::transforms::TransformSpec>,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // NoesisTransform on a mounted UiPanel entity resolves fragment-internal
+            // names. Write-only: the +1 RenderTransform handle isn't retained for
+            // read-back (panels have no transform poll), but Noesis keeps its own ref.
+            if let Some(panel) = self.panels.get(&entity) {
+                for (name, spec) in desired {
+                    let Some(mut element) = resolve_named(&panel.fragment, name) else {
+                        warn!("NoesisTransform: x:Name {name:?} not found in panel fragment");
+                        continue;
+                    };
+                    let transform = CompositeTransform::new(spec.to_fields());
+                    if !element.set_render_transform(&transform) {
+                        warn!(
+                            "NoesisTransform: {name:?} has no RenderTransform (not a UIElement?) in panel fragment"
+                        );
+                    }
+                }
+            }
             return;
         };
         // Drop handles for names no longer requested; releasing each handle's +1

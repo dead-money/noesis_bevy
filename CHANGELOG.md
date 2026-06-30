@@ -39,6 +39,14 @@ pre-1.0, any `0.x` release may contain breaking changes.
   the panel entity, with the host as `view`. Buttons and keyed input inside mounted
   panel fragments now work without routing through the host scene.
 
+- **Panel-entity write bridges.** `NoesisGeometry`, `NoesisLayout`, `NoesisFocus`,
+  `NoesisFocusControl`, and `NoesisTransform` on a `UiPanel` entity now resolve
+  `x:Name`s against the panel's own fragment namescope (like the input watches
+  above), instead of silently no-op'ing because the entity isn't a view. This lets
+  geometry / layout / focus / transform panels (a trace, a context-menu cursor, a
+  console's focus) be split into their own mounted fragments rather than staying
+  inline in the host scene.
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into
