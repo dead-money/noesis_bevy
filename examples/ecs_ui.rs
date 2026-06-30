@@ -171,7 +171,7 @@ pub const HUD_XAML: &str = r##"<StackPanel xmlns="http://schemas.microsoft.com/w
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <StackPanel Orientation="Horizontal">
     <TextBlock Text="HP " Foreground="#FF7D8590"/>
-    <TextBlock x:Name="HealthValue" Text="{Binding Health}" Foreground="#FF6BE675"/>
+    <TextBlock x:Name="HealthValue" Text="{Binding Health, StringFormat=F0}" Foreground="#FF6BE675"/>
   </StackPanel>
   <StackPanel Orientation="Horizontal">
     <TextBlock Text="Score " Foreground="#FF7D8590"/>
@@ -219,6 +219,16 @@ pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -
                 xaml_uri: HOST_URI.to_string(),
                 size: UVec2::new(640, 480),
                 application_resources,
+                // Noesis renders text invisibly if no font is registered before
+                // the scene builds, so gate the build on PT Root UI and make it
+                // the process-wide fallback — this is what makes the bare
+                // `cargo run --example ecs_ui` (no theme) show any text at all.
+                wait_for_fonts: vec!["Fonts".to_string()],
+                wait_for_font_files: vec![(
+                    "Fonts".to_string(),
+                    "PT Root UI_Regular.otf".to_string(),
+                )],
+                font_fallbacks: vec!["Fonts/#PT Root UI".to_string()],
                 ..default()
             },
             // Inventory rows ordered by qty (property index 1), ascending. The
@@ -454,6 +464,9 @@ fn main() {
               mut xaml: ResMut<XamlRegistry>,
               mut fonts: ResMut<FontRegistry>| {
             register_xaml(&mut xaml);
+            // Always stage the PT Root UI fallback font: text is invisible without
+            // a registered font, independent of the (optional) theme below.
+            stage_fonts(&mut fonts);
             // Optional SDK theme for real control chrome; degrades to placeholder
             // chrome (and still works) when unset or the SDK isn't reachable.
             let app_resources = theme_for_startup
@@ -481,6 +494,31 @@ fn main() {
     }
 
     app.run();
+}
+
+/// Stage the SDK's PT Root UI font under the `Fonts` folder so text renders even
+/// with no theme. The SDK is present at runtime (the runtime crate links it), so
+/// this normally succeeds; it warns rather than fails if a face is missing.
+fn stage_fonts(fonts: &mut FontRegistry) {
+    let Some(sdk) = std::env::var_os("NOESIS_SDK_DIR") else {
+        warn!("NOESIS_SDK_DIR unset — no fallback font staged; text may be invisible");
+        return;
+    };
+    let dir = PathBuf::from(sdk).join("Src/Packages/App/Theme/Data/Theme/Fonts");
+    let mut any = false;
+    for file in ["PT Root UI_Regular.otf", "PT Root UI_Bold.otf"] {
+        let path = dir.join(file);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                fonts.insert("Fonts", file, Arc::new(bytes));
+                any = true;
+            }
+            Err(err) => warn!("ecs_ui: font {} not read ({err})", path.display()),
+        }
+    }
+    if !any {
+        warn!("ecs_ui: no fallback font staged — text may render invisibly");
+    }
 }
 
 /// Stage the SDK theme `theme` (its XAML chain + PT Root UI fonts) into the
