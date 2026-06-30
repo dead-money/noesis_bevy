@@ -6,21 +6,6 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
-### Fixed
-
-- **Focus / keydown into mounted fragments.** A `NoesisFocus` set on a `UiPanel`
-  entity now re-applies once the panel's fragment mounts, instead of applying only
-  on the frame the component was set (before the fragment existed) and never
-  retrying. This makes keyed input into a focused fragment element work end to end.
-
-### Added
-
-- **Loud lenient-parse fragment failures.** A malformed-but-loadable `UiPanel`
-  fragment (a tag mismatch loads as a partial tree with only a Noesis parser
-  warning) now logs a Bevy `error!` naming the panel entity, URI, and the warning
-  (with line/column), instead of a silent half-render. Complements the 0.11.0
-  hard-load-failure error.
-
 ## [0.11.0] - 2026-06-29
 
 ### Added
@@ -53,8 +38,12 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 - **Loud fragment load failures.** A `UiPanel` fragment whose URI can't load now
   logs a deduped Bevy `error!` with the panel entity and URI, instead of a silent
-  empty slot. (Malformed-but-loadable fragments still get only Noesis's own parser
-  warning.)
+  empty slot.
+
+- **Loud lenient-parse fragment failures.** A malformed-but-loadable `UiPanel`
+  fragment (a tag mismatch loads as a partial tree with only a Noesis parser
+  warning) now also logs a Bevy `error!` naming the panel entity, URI, and the
+  warning.
 
 - **`#[noesis(rename = "…")]`** field attribute: bind a snake_case field to a
   different XAML property name (`master_volume` → `{Binding MasterVolume}`).
