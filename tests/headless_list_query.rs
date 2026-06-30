@@ -16,12 +16,15 @@
 //!     **keeps the selected row selected** — currency rides the moved container.
 //!   * **Remove.** Despawning a row drops it (`removes` op) without disturbing the
 //!     rest or the selection.
-//!   * **Currency is selection (UI → ECS).** A fresh `ICollectionView` starts with
-//!     the first row current, so the bridge auto-marks it [`Selected`] *and* emits a
-//!     [`NoesisListSelection`] — the UI/currency-driven half of the contract. This
-//!     test asserts both (the only `SelectionOutcome::UiSelected` path the headless
-//!     harness can drive; a real `ListBox` row click is consumed by the
-//!     `ListBoxItem` against the control's own view, not the bridge's).
+//!   * **Default currency is NOT reported as a selection.** A fresh
+//!     `ICollectionView` starts with the first row current, but the bridge adopts
+//!     that baseline silently — it must not mark [`Selected`] or emit a
+//!     [`NoesisListSelection`] before any genuine change. This test asserts no
+//!     auto-selection and no spurious message. (NB: the binding observes its *own*
+//!     `CollectionView`, a separate object from the live `ListBox`'s default view,
+//!     so a real control-side row click does not reach this currency channel today
+//!     — that goes through the `row_click_subs → UiClicked` path. The
+//!     control→currency link is covered, `#[ignore]`-d, in `headless_list_select`.)
 //!   * **Currency is selection (ECS → UI).** Setting [`Selected`] from the app
 //!     drives the current item; the marker survives the reorder, proving no Reset.
 //!     App-driven selection is the *cause*, not an effect, so it emits **no**
@@ -201,9 +204,8 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                 ui_sel_sys.lock().unwrap().push(ev.selected);
             }
 
-            // Default currency: the bridge should have auto-marked the first row
-            // (A) Selected and emitted a UI selection message — *before* the app
-            // sets any Selected of its own.
+            // Default currency must NOT auto-select: before the app sets any
+            // Selected of its own, nothing should be marked.
             if *frame == CAPTURE_DEFAULT_AT {
                 *default_selected_sys.lock().unwrap() = selected_q.iter().next();
             }
@@ -255,7 +257,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
 
     app.run();
 
-    let (a, _b, c) = entities.lock().unwrap().expect("rows spawned");
+    let (_a, _b, c) = entities.lock().unwrap().expect("rows spawned");
     let f = flags.lock().unwrap();
     let default_sel = *default_selected.lock().unwrap();
     let ui_msgs = ui_sel_msgs.lock().unwrap().clone();
@@ -275,22 +277,19 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
     );
     assert!(f.saw_removes, "despawning a row produced no removes op");
 
-    // UI → ECS: default currency auto-selected the first row (A), surfacing as both
-    // a `Selected` marker and a `NoesisListSelection`. This is the
-    // `SelectionOutcome::UiSelected` half of the contract — without it the whole
-    // UI-driven selection branch would be dead. (Deleting that branch makes both of
-    // the next two assertions fail.)
+    // Default currency is adopted silently: before the app touches Selected, nothing
+    // is marked and no UI selection message has been emitted — the unsolicited
+    // first-frame auto-select is suppressed.
     assert_eq!(
-        default_sel,
-        Some(a),
-        "default currency did not auto-Select the first row (A) — the UI-driven \
-         selection branch never fired",
+        default_sel, None,
+        "a fresh list auto-selected its first row — the default current item must \
+         not be reported as a UI selection",
     );
     assert_eq!(
         ui_msgs,
-        vec![Some(a)],
-        "expected exactly one UI selection message (the default-currency auto-select \
-         of A); app-driven Selected changes must emit none. got {ui_msgs:?}",
+        Vec::<Option<Entity>>::new(),
+        "expected no UI selection messages (default currency suppressed; app-driven \
+         Selected emits none). got {ui_msgs:?}",
     );
 
     assert_eq!(

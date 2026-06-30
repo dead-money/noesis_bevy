@@ -136,6 +136,13 @@ static LIST_CLASS_SEQ: AtomicU64 = AtomicU64::new(0);
 /// item `DataTemplate` against them with `{Binding <field>}`. Override the name
 /// with [`with_class`](Self::with_class) only for a typed `DataTemplate` keyed on
 /// a specific class.
+///
+/// A list binds **one** row component type (the `T` you registered with
+/// [`add_noesis_list`](crate::NoesisListAppExt::add_noesis_list)); having two
+/// different `T`s name the same view via [`ListedIn`] is unsupported (caught with
+/// a debug-assert / warn-once). Selection is reported only on a *genuine* change:
+/// the default current item a fresh list starts with is adopted silently, not
+/// surfaced as a [`NoesisListSelection`].
 #[derive(Component, Clone, Debug)]
 #[require(ListDesired)]
 pub struct UiList {
@@ -246,6 +253,12 @@ pub(crate) struct ListDesired {
     pub(crate) schema: &'static [(&'static str, PlainType)],
     /// The row currently carrying [`Selected`] (app-side selection authority).
     pub(crate) selected: Option<Entity>,
+    /// [`TypeId`](core::any::TypeId) of the row component type that last populated
+    /// this slot. A [`UiList`] supports exactly one row type; if a second
+    /// `T: NoesisViewModel` also names this view via [`ListedIn`], the two
+    /// per-type [`diff_list`] systems race to last-writer-wins here. We stamp this
+    /// to catch that (debug-assert + warn-once) instead of failing silently.
+    pub(crate) row_type: Option<core::any::TypeId>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +337,13 @@ pub(crate) struct ListBinding {
     /// Last currency we observed/drove, as a row entity — the record half of the
     /// record-then-apply selection authority.
     last_currency: Option<Entity>,
+    /// Whether the first selection poll has run. A fresh `ICollectionView` starts
+    /// with row 0 current; without this we'd report that default currency as a
+    /// *UI selection* the very first frame a list fills, marking [`Selected`] and
+    /// emitting a [`NoesisListSelection`] before any user input. The first poll
+    /// instead adopts the default currency as the baseline silently, so only a
+    /// genuine later change is reported.
+    selection_primed: bool,
     /// The row-object class registration. **Last field**: drops after every
     /// instance, so the class outlives its instances.
     registration: Option<ClassRegistration>,
@@ -351,6 +371,7 @@ impl ListBinding {
             entity_field_index: 0,
             class_ready: false,
             last_currency: None,
+            selection_primed: false,
             registration: None,
         }
     }
@@ -603,7 +624,14 @@ impl ListBinding {
             }
         }
         let current = self.current_entity();
-        if current != self.last_currency {
+        if !self.selection_primed {
+            // First poll: adopt the default currency (row 0 of a fresh view) as the
+            // baseline WITHOUT reporting it — an unsolicited selection isn't a UI
+            // event. Fall through so an app-set `desired_selected` is still honored
+            // this frame.
+            self.selection_primed = true;
+            self.last_currency = current;
+        } else if current != self.last_currency {
             self.last_currency = current;
             return SelectionOutcome::UiSelected(current);
         }
@@ -700,7 +728,10 @@ fn set_field(handle: Instance, index: u32, value: &PlainValue) {
 fn values_eq(a: &PlainValue, b: &PlainValue) -> bool {
     match (a, b) {
         (PlainValue::Int32(x), PlainValue::Int32(y)) => x == y,
-        (PlainValue::Double(x), PlainValue::Double(y)) => x == y,
+        // NaN-aware: `NaN == NaN` is false, so a plain `==` would treat an
+        // unchanged NaN field as changed every frame and re-push an `Update`
+        // forever. Two NaNs are "equal" for the change cache.
+        (PlainValue::Double(x), PlainValue::Double(y)) => x == y || (x.is_nan() && y.is_nan()),
         (PlainValue::Bool(x), PlainValue::Bool(y)) => x == y,
         (PlainValue::String(x), PlainValue::String(y)) => x == y,
         (PlainValue::U64(x), PlainValue::U64(y)) => x == y,
@@ -772,6 +803,29 @@ fn diff_list<T: NoesisViewModel + Component>(
                 };
                 if sort.descending { ord.reverse() } else { ord }
             });
+        }
+
+        // One row type per list: if a second `T` also targets this view, the two
+        // per-type `diff_list` systems clobber each other here. Catch it loudly in
+        // debug + warn once in release rather than silently last-writer-wins. Only
+        // checked when this `T` actually contributed rows, so a registered-but-
+        // unused row type never false-positives.
+        if !gathered.is_empty() {
+            let this = core::any::TypeId::of::<T>();
+            if let Some(prev) = slot.row_type
+                && prev != this
+            {
+                debug_assert!(
+                    false,
+                    "UiList view {view:?}: two row component types target one list \
+                     (last-writer-wins); use one row type per UiList",
+                );
+                bevy::log::warn_once!(
+                    "UiList: multiple row component types target list view {view:?}; \
+                     only one row type per UiList is supported (last-writer-wins)",
+                );
+            }
+            slot.row_type = Some(this);
         }
 
         slot.selected = gathered
