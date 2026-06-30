@@ -104,7 +104,7 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
                         ..default()
                     },
                     // Order rows by weight ascending: A(1), B(2), C(3).
-                    UiList::new("Inv", "Test.ObsRow").sorted_by(1, false),
+                    UiList::new("Inv").sorted_by(1, false),
                 ))
                 .id();
 

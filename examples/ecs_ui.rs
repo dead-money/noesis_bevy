@@ -97,8 +97,6 @@ pub const HUD2_SLOT: &str = "Hud2";
 
 /// `x:Name` of the inventory `ItemsControl`.
 pub const INVENTORY_NAME: &str = "Inventory";
-/// Unique Noesis class the inventory rows realize as.
-pub const ROW_CLASS: &str = "EcsUi.ItemRow";
 
 /// `x:Name` of the "heal player 1" host button.
 pub const HEAL_P1_BTN: &str = "HealP1";
@@ -223,8 +221,9 @@ pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -
                 application_resources,
                 ..default()
             },
-            // Inventory rows ordered by qty (property index 1), ascending.
-            UiList::new(INVENTORY_NAME, ROW_CLASS).sorted_by(1, false),
+            // Inventory rows ordered by qty (property index 1), ascending. The
+            // row-object class is auto-generated unique — no name to hand-pick.
+            UiList::new(INVENTORY_NAME).sorted_by(1, false),
         ))
         .id();
 

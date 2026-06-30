@@ -19,7 +19,7 @@
 //! }
 //!
 //! // …with a NoesisView entity `view` whose scene has an `x:Name="Inventory"` ListBox:
-//! // commands.entity(view).insert(UiList::new("Inventory", "Game.ItemRow"));
+//! // commands.entity(view).insert(UiList::new("Inventory"));
 //! // commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(view)));
 //! // commands.spawn((Item { name: "Sword".into(),  qty: 1 }, ListedIn(view)));
 //! ```
@@ -59,6 +59,7 @@
 
 use std::collections::HashSet;
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bevy::ecs::component::Mutable;
 use bevy::prelude::*;
@@ -114,38 +115,64 @@ pub struct ListSort {
     pub descending: bool,
 }
 
+/// Process-global counter handing each [`UiList`] a unique row-class name. Noesis
+/// registers reflected classes globally by name, so every list — even two of the
+/// same row type on two views — needs a distinct class; an auto-generated token
+/// guarantees that without the user inventing one. Mirrors `PANEL_CLASS_SEQ` in
+/// [`crate::render`]. (The render path realizes rows via the control's
+/// `ItemTemplate` / `{Binding <field>}` regardless of the class name; the name
+/// only has to be unique, never meaningful — see [`UiList::with_class`].)
+static LIST_CLASS_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Per-view list declaration: bind the `ObservableCollection` of entity-rows to
-/// the `ItemsControl` / `ListBox` named `name` (`x:Name`), realizing each row as
-/// an instance of the Noesis class `class`. Add it to the
+/// the `ItemsControl` / `ListBox` named `name` (`x:Name`). Add it to the
 /// [`NoesisView`](crate::NoesisView) entity whose rows reference it via
 /// [`ListedIn`].
 ///
-/// `class` must be globally unique among registered Noesis classes (registered
-/// once, on first reconcile, held for the binding's lifetime). Its properties are
-/// the row type's [`NoesisViewModel::noesis_properties`]; bind an item
-/// `DataTemplate` against them with `{Binding <field>}`.
+/// Each list auto-generates a unique Noesis `class` for its row objects (so two
+/// lists of the same row type "just work", no hand-picked names); the class is
+/// registered once on first reconcile and held for the binding's lifetime. Its
+/// properties are the row type's [`NoesisViewModel::noesis_properties`]; bind an
+/// item `DataTemplate` against them with `{Binding <field>}`. Override the name
+/// with [`with_class`](Self::with_class) only for a typed `DataTemplate` keyed on
+/// a specific class.
 #[derive(Component, Clone, Debug)]
 #[require(ListDesired)]
 pub struct UiList {
     /// `x:Name` of the list control to bind in the owner view's scene.
     pub name: String,
-    /// Unique Noesis class name to register the row objects under.
+    /// Noesis class name the row objects register under. Auto-generated unique by
+    /// [`new`](Self::new); override via [`with_class`](Self::with_class).
     pub class: String,
     /// Optional Rust-side row ordering (default: ECS query order).
     pub sort: Option<ListSort>,
 }
 
 impl UiList {
-    /// Declare a list bound to the `x:Name` control `name`, realizing rows as the
-    /// Noesis class `class`. Rows appear in ECS query order; add
-    /// [`sorted_by`](Self::sorted_by) for a Rust-side order.
+    /// Declare a list bound to the `x:Name` control `name`. The row-object class is
+    /// auto-generated unique (`DmList.{seq}`), so nothing has to be globally
+    /// hand-named. Rows appear in ECS query order; add
+    /// [`sorted_by`](Self::sorted_by) for a Rust-side order, or
+    /// [`with_class`](Self::with_class) to bind a typed `DataTemplate`.
     #[must_use]
-    pub fn new(name: impl Into<String>, class: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
+        let seq = LIST_CLASS_SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
             name: name.into(),
-            class: class.into(),
+            class: format!("DmList.{seq}"),
             sort: None,
         }
+    }
+
+    /// Override the auto-generated row-object class name. Only needed when the
+    /// scene's `ItemTemplate` is a typed `DataTemplate` keyed on a specific class
+    /// (`DataType="local:Foo"`); the default `{Binding <field>}` templates don't
+    /// care about the name, only its uniqueness. The override must still be unique
+    /// among registered Noesis classes.
+    #[must_use]
+    pub fn with_class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
     }
 
     /// Order rows by the row component's field at `field` (its index in
@@ -346,9 +373,13 @@ impl ListBinding {
         builder.add_property(ENTITY_FIELD, PropType::UInt64);
         match builder.register() {
             Some(reg) => self.registration = Some(reg),
-            None => warn!(
-                "UiList: failed to register row class {class_name:?} (duplicate name?); \
-                 rows will not realize",
+            // Auto-generated class names never collide; reaching here means an
+            // explicit `with_class` override duplicated an already-registered
+            // name. That is a hard contract violation (rows silently won't
+            // realize), so surface it at `error!`, not a swallowable `warn!`.
+            None => error!(
+                "UiList: failed to register row class {class_name:?} \
+                 (duplicate `with_class` name?); rows will not realize",
             ),
         }
     }
@@ -895,9 +926,8 @@ mod tests {
 
     #[test]
     fn ui_list_builder_sets_sort() {
-        let list = UiList::new("Inv", "Game.Row").sorted_by(1, true);
+        let list = UiList::new("Inv").sorted_by(1, true);
         assert_eq!(list.name, "Inv");
-        assert_eq!(list.class, "Game.Row");
         assert_eq!(
             list.sort,
             Some(ListSort {
@@ -905,5 +935,22 @@ mod tests {
                 descending: true
             })
         );
+    }
+
+    #[test]
+    fn ui_list_auto_class_is_unique() {
+        // Two lists of the "same" declaration get distinct auto-generated classes,
+        // so two instances "just work" without hand-picked names.
+        let a = UiList::new("Inv");
+        let b = UiList::new("Inv");
+        assert_ne!(
+            a.class, b.class,
+            "auto-generated row classes must be unique"
+        );
+        assert!(a.class.starts_with("DmList."), "got {:?}", a.class);
+
+        // An explicit override wins.
+        let c = UiList::new("Inv").with_class("Game.Row");
+        assert_eq!(c.class, "Game.Row");
     }
 }

@@ -118,7 +118,7 @@ fn list_reconciles_minimally_and_row_click_selects() {
                         ..default()
                     },
                     // Order rows by qty (property index 1), ascending: A(1),B(2),C(3).
-                    UiList::new("Inventory", "EcsUiTest.Row").sorted_by(1, false),
+                    UiList::new("Inventory").sorted_by(1, false),
                 ))
                 .id();
             let mk = |commands: &mut Commands, name: &str, qty: i32| {

@@ -16,8 +16,16 @@
 //!     **keeps the selected row selected** — currency rides the moved container.
 //!   * **Remove.** Despawning a row drops it (`removes` op) without disturbing the
 //!     rest or the selection.
-//!   * **Currency is selection.** Setting [`Selected`] from the app drives the
-//!     current item; the marker survives the reorder, proving no Reset.
+//!   * **Currency is selection (UI → ECS).** A fresh `ICollectionView` starts with
+//!     the first row current, so the bridge auto-marks it [`Selected`] *and* emits a
+//!     [`NoesisListSelection`] — the UI/currency-driven half of the contract. This
+//!     test asserts both (the only `SelectionOutcome::UiSelected` path the headless
+//!     harness can drive; a real `ListBox` row click is consumed by the
+//!     `ListBoxItem` against the control's own view, not the bridge's).
+//!   * **Currency is selection (ECS → UI).** Setting [`Selected`] from the app
+//!     drives the current item; the marker survives the reorder, proving no Reset.
+//!     App-driven selection is the *cause*, not an effect, so it emits **no**
+//!     [`NoesisListSelection`] — asserted via the message stream.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,6 +61,7 @@ struct Row {
     weight: i32,
 }
 
+const CAPTURE_DEFAULT_AT: usize = 14;
 const UPDATE_AT: usize = 18;
 const SELECT_AT: usize = 28;
 const REORDER_AT: usize = 38;
@@ -73,6 +82,8 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
 
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let flags: Arc<Mutex<OpFlags>> = Arc::new(Mutex::new(OpFlags::default()));
+    // Who the bridge auto-selected from default currency, before the app touches it.
+    let default_selected: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_select: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_reorder: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let final_selected: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
@@ -113,7 +124,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                         ..default()
                     },
                     // Order rows by weight, ascending: A(1), B(2), C(3).
-                    UiList::new("Inv", "Test.InvRow").sorted_by(1, false),
+                    UiList::new("Inv").sorted_by(1, false),
                 ))
                 .id();
 
@@ -151,6 +162,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
     let flags_sys = Arc::clone(&flags);
     let ui_sel_sys = Arc::clone(&ui_sel_msgs);
     let entities_sys = Arc::clone(&entities);
+    let default_selected_sys = Arc::clone(&default_selected);
     let sel_after_select_sys = Arc::clone(&sel_after_select);
     let sel_after_reorder_sys = Arc::clone(&sel_after_reorder);
     let final_selected_sys = Arc::clone(&final_selected);
@@ -187,6 +199,13 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
             }
             for ev in sel.read() {
                 ui_sel_sys.lock().unwrap().push(ev.selected);
+            }
+
+            // Default currency: the bridge should have auto-marked the first row
+            // (A) Selected and emitted a UI selection message — *before* the app
+            // sets any Selected of its own.
+            if *frame == CAPTURE_DEFAULT_AT {
+                *default_selected_sys.lock().unwrap() = selected_q.iter().next();
             }
 
             // Mutate ONE row's non-order field: expect an updates-only op.
@@ -236,8 +255,10 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
 
     app.run();
 
-    let (_a, _b, c) = entities.lock().unwrap().expect("rows spawned");
+    let (a, _b, c) = entities.lock().unwrap().expect("rows spawned");
     let f = flags.lock().unwrap();
+    let default_sel = *default_selected.lock().unwrap();
+    let ui_msgs = ui_sel_msgs.lock().unwrap().clone();
     let after_select = *sel_after_select.lock().unwrap();
     let after_reorder = *sel_after_reorder.lock().unwrap();
     let final_sel = *final_selected.lock().unwrap();
@@ -253,6 +274,24 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
         "flipping the sort did not reorder via Move ops",
     );
     assert!(f.saw_removes, "despawning a row produced no removes op");
+
+    // UI → ECS: default currency auto-selected the first row (A), surfacing as both
+    // a `Selected` marker and a `NoesisListSelection`. This is the
+    // `SelectionOutcome::UiSelected` half of the contract — without it the whole
+    // UI-driven selection branch would be dead. (Deleting that branch makes both of
+    // the next two assertions fail.)
+    assert_eq!(
+        default_sel,
+        Some(a),
+        "default currency did not auto-Select the first row (A) — the UI-driven \
+         selection branch never fired",
+    );
+    assert_eq!(
+        ui_msgs,
+        vec![Some(a)],
+        "expected exactly one UI selection message (the default-currency auto-select \
+         of A); app-driven Selected changes must emit none. got {ui_msgs:?}",
+    );
 
     assert_eq!(
         after_select,

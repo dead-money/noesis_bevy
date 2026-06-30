@@ -17,7 +17,9 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
-use noesis_bevy::{NoesisCamera, NoesisDiagnostics, NoesisDp, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{
+    NoesisCamera, NoesisDiagnostics, NoesisDp, NoesisPlugin, NoesisView, XamlRegistry,
+};
 
 const CAPTURE_PRE_AT: usize = 20;
 const DESPAWN_AT: usize = 21;
