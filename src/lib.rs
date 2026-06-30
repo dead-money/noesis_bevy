@@ -111,7 +111,7 @@ pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 pub use noesis_bevy_derive::NoesisViewModel;
 pub use panel::{
     NoesisPanelAppExt, NoesisPanelPlugin, NoesisPanelSet, NoesisPanelText, NoesisPanelTextChanged,
-    UiPanel,
+    SealPanel, UiPanel,
 };
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};

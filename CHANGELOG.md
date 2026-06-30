@@ -47,6 +47,13 @@ pre-1.0, any `0.x` release may contain breaking changes.
   console's focus) be split into their own mounted fragments rather than staying
   inline in the host scene.
 
+- **Deferred panel seal.** `UiPanel::deferred_seal()` plus the `SealPanel` marker
+  let a panel whose bound components are contributed by *separate modules* across
+  frames freeze its `DataContext` on demand rather than on first sight, so a
+  late-added field isn't dropped. The default (freeze on first bound component)
+  and `static_context()` (freeze empty) are unchanged; the recommended pattern
+  stays "one owning component holds all the fields."
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into

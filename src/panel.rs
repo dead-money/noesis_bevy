@@ -50,6 +50,23 @@
 //!
 //! This mirrors the "diff in parallel, push serially" convention in
 //! [`crate::reconcile`]: only the FFI pushes run on the serial Noesis thread.
+//!
+//! # When fields come from multiple modules
+//!
+//! The `DataContext` layout **freezes on the panel's first reconcile** with
+//! whatever bound components are present then. An atomic
+//! `spawn((UiPanel, CompA, CompB))` is fine: by the time `sync_panels` runs in
+//! `PostUpdate` every component is present, so the panel binds on frame 1 with no
+//! flicker. This is the recommended shape.
+//!
+//! If fields are contributed by *separate modules*, prefer **one owning component
+//! that holds all the fields**, with the other modules writing into it, so the
+//! whole `DataContext` still ships in one spawn bundle and never races the freeze.
+//!
+//! Only when that isn't possible (a module spawns the panel and another adds its
+//! component a frame later, after the spawn flushes) reach for
+//! [`UiPanel::deferred_seal`] + [`SealPanel`]: the panel waits to freeze until you
+//! insert `SealPanel` from a system ordered `.after()` the contributors.
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -77,6 +94,9 @@ pub struct UiPanel {
     /// Mount even with an empty `DataContext` (no bound components). See
     /// [`Self::static_context`].
     static_data: bool,
+    /// Suppress freeze-on-first-sight; wait for an explicit [`SealPanel`]. See
+    /// [`Self::deferred_seal`].
+    deferred: bool,
 }
 
 impl UiPanel {
@@ -90,6 +110,7 @@ impl UiPanel {
             host: Entity::PLACEHOLDER,
             host_name: String::new(),
             static_data: false,
+            deferred: false,
         }
     }
 
@@ -115,6 +136,25 @@ impl UiPanel {
         self
     }
 
+    /// Defer the `DataContext` freeze until a [`SealPanel`] marker is inserted on
+    /// this entity, instead of freezing on the first bound component (the default).
+    ///
+    /// You need this only for the rare cross-module case: one module spawns the
+    /// panel and another contributes a bound component a frame later (it can't see
+    /// the entity until the spawn flushes), which would otherwise race the freeze
+    /// and have its fields silently dropped. The owner inserts [`SealPanel`] from a
+    /// system ordered `.after()` every contributor, so the seal is deterministic
+    /// rather than frame-timing guesswork.
+    ///
+    /// Most panels don't need this. Prefer the simpler pattern: have **one** owning
+    /// component hold all the fields and let other modules write into it, so the
+    /// whole `DataContext` ships in one spawn bundle. See the [module docs](self).
+    #[must_use]
+    pub fn deferred_seal(mut self) -> Self {
+        self.deferred = true;
+        self
+    }
+
     /// The sub-XAML URI this panel loads.
     #[must_use]
     pub fn uri(&self) -> &str {
@@ -133,6 +173,15 @@ impl UiPanel {
         &self.host_name
     }
 }
+
+/// Seal request for a [`deferred_seal`](UiPanel::deferred_seal) panel: insert this
+/// marker once every contributing module has added its bound component, and the
+/// panel freezes its `DataContext` with the full set. Insert it from a system
+/// ordered `.after()` the contributors so the seal is deterministic. Inert on a
+/// non-deferred panel (which already freezes on first sight); removed once the
+/// seal is applied.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct SealPanel;
 
 /// One bound component's contribution, collected each frame before the serial push.
 struct FieldContribution {
@@ -297,21 +346,32 @@ fn collect_panel_field<T: NoesisViewModel + Component>(
 /// properties, drain writebacks). The only system here that touches Noesis state.
 #[allow(clippy::needless_pass_by_value)]
 fn sync_panels(
-    mut panels: Query<(Entity, &UiPanel, &mut PanelAggregate)>,
+    mut commands: Commands,
+    mut panels: Query<(Entity, &UiPanel, &mut PanelAggregate, Has<SealPanel>)>,
     state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
         return;
     };
-    for (entity, panel, mut agg) in &mut panels {
+    for (entity, panel, mut agg, sealed) in &mut panels {
         if !agg.built {
-            // Hold back until the first bound component arrives, so the frozen layout
-            // captures the full set — unless the panel declares a static (empty)
-            // DataContext, which has no components to wait for.
-            if agg.present.is_empty() && !panel.static_data {
+            // When to freeze the DataContext layout, by mode:
+            //   deferred_seal  -> wait for an explicit `SealPanel`
+            //   static_context -> freeze now (an empty DataContext is fine)
+            //   default        -> freeze once the first bound component is present
+            let freeze = if panel.deferred {
+                sealed
+            } else {
+                panel.static_data || !agg.present.is_empty()
+            };
+            if !freeze {
                 continue;
             }
             agg.freeze();
+            if panel.deferred {
+                // One-shot: the seal is applied, drop the request marker.
+                commands.entity(entity).remove::<SealPanel>();
+            }
         }
         let pushes = agg.take_pushes();
         let writebacks = state.sync_panel(
