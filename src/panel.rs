@@ -1,4 +1,4 @@
-//! **Primitive 1 — panel = entity.** A [`UiPanel`] is a Bevy entity that mounts a
+//! **Primitive 1: panel = entity.** A [`UiPanel`] is a Bevy entity that mounts a
 //! sub-XAML fragment as a hosted child of a [`NoesisView`](crate::NoesisView)
 //! scene; the *bound components* on that same entity **are** its `DataContext`.
 //!
@@ -27,7 +27,7 @@
 //! Ordinary systems drive the UI: `Query<&mut Health, With<UiPanel>>` mutates the
 //! component, change detection re-snapshots it into the bound `{Binding Health}`,
 //! and a `TwoWay` edit rides back into the component. Two `UiPanel` entities of
-//! the same component set bind **independently** — each loads its own fragment
+//! the same component set bind **independently**: each loads its own fragment
 //! with its own aggregated `DataContext`, isolated by Noesis namescope.
 //!
 //! # How the aggregation works
@@ -40,7 +40,7 @@
 //!
 //! 1. **Collect (parallel).** A per-type [`collect_panel_field`] system notes each
 //!    registered field type present on the panel and, when the component changed,
-//!    stashes its snapshot — all into a plain `Send` [`PanelAggregate`] component.
+//!    stashes its snapshot, all into a plain `Send` [`PanelAggregate`] component.
 //! 2. **Push (serial).** [`sync_panels`] freezes the layout on first sight, then
 //!    drives [`NoesisRenderState::sync_panel`](crate::render): build the class +
 //!    fragment, push the changed properties, mount the fragment into the host
@@ -152,7 +152,7 @@ pub(crate) struct PanelAggregate {
 }
 
 impl PanelAggregate {
-    /// Note that field type `tid` is present on the panel (pre-freeze only).
+    /// Record that field type `tid` is present on the panel (pre-freeze only).
     fn note_present(
         &mut self,
         tid: TypeId,
@@ -248,7 +248,7 @@ pub enum NoesisPanelSet {
 
 /// Collect one registered field type `T` into each panel's [`PanelAggregate`]:
 /// note it present (pre-freeze) and, when it changed, stash its snapshot. Pure
-/// ECS, no Noesis state — parallelizes freely.
+/// ECS, no Noesis state; parallelizes freely.
 #[allow(clippy::needless_pass_by_value)]
 fn collect_panel_field<T: NoesisViewModel + Component>(
     order: Res<PanelFieldOrder>,
@@ -260,12 +260,9 @@ fn collect_panel_field<T: NoesisViewModel + Component>(
         if !agg.built {
             agg.note_present(tid, reg, T::noesis_properties());
         } else if !agg.slots.contains_key(&tid) {
-            // The panel's aggregated DataContext class is registered once, when the
-            // panel first reconciles (`freeze`), so a bound component inserted after
-            // that can't be added to it — its `{Binding}`s would silently stay empty.
-            // `Ref<T>` in the query means we only iterate panels that actually have
-            // `T`, so reaching here means `T` is genuinely a late addition. Make it
-            // loud instead of dropping it on the floor in `take_pushes`.
+            // Layout froze on the panel's first reconcile; a component added
+            // afterward can't join the DataContext (its bindings stay empty). Ref<T>
+            // filters to panels that have T, so this is a genuine late add.
             bevy::log::warn_once!(
                 "NoesisPanel: bound component `{}` was inserted after the panel's \
                  DataContext froze on its first reconcile; its fields are not bound. \
@@ -292,7 +289,6 @@ fn sync_panels(
         return;
     };
     for (entity, panel, mut agg) in &mut panels {
-        // Nothing to bind until at least one registered field has been collected.
         if !agg.built {
             if agg.present.is_empty() {
                 continue;
@@ -338,7 +334,7 @@ fn apply_panel_writeback<T: NoesisViewModel + Component<Mutability = Mutable>>(
 ///
 /// A mounted fragment keeps a private namescope (its inner `x:Name`s are
 /// invisible to a host-root lookup), so this read-back resolves names against the
-/// fragment's *own* scope — list fragment-local names like `"HealthText"`. This is
+/// fragment's *own* scope. List fragment-local names like `"HealthText"`. This is
 /// the panel counterpart of [`NoesisText`](crate::NoesisText)'s watch list, and
 /// the supported way to observe a binding's effect on a panel's UI.
 #[derive(Component, Clone, Default, Debug)]

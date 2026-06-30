@@ -1,4 +1,4 @@
-//! ECS-UI integration proof — **Primitive 1 (panel = entity)**: two `UiPanel`
+//! ECS-UI integration proof, **Primitive 1 (panel = entity)**: two `UiPanel`
 //! instances of the *same* component set bind independently, and despawning one
 //! reaps it with no leak. Asserted against the [`ecs_ui`] example's own scene +
 //! component types, so this pins the exact code a user runs.
@@ -167,7 +167,7 @@ fn panels_multi_instance_isolate_and_reap() {
         Some("3"),
         "panel 2 Score never reached the UI; p2 reads {b:?}",
     );
-    // Reap: two panels live before despawn, one after — no leak.
+    // Reap: two panels live before despawn, one after, no leak.
     assert_eq!(
         *live_before.lock().unwrap(),
         2,

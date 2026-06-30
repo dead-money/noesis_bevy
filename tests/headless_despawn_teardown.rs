@@ -5,7 +5,7 @@
 //! the crate, so a despawned view's `!Send` scene + side-table entry lived for
 //! the whole process. This test drives a view until its scene exists
 //! (`live_scenes == 1`), despawns the entity, and asserts the live-scene count
-//! drains back to 0 — i.e. the side-table entry is gone. It also doubles as a
+//! drains back to 0, i.e. the side-table entry is gone. It also doubles as a
 //! smoke test for the FFI-hop instrumentation (a built scene must have resolved
 //! at least one name, so `ffi_hops > 0`).
 //!
@@ -68,8 +68,8 @@ fn despawning_a_view_reaps_its_noesis_state() {
                     size: UVec2::new(128, 128),
                     ..default()
                 },
-                // A live DP write so the dp bridge resolves "Panel" every frame —
-                // exercises the FFI-hop instrumentation (resolve_named + DP set).
+                // A live DP write so the dp bridge resolves "Panel" every frame,
+                // exercising the FFI-hop instrumentation (resolve_named + DP set).
                 NoesisDp::new().set_f32("Panel", "Opacity", 0.5),
             ));
         },
@@ -122,7 +122,7 @@ fn despawning_a_view_reaps_its_noesis_state() {
         pre.ffi_hops,
     );
 
-    // After despawn: the scene's side-table entry is gone — no leak.
+    // After despawn: the scene's side-table entry is gone, no leak.
     assert_eq!(
         post.live_scenes, 0,
         "despawn must reap the view's scene; {} live scenes still tracked",

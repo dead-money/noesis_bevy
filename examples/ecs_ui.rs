@@ -1,5 +1,5 @@
-//! **The ECS-UI example** — all three primitives of the entity-driven Noesis API,
-//! written the way a Bevy user would write them. This is the end-to-end proof that
+//! **The ECS-UI example**: all three primitives of the entity-driven Noesis API,
+//! written the way a Bevy user would write them. The end-to-end proof that
 //! UI is *just ECS*: panels are entities, list rows are entities, and UI events are
 //! Bevy observers.
 //!
@@ -14,25 +14,25 @@
 //!
 //! # The three primitives, end to end
 //!
-//! **Primitive 1 — panel = entity.** [`spawn_player_hud`] spawns a [`UiPanel`]
+//! **Primitive 1: panel = entity.** [`spawn_player_hud`] spawns a [`UiPanel`]
 //! entity carrying `Health` + `Score` components. Those components *are* the
 //! panel's `DataContext`: the `hud.xaml` fragment binds `{Binding Health}` /
 //! `{Binding Score}`, and an ordinary system ([`regen_and_decay`]) mutates the
-//! components with a normal `Query<&mut Health, With<UiPanel>>` — change detection
+//! components with a normal `Query<&mut Health, With<UiPanel>>`; change detection
 //! re-snapshots them into the live bindings. Two HUDs are spawned (P1, P2) into two
 //! host slots to show **multi-instance**: each binds independently.
 //!
-//! **Primitive 2 — list = query.** The inventory rows *are* entities: each is an
+//! **Primitive 2: list = query.** The inventory rows *are* entities: each is an
 //! `Item` component plus a [`ListedIn`] membership. A [`UiList`] on the view binds
-//! the reconciled `ObservableCollection` to an `ItemsControl`. Spawning an entity
+//! the reconciled `ObservableCollection` to a `ListBox`. Spawning an entity
 //! adds a row; despawning removes it; mutating one `Item` updates *only* that row
 //! in place (no flicker, no Reset); flipping [`UiList::sorted_by`] reorders via
 //! `Move` ops so a selected row keeps its selection.
 //!
-//! **Primitive 3 — events = observers.** UI events arrive as Bevy `EntityEvent`s.
+//! **Primitive 3: events = observers.** UI events arrive as Bevy `EntityEvent`s.
 //! A named host `Button` fires a [`UiClicked`] whose `event_target()` is the panel
 //! entity it was wired to (see [`ClickWatchEntry::target`]); a click on a list row
-//! fires a [`UiClicked`] whose `event_target()` is *that row's entity* — recovered
+//! fires a [`UiClicked`] whose `event_target()` is *that row's entity*, recovered
 //! with no `x:Name`, straight off the row's data. The observers below read those
 //! targets with ordinary `Query`s.
 //!
@@ -53,7 +53,7 @@ use noesis_bevy::{
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bound data — plain components. Each `#[derive(NoesisViewModel)]` makes the
+// Bound data: plain components. Each `#[derive(NoesisViewModel)]` makes the
 // component's fields bindable by name (`{Binding Health}`, `{Binding name}`, …).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -66,7 +66,7 @@ pub struct Health(pub f32);
 pub struct Score(pub i32);
 
 /// One inventory row. The fields bind in the item template as `{Binding name}` /
-/// `{Binding qty}`. Field order fixes the property indices, so `qty` is index 1 —
+/// `{Binding qty}`. Field order fixes the property indices, so `qty` is index 1,
 /// the [`UiList::sorted_by`] key used below.
 #[derive(Component, NoesisViewModel, Clone, Debug)]
 pub struct Item {
@@ -106,11 +106,11 @@ pub const HEAL_P2_BTN: &str = "HealP2";
 pub const ADD_ITEM_BTN: &str = "AddItem";
 
 /// Host view scene: two HUD mount slots, three named buttons, and the inventory
-/// `ItemsControl`. The HUD slots are empty `StackPanel`s that [`UiPanel`] fragments
-/// mount into; the buttons are watched by [`NoesisClickWatch`]; the `ItemsControl`
-/// is bound by [`UiList`]. Plain `Border`/`TextBlock` chrome renders without a
-/// theme — only the `Button`s want the SDK theme to look like buttons (they still
-/// click either way).
+/// `ListBox`. The HUD slots are empty `StackPanel`s that [`UiPanel`] fragments
+/// mount into; the buttons are watched by [`NoesisClickWatch`]; the `ListBox` is
+/// bound by [`UiList`]. The `Button`s and the `ListBox` are skinned by the SDK
+/// theme (loaded by default; see `main`); the `Border`/`TextBlock` chrome renders
+/// either way.
 pub const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="640" Height="480" Background="#FF101418">
@@ -222,10 +222,9 @@ pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -
                 xaml_uri: HOST_URI.to_string(),
                 size: UVec2::new(640, 480),
                 application_resources,
-                // Noesis renders text invisibly if no font is registered before
-                // the scene builds, so gate the build on PT Root UI and make it
-                // the process-wide fallback — this is what makes the bare
-                // `cargo run --example ecs_ui` (no theme) show any text at all.
+                // Noesis renders text invisibly if no font is registered before the
+                // scene builds; gate the build on PT Root UI as the process-wide
+                // fallback so the theme-less `cargo run` shows any text at all.
                 wait_for_fonts: vec!["Fonts".to_string()],
                 wait_for_font_files: vec![(
                     "Fonts".to_string(),
@@ -234,8 +233,8 @@ pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -
                 font_fallbacks: vec!["Fonts/#PT Root UI".to_string()],
                 ..default()
             },
-            // Inventory rows ordered by qty (property index 1), ascending. The
-            // row-object class is auto-generated unique — no name to hand-pick.
+            // Rows ordered by qty (property index 1), ascending; row-object class
+            // is auto-generated, no name to hand-pick.
             UiList::new(INVENTORY_NAME).sorted_by(1, false),
         ))
         .id();
@@ -287,7 +286,7 @@ pub fn spawn_player_hud(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ordinary systems drive the UI (Primitive 1) — no Noesis types in sight.
+// Ordinary systems drive the UI (Primitive 1); no Noesis types in sight.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Slowly decay both HUDs' health and tick their score, as a plain ECS system over
@@ -309,7 +308,7 @@ fn regen_and_decay(time: Res<Time>, mut huds: Query<(&mut Health, &mut Score), W
 }
 
 /// React to the live inventory: bump one row's quantity on a timer (an in-place
-/// row update — only that row's container changes), and despawn a row when it hits
+/// row update, only that row's container changes), and despawn a row when it hits
 /// zero (a `Remove` op). Pure ECS over the row entities.
 fn churn_inventory(
     time: Res<Time>,
@@ -322,10 +321,9 @@ fn churn_inventory(
         return;
     }
     *elapsed = 0.0;
-    // Find "Potion" and consume one; despawn the row if it runs out.
     for (entity, mut item) in &mut items {
         if item.name == "Potion" {
-            item.qty -= 1; // in-place Update — no Reset, selection/scroll survive.
+            item.qty -= 1; // in-place Update; no Reset, selection/scroll survive.
             if item.qty <= 0 {
                 commands.entity(entity).despawn(); // Remove op.
             }
@@ -334,13 +332,13 @@ fn churn_inventory(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Observers — UI events as Bevy `EntityEvent`s (Primitive 3).
+// Observers: UI events as Bevy `EntityEvent`s (Primitive 3).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Heal observer: a `UiClicked` from a "Heal" button arrives targeting the *panel
 /// entity* it was wired to (via [`ClickWatchEntry::target`]). We recover that
-/// entity from [`On::event_target`] and mutate its `Health` with an ordinary query
-/// — no element names, no per-button branching beyond the add-item case.
+/// entity from [`On::event_target`] and mutate its `Health` with an ordinary query,
+/// no element names, no per-button branching beyond the add-item case.
 fn on_button_click(
     on: On<UiClicked>,
     mut huds: Query<&mut Health, With<UiPanel>>,
@@ -372,7 +370,7 @@ fn on_button_click(
 }
 
 /// Row-click observer: a click on an inventory row arrives targeting *that row's
-/// entity* — recovered with no `x:Name`, from the row's data. We make the click
+/// entity*, recovered with no `x:Name`, from the row's data. We make the click
 /// select the row: clear any prior [`Selected`] and mark this one. Setting
 /// [`Selected`] also drives the bound control's current item (currency is
 /// selection), so the choice survives later reorders.
@@ -423,7 +421,7 @@ pub fn configure(app: &mut App) {
     app.add_plugins(NoesisPlugin::default());
 
     // Register the bound types: panel fields (Primitive 1) and the row type
-    // (Primitive 2). Each call is once, at startup.
+    // (Primitive 2).
     app.add_noesis_panel_field::<Health>()
         .add_noesis_panel_field::<Score>()
         .add_noesis_list::<Item>();
@@ -531,8 +529,8 @@ fn stage_fonts(fonts: &mut FontRegistry) {
 
 /// Stage the SDK theme `theme` (its XAML chain + PT Root UI fonts) into the
 /// registries and return the `application_resources` chain to hand the view. A
-/// no-op (returns empty) when `$NOESIS_SDK_DIR` is unset or the theme is missing —
-/// the example then renders with placeholder control chrome.
+/// no-op (returns empty) when `$NOESIS_SDK_DIR` is unset or the theme is missing.
+/// The example then renders with placeholder control chrome.
 fn stage_theme(theme: &str, xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> Vec<String> {
     let Some(sdk) = std::env::var_os("NOESIS_SDK_DIR") else {
         warn!("NOESIS_ECS_UI_THEME set but NOESIS_SDK_DIR unset — skipping theme");

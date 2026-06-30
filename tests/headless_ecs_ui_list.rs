@@ -1,11 +1,11 @@
-//! ECS-UI integration proof — **Primitive 2 (list = query)** plus the per-row half
+//! ECS-UI integration proof, **Primitive 2 (list = query)** plus the per-row half
 //! of **Primitive 3**: add / update-in-place / reorder-via-Move / remove all
 //! surface as the minimal op tally (never a Reset), a real row click fires a
 //! [`UiClicked`] targeting that row's *entity*, and selection round-trips through
-//! the [`Selected`] marker — surviving a reorder. Driven on the [`ecs_ui`]
+//! the [`Selected`] marker, surviving a reorder. Driven on the [`ecs_ui`]
 //! example's own `Item` row type and [`ecs_ui::on_row_click`] observer.
 //!
-//! One `#[test]` per file (thread-affine Noesis runtime → one app per process).
+//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -54,7 +54,7 @@ struct OpFlags {
 
 // A fresh ICollectionView starts with the FIRST row (A) current, so the bridge
 // marks A Selected by default. We click the SECOND row (B) to prove the click
-// actually drives selection — B is not the default.
+// actually drives selection; B is not the default.
 const PRESS_AT: usize = 24; // click row B (y=60) after rows realize
 const RELEASE_AT: usize = 26;
 const CAPTURE_SEL_AT: usize = 32;
@@ -249,7 +249,7 @@ fn list_reconciles_minimally_and_row_click_selects() {
         "row click did not fire a UiClicked targeting the clicked row entity (B={b:?}); got {clicks:?}",
     );
     // Selection round-trip: the click moved selection off the default (A) onto B
-    // (via the example's observer), and B stayed selected across the reorder —
+    // (via the example's observer), and B stayed selected across the reorder;
     // currency rode the Move, no Reset.
     assert_eq!(
         after_click,

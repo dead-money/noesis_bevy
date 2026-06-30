@@ -60,7 +60,7 @@ pub struct NoesisClicked {
 /// target with [`On::event_target`].
 ///
 /// Fired via the global self-targeting `commands.trigger`, so a stale/despawned
-/// target is safe — no entity-targeted observer exists for it.
+/// target is safe: no entity-targeted observer exists for it.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct UiClicked {
     /// Trigger target: the panel/view entity (named elements) or the row entity

@@ -1,10 +1,10 @@
-//! ECS-UI integration proof — **Primitive 3 (events = observers), named half**: a
+//! ECS-UI integration proof, **Primitive 3 (events = observers), named half**: a
 //! watched host `Button` fires a [`UiClicked`] re-targeted at a *panel entity* (via
 //! [`ClickWatchEntry::target`]); an observer recovers it through `event_target()`
 //! and heals only that panel. Proves the trigger target carries the entity an
 //! observer needs, and that re-targeting routes to the right one of two panels.
 //!
-//! One `#[test]` per file (thread-affine Noesis runtime → one app per process).
+//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,7 +26,7 @@ mod ecs_ui;
 use ecs_ui::{Health, Score};
 
 // Host scene: a HUD mount slot plus two full-bleed buttons, each hit-testable at a
-// known point — HealP1 fills the top half (y=8), HealP2 the bottom (y=24).
+// known point: HealP1 fills the top half (y=8), HealP2 the bottom (y=24).
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="64" Height="32">
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>

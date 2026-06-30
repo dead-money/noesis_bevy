@@ -1,5 +1,5 @@
 //! Primitive 3 (events = observers), per-row half: clicking a templated list row
-//! surfaces as a [`UiClicked`] `EntityEvent` whose target IS that row's entity —
+//! surfaces as a [`UiClicked`] `EntityEvent` whose target IS that row's entity,
 //! recovered with no `x:Name` by walking the clicked element's `DataContext` to
 //! the row's hidden `__entity` field.
 //!

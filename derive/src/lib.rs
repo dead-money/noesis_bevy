@@ -13,9 +13,9 @@
 //!
 //! Two struct shapes are supported:
 //!
-//! * **Named struct** — each field maps to a property named after the *field*
+//! * **Named struct**: each field maps to a property named after the *field*
 //!   (`title: String` → `{Binding title}`). `#[noesis(skip)]` excludes a field.
-//! * **Newtype tuple struct** — a single-field tuple struct
+//! * **Newtype tuple struct**: a single-field tuple struct
 //!   (`struct Health(f32);`) maps to one property named after the *type*
 //!   (`{Binding Health}`). This is the shape the `UiPanel` primitive expects:
 //!   spawn `Health(100.0)` on a panel entity and bind `{Binding Health}`.
@@ -130,15 +130,13 @@ fn prop_name_override(attrs: &[syn::Attribute]) -> Option<String> {
         };
         let mut trees = list.tokens.clone().into_iter().peekable();
         while let Some(tree) = trees.next() {
-            // Look for the `as` ident; at the token level keywords are plain
-            // idents, so this matches `as` cleanly.
+            // keywords are plain idents at the token level, so `as` matches here
             let TokenTree::Ident(ident) = &tree else {
                 continue;
             };
             if *ident != "as" {
                 continue;
             }
-            // Expect `= "literal"`.
             if let Some(TokenTree::Punct(p)) = trees.peek() {
                 if p.as_char() == '=' {
                     trees.next();
@@ -207,7 +205,6 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
     let mut index: u32 = 0;
 
     match fields {
-        // Named struct: one property per (non-skipped) field, named after the field.
         Fields::Named(named) => {
             for field in &named.named {
                 if is_skipped(&field.attrs) {
@@ -229,9 +226,7 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
                 );
             }
         }
-        // Newtype tuple struct (`struct Health(f32);`): one property named after
-        // the *type* (overridable with `#[noesis(as = "Name")]`). The `UiPanel`
-        // primitive spawns these directly as bound components.
+        // Newtype: one property named after the *type* (override: `#[noesis(as)]`).
         Fields::Unnamed(unnamed) => {
             if unnamed.unnamed.len() != 1 {
                 return syn::Error::new(

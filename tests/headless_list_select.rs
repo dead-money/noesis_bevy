@@ -3,16 +3,16 @@
 //! The "currency is selection" contract says: when the user selects a row in the
 //! live `ListBox`, the bridge marks that row's entity [`Selected`] and emits a
 //! [`NoesisListSelection`]. We drive the closest faithful headless proxy for a row
-//! click — setting the `ListBox`'s `SelectedIndex` through the [`NoesisDp`] bridge
-//! (a real DP write on the actual control) — and assert the bridge observes it.
+//! click, setting the `ListBox`'s `SelectedIndex` through the [`NoesisDp`] bridge
+//! (a real DP write on the actual control), and assert the bridge observes it.
 //!
 //! It does NOT cover the literal mouse-down hit-test (a `ListBoxItem` consuming a
 //! pointer event); that path is `row_click_subs → UiClicked`, tested elsewhere.
 //!
 //! ## Regression guard for the control→bridge selection path
 //! The bridge reads selection straight off the bound `ListBox` (`selected_item` /
-//! `set_selected_index`) — the control's own selection is the single source of
-//! truth — so a control-side `SelectedIndex` write reaches `poll_selection` and
+//! `set_selected_index`): the control's own selection is the single source of
+//! truth, so a control-side `SelectedIndex` write reaches `poll_selection` and
 //! marks the row `Selected`. An earlier build instead observed a *fabricated*
 //! `CollectionView` (the runtime's `GetView()` returns `new CollectionView(list)`
 //! for an unhosted, code-built `CollectionViewSource`), which is **not** the live
@@ -59,7 +59,6 @@ fn control_selection_marks_selected_and_emits_message() {
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
     // What the bridge marked Selected after we drove the control's SelectedIndex.
     let selected_after: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
-    // NoesisListSelection messages seen.
     let sel_msgs: Arc<Mutex<Vec<Option<Entity>>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut app = App::new();
@@ -144,7 +143,7 @@ fn control_selection_marks_selected_and_emits_message() {
                 sel_msgs_sys.lock().unwrap().push(ev.selected);
             }
 
-            // Drive the live ListBox's SelectedIndex to row 2 (C) — the faithful
+            // Drive the live ListBox's SelectedIndex to row 2 (C), the faithful
             // headless proxy for a user picking that row.
             if *frame == SELECT_AT {
                 if let Ok(view) = views.single() {

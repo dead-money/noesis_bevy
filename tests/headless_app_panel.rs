@@ -1,4 +1,4 @@
-//! End-to-end test of Primitive 1 — **panel = entity** — through the Bevy app.
+//! End-to-end test of Primitive 1 (**panel = entity**) through the Bevy app.
 //!
 //! A host [`NoesisView`] scene carries a named `StackPanel` (`x:Name="Hud"`). Each
 //! [`UiPanel`] entity loads `hud.xaml` (a fragment binding `{Binding Health}` and
@@ -8,7 +8,7 @@
 //! Three properties under test:
 //!   * **Aggregation.** One panel with *two* bound components drives *both*
 //!     bindings from one `DataContext` (neither overwrites the other).
-//!   * **Isolation.** Two panels of the *same* component set bind independently —
+//!   * **Isolation.** Two panels of the *same* component set bind independently:
 //!     mutating panel A's `Health` leaves panel B's untouched.
 //!   * **Reap.** Despawning a panel removes its mounted child from the host
 //!     (`live_panels` drops back), with no leak / crash.
@@ -113,7 +113,7 @@ fn panel_entity_aggregates_isolates_and_reaps() {
                 ))
                 .id();
 
-            // Panel A: two bound components → one aggregated DataContext.
+            // Panel A: two bound components, one aggregated DataContext.
             let a = commands
                 .spawn((
                     UiPanel::new("hud.xaml").mount_into(host, "Hud"),

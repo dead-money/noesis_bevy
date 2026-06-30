@@ -1,4 +1,4 @@
-//! End-to-end test of Primitive 2 — **list = query** — through the Bevy app.
+//! End-to-end test of Primitive 2 (**list = query**) through the Bevy app.
 //!
 //! A host [`NoesisView`] scene carries a `ListBox` (`x:Name="Inv"`). Rows are
 //! plain entities: each carries a `Row` component (`{Binding label}` /
@@ -10,25 +10,25 @@
 //! [`Selected`] marker, never reading a "reset"):
 //!   * **Add.** Spawning rows realizes them (an `adds` op), no clears.
 //!   * **Update in place.** Mutating one row's *non-order* field produces an
-//!     `updates`-only op — no `adds`/`removes`/`moves` — proving the surviving
+//!     an `updates`-only op (no `adds`/`removes`/`moves`), proving the surviving
 //!     row's existing instance was written, not re-created (no Reset).
 //!   * **Reorder via Move.** Flipping the sort relocates rows with `moves` ops and
-//!     **keeps the selected row selected** — currency rides the moved container.
+//!     **keeps the selected row selected**: currency rides the moved container.
 //!   * **Remove.** Despawning a row drops it (`removes` op) without disturbing the
 //!     rest or the selection.
 //!   * **Default currency is NOT reported as a selection.** A fresh
 //!     `ICollectionView` starts with the first row current, but the bridge adopts
-//!     that baseline silently — it must not mark [`Selected`] or emit a
+//!     that baseline silently; it must not mark [`Selected`] or emit a
 //!     [`NoesisListSelection`] before any genuine change. This test asserts no
 //!     auto-selection and no spurious message. (NB: the binding observes its *own*
 //!     `CollectionView`, a separate object from the live `ListBox`'s default view,
-//!     so a real control-side row click does not reach this currency channel today
-//!     — that goes through the `row_click_subs → UiClicked` path. The
-//!     control→currency link is covered, `#[ignore]`-d, in `headless_list_select`.)
+//!     so a real control-side row click does not reach this currency channel today;
+//!     that goes through the `row_click_subs -> UiClicked` path. The
+//!     control-to-currency link is covered, `#[ignore]`-d, in `headless_list_select`.)
 //!   * **Currency is selection (ECS → UI).** Setting [`Selected`] from the app
 //!     drives the current item; the marker survives the reorder, proving no Reset.
 //!     App-driven selection is the *cause*, not an effect, so it emits **no**
-//!     [`NoesisListSelection`] — asserted via the message stream.
+//!     [`NoesisListSelection`], asserted via the message stream.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,7 +57,7 @@ const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006
 </Grid>"##;
 
 /// A list row: `label` (string field) + `weight` (i32 sort key). Field order
-/// fixes the property indices — `weight` is index 1, the sort key below.
+/// fixes the property indices: `weight` is index 1, the sort key below.
 #[derive(Component, NoesisViewModel)]
 struct Row {
     label: String,
@@ -182,7 +182,6 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
             *frame += 1;
             let (a, b, c) = entities_sys.lock().unwrap().expect("rows spawned");
 
-            // Accumulate the op-tally shapes we observe.
             {
                 let mut f = flags_sys.lock().unwrap();
                 for ev in ops.read() {
@@ -278,7 +277,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
     assert!(f.saw_removes, "despawning a row produced no removes op");
 
     // Default currency is adopted silently: before the app touches Selected, nothing
-    // is marked and no UI selection message has been emitted — the unsolicited
+    // is marked and no UI selection message has been emitted; the unsolicited
     // first-frame auto-select is suppressed.
     assert_eq!(
         default_sel, None,

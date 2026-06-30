@@ -72,8 +72,8 @@ use noesis_runtime::element_tree::panel_children;
 use noesis_runtime::plain_vm::{PlainInstance, PlainValueRef, PlainVmBuilder, PlainVmClass};
 
 thread_local! {
-    /// Cumulative count of FFI "hops" — calls that cross into the Noesis C++
-    /// engine — made on the Noesis thread, this frame and every frame before it.
+    /// Cumulative count of FFI "hops" (calls that cross into the Noesis C++
+    /// engine) made on the Noesis thread, this frame and every frame before it.
     /// Lives in a `thread_local` rather than on [`NoesisRenderState`] because the
     /// dominant choke point, [`resolve_named`], is a free function with no `self`
     /// to hang a field off. All Noesis work happens on one thread (the engine is
@@ -84,8 +84,8 @@ thread_local! {
 }
 
 /// Record one FFI hop into the engine. Cheap: a single non-atomic `Cell` bump on
-/// the Noesis thread. Called at the FFI choke points — element resolution
-/// ([`resolve_named`]), DP get/set, and collection ops — so later perf work can
+/// the Noesis thread. Called at the FFI choke points (element resolution via
+/// [`resolve_named`], DP get/set, and collection ops) so later perf work can
 /// reason about how much engine traffic a frame costs. See [`FFI_HOPS`].
 #[inline]
 pub(crate) fn record_ffi_hop() {
@@ -591,7 +591,7 @@ pub(crate) struct NoesisRenderState {
     /// components) set as that fragment's `DataContext`, mounted as a hosted child
     /// into a named `Panel` in its host view's scene. Re-mounts after a host-scene
     /// rebuild (the host's [`Self::teardown_scene`] resets each child's stamp) and
-    /// is reaped — fragment removed from the host panel first — by
+    /// is reaped (fragment removed from the host panel first) by
     /// [`Self::teardown_panel_for`] on despawn. Released in [`Drop`] after the
     /// scenes (so the host has already released its child refs). See
     /// [`crate::panel`].
@@ -758,7 +758,7 @@ struct InstalledKeyBinding {
 
 /// Process-global monotonic sequence for synthesizing a unique Noesis class name
 /// per mounted panel. Noesis registers reflected classes globally by name, so two
-/// panels — even of the same component set — get distinct classes (hence distinct
+/// panels (even of the same component set) get distinct classes (hence distinct
 /// `DataContext`s and scopes). One counter for the process is enough; it only ever
 /// increments on the main thread inside [`PanelEntry::build`].
 static PANEL_CLASS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -766,7 +766,7 @@ static PANEL_CLASS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// One live mounted panel (see [`NoesisRenderState::panels`]). Field order is the
 /// drop order Noesis requires: `fragment` first (it is held by the host panel and
 /// holds a `DataContext` ref to `instance`), then `instance`, then `_class` (whose
-/// drop unregisters the class — must outlive every live instance of it).
+/// drop unregisters the class, so it must outlive every live instance of it).
 struct PanelEntry {
     /// The loaded sub-XAML, its own namescope. `DataContext` set once at build.
     fragment: FrameworkElement,
@@ -1217,7 +1217,7 @@ impl NoesisRenderState {
                 continue;
             };
             if binding.needs_bind(&uri) {
-                record_ffi_hop(); // collection op: bind an ItemsSource into the engine.
+                record_ffi_hop();
                 if element.set_items_source(binding.collection()) {
                     binding.mark_bound(&uri);
                 } else {
@@ -1271,7 +1271,7 @@ impl NoesisRenderState {
 
     /// Reconcile view `entity`'s entity-keyed list `name` (Primitive 2): ensure
     /// the row class, diff the live collection to `desired` (minimal
-    /// Add/Remove/Update/Move — never a clear), bind the collection to the named
+    /// Add/Remove/Update/Move, never a clear), bind the collection to the named
     /// `ItemsControl` once the scene + element exist (re-binding after a rebuild),
     /// and reconcile selection (currency). Returns the op tally and any UI-driven
     /// selection change for the caller to mirror onto a [`Selected`](crate::list::Selected)
@@ -1305,7 +1305,7 @@ impl NoesisRenderState {
         {
             match resolve_named(&content, name) {
                 Some(mut element) => {
-                    record_ffi_hop(); // collection op: bind an ItemsSource.
+                    record_ffi_hop();
                     let bound = {
                         let binding = self.lists.get_mut(&key).expect("checked above");
                         let ok = element.set_items_source(binding.collection());
@@ -1313,7 +1313,7 @@ impl NoesisRenderState {
                             binding.mark_bound(&uri);
                             // Stash a handle on the control so selection is read /
                             // driven on the live control itself (its own selection
-                            // is the source of truth — no separate CollectionView).
+                            // is the source of truth; no separate CollectionView).
                             binding.set_control(element.clone_ref());
                         }
                         ok
@@ -1361,8 +1361,6 @@ impl NoesisRenderState {
             // selection / currency handling still runs.
             false,
             move |args: &EventArgs| {
-                // The row stashed its Entity bits in the hidden `__entity` field;
-                // recover it straight off the clicked element's DataContext.
                 if let Some(bits) = args.source_data_context_u64(crate::list::ENTITY_FIELD)
                     && let Some(row) = Entity::try_from_bits(bits)
                 {
@@ -1553,7 +1551,7 @@ impl NoesisRenderState {
             match resolve_named(&content, &entry.host_name) {
                 Some(host_el) => match panel_children(&host_el) {
                     Some(mut children) => {
-                        record_ffi_hop(); // collection op: mount a hosted child.
+                        record_ffi_hop();
                         if children.add(&entry.fragment).is_some() {
                             entry.mounted_for_uri = Some(host_uri);
                         } else {
@@ -1595,8 +1593,8 @@ impl NoesisRenderState {
 
     /// Poll panel `entity`'s watched fragment-scope names, returning `(name,
     /// text)` for each whose text changed since the last poll. Resolves against
-    /// the fragment's *own* namescope — a mounted fragment's inner names are
-    /// invisible to a host-root lookup — so the watch names are fragment-local
+    /// the fragment's *own* namescope (a mounted fragment's inner names are
+    /// invisible to a host-root lookup) so the watch names are fragment-local
     /// (optionally `/`-qualified within the fragment). Drives the
     /// [`crate::panel::NoesisPanelText`] read-back. No-op until the panel is built.
     pub(crate) fn poll_panel_text_for(
@@ -3006,7 +3004,7 @@ impl NoesisRenderState {
                 );
                 continue;
             };
-            record_ffi_hop(); // DP set: a write into the engine.
+            record_ffi_hop();
             if value.write_to(&mut element, property) {
                 // Update the snapshot eagerly so the read pass doesn't emit a
                 // phantom change for a write we just issued ourselves.
@@ -3046,7 +3044,7 @@ impl NoesisRenderState {
             let Some(element) = resolve_named(&content, &watch.name) else {
                 continue;
             };
-            record_ffi_hop(); // DP get: a read out of the engine.
+            record_ffi_hop();
             let Some(current) = watch.kind.read_from(&element, &watch.property) else {
                 continue;
             };
@@ -4024,8 +4022,8 @@ impl NoesisRenderState {
         self.panels.len()
     }
 
-    /// Fully reap every Noesis resource owned on behalf of `entity` — its scene
-    /// *and* every per-entity side-table entry — when the view (or, later, panel)
+    /// Fully reap every Noesis resource owned on behalf of `entity` (its scene
+    /// *and* every per-entity side-table entry) when the view (or, later, panel)
     /// is despawned or loses its [`NoesisView`]. Unlike [`Self::teardown_scene`]
     /// (a *rebuild* step that drops only the scene and leaves the view models /
     /// collections / bindings parked for re-attach), this is the *terminal*
@@ -4039,17 +4037,13 @@ impl NoesisRenderState {
     /// scratch dedupe tables are keyed by entity and just dropped. No-op for an
     /// entity we never tracked.
     pub(crate) fn teardown_for(&mut self, entity: Entity) {
-        // 1. Scene first: `Renderer::shutdown` + `View` drop releases the View's
-        //    refs to this entity's owned VMs / collections / bindings.
         self.teardown_scene(entity);
-        // 2. Now the last refs; drop the owners (same order as `Drop`).
         self.view_models.remove(&entity);
         self.items_sources.retain(|(ent, _), _| *ent != entity);
         self.lists.retain(|(ent, _), _| *ent != entity);
         self.plain_vms.retain(|(ent, _), _| *ent != entity);
         self.command_hosts.remove(&entity);
         self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
-        // 3. Per-entity scratch / dedupe state: just memory, no Noesis refs.
         self.last_keydown_swallow
             .retain(|(ent, _), _| *ent != entity);
         self.last_click_target.retain(|(ent, _), _| *ent != entity);
@@ -4380,7 +4374,7 @@ fn ensure_noesis_scene(
 }
 
 /// Reap the Noesis state of any view whose [`NoesisView`] was removed since last
-/// frame — whether the whole entity was despawned or just the component dropped.
+/// frame, whether the whole entity was despawned or just the component dropped.
 /// This is the crate's only teardown-on-removal hook: without it a despawned view
 /// leaks its (`!Send`) scene + side-table entries for the life of the process.
 /// Runs on the main thread (the `NonSendMut` forces it there, where Noesis lives)
@@ -4400,7 +4394,7 @@ fn teardown_removed_views(
 }
 
 /// Reap the Noesis state of any panel whose [`UiPanel`](crate::panel::UiPanel)
-/// was removed — entity despawned or component dropped. Panels are distinct
+/// was removed (entity despawned or component dropped). Panels are distinct
 /// entities from their host [`NoesisView`], so the view removal hook does not see
 /// them; this is their dedicated reap. Runs main-thread (the `NonSendMut` pins it)
 /// at the head of [`NoesisSet::Ensure`], before the survivors are reconciled.
@@ -4709,9 +4703,8 @@ impl Plugin for NoesisRenderPlugin {
                     sync_texture_provider_map,
                 )
                     .in_set(NoesisSet::Sync),
-                // Reap despawned views first, then (re)build the survivors. The
-                // timer start sits at the tail of Ensure so it brackets the whole
-                // Apply set (the four phases are `.chain()`-ed above).
+                // Reap before rebuild; timer_start at the tail of Ensure brackets
+                // the whole Apply set (the four phases are `.chain()`-ed above).
                 teardown_removed_views
                     .in_set(NoesisSet::Ensure)
                     .before(ensure_noesis_scene),

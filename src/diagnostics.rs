@@ -37,11 +37,10 @@ pub struct NoesisDiagnostics {
     pub allocated_memory_accum: u32,
     /// Number of live allocations (`GetAllocationsCount`).
     pub allocations_count: u32,
-    /// Cumulative count of FFI "hops" into the Noesis engine — name lookups, DP
-    /// get/set, collection ops — since process start. Monotonic non-decreasing;
+    /// Cumulative count of FFI "hops" into the Noesis engine (name lookups, DP
+    /// get/set, collection ops) since process start. Monotonic non-decreasing;
     /// reason about the per-frame *delta* to see how much engine traffic a frame
-    /// cost. Stays 0 in a build with no live view. This is the lever later perf
-    /// work tunes against.
+    /// cost. Stays 0 in a build with no live view.
     pub ffi_hops: u64,
     /// Number of live Noesis scenes (one per built [`crate::NoesisView`]). Returns
     /// to 0 after every view despawns, which is the despawn-teardown invariant.
@@ -55,8 +54,8 @@ pub struct NoesisDiagnostics {
     /// despawns, mirroring [`live_panels`](Self::live_panels) for the list
     /// primitive.
     pub live_lists: usize,
-    /// Wall-time of the previous frame's `NoesisSet::Apply` phase — every bridge's
-    /// FFI push. `ZERO` until the first frame with a live view has run.
+    /// Wall-time of the previous frame's `NoesisSet::Apply` phase (every bridge's
+    /// FFI push). `ZERO` until the first frame with a live view has run.
     pub apply_time: std::time::Duration,
 }
 
@@ -120,8 +119,7 @@ fn install_error_routing() {
 /// Apply wall-time into [`NoesisDiagnostics`]. The Noesis-sourced figures
 /// (`ffi_hops`, `live_scenes`) come from the render state when it exists;
 /// headless builds without a `RenderApp` have none, so they read 0. `set_if_neq`
-/// keeps change-detection quiet on the (rare, now that `ffi_hops` ticks)
-/// frames where nothing moved.
+/// keeps change-detection quiet on frames where nothing moved.
 #[allow(clippy::needless_pass_by_value)]
 fn refresh_diagnostics(
     mut diag: ResMut<NoesisDiagnostics>,

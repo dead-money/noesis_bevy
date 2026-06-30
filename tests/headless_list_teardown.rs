@@ -2,7 +2,7 @@
 //! [`NoesisView`] that owns a [`UiList`] must reap that view's `ListBinding`, not
 //! leak it.
 //!
-//! A `ListBinding` holds Noesis refcounted state in a strict drop order — the
+//! A `ListBinding` holds Noesis refcounted state in a strict drop order: the
 //! `ObservableCollection` (releasing its refs to the row instances) → each realized
 //! row `ClassInstance` (our `+1`) → the row-class `ClassRegistration` (which
 //! unregisters the class, and must outlive every instance of it). That ordering is
@@ -12,7 +12,7 @@
 //!
 //! This drives a view with a `ListBox` + a few entity-rows until its binding is
 //! live (`live_lists == 1`), despawns the view, and asserts the live-list count
-//! drains back to 0 — the `teardown_for` reap path ran in refcount order.
+//! drains back to 0; the `teardown_for` reap path ran in refcount order.
 //!
 //! Font-free XAML so the scene builds without a font folder.
 
@@ -151,7 +151,7 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
         pre, 1,
         "list binding should be live before despawn; got {pre} live lists",
     );
-    // After despawn: the binding is reaped — no leak, drop order honored.
+    // After despawn: the binding is reaped, no leak, drop order honored.
     assert_eq!(
         post, 0,
         "despawn must reap the view's list binding; {post} live lists still tracked",
