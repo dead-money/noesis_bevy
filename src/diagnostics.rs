@@ -46,6 +46,10 @@ pub struct NoesisDiagnostics {
     /// Number of live Noesis scenes (one per built [`crate::NoesisView`]). Returns
     /// to 0 after every view despawns, which is the despawn-teardown invariant.
     pub live_scenes: usize,
+    /// Number of live mounted panels (one per [`crate::UiPanel`] entity whose
+    /// fragment has been built). Returns to 0 after every panel despawns, mirroring
+    /// [`live_scenes`](Self::live_scenes) for the panel primitive.
+    pub live_panels: usize,
     /// Wall-time of the previous frame's `NoesisSet::Apply` phase — every bridge's
     /// FFI push. `ZERO` until the first frame with a live view has run.
     pub apply_time: std::time::Duration,
@@ -125,6 +129,7 @@ fn refresh_diagnostics(
         allocations_count: diagnostics::allocations_count(),
         ffi_hops: crate::render::ffi_hops(),
         live_scenes: state.as_ref().map_or(0, |s| s.live_scene_count()),
+        live_panels: state.as_ref().map_or(0, |s| s.live_panel_count()),
         apply_time: timer.as_ref().map_or(std::time::Duration::ZERO, |t| t.last),
     };
     diag.set_if_neq(next);

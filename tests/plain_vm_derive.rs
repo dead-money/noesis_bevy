@@ -64,6 +64,34 @@ fn decode(kind: PlainType, value: &PlainValueRef) -> PlainValue {
     }
 }
 
+/// Newtype shape: the property is named after the *type* (`Health`), not a field.
+#[derive(NoesisViewModel)]
+struct Health(f32);
+
+/// Newtype with an explicit `#[noesis(as = "...")]` property-name override.
+#[derive(NoesisViewModel)]
+#[noesis(as = "HP")]
+struct Renamed(i32);
+
+#[test]
+fn newtype_maps_property_after_the_type() {
+    assert_eq!(Health::noesis_type_name(), "Health");
+    assert_eq!(
+        Health::noesis_properties(),
+        &[("Health", PlainType::Double)],
+    );
+    let mut h = Health(100.0);
+    let snap = h.noesis_snapshot();
+    assert!(matches!(snap[0], PlainValue::Double(d) if (d - 100.0).abs() < 1e-9));
+    h.noesis_apply(0, &PlainValue::Double(25.0));
+    assert!((h.0 - 25.0).abs() < 1e-6);
+
+    // `#[noesis(as = "HP")]` renames just the bound property.
+    assert_eq!(Renamed::noesis_properties(), &[("HP", PlainType::Int32)]);
+    let r = Renamed(3);
+    assert!(matches!(r.noesis_snapshot()[0], PlainValue::Int32(3)));
+}
+
 #[test]
 fn derive_metadata_and_value_round_trip() {
     // `#[noesis(skip)]` excludes `internal`; the rest map by field order.

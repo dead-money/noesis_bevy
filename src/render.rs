@@ -63,11 +63,13 @@ use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::{CollectionViewOp, ItemValue, ItemsBinding, ObjectSource};
-use crate::plain_vm::PlainVmEntry;
+use crate::plain_vm::{PlainType, PlainValue, PlainVmEntry, SetSink, unbox};
 use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
+use noesis_runtime::element_tree::panel_children;
+use noesis_runtime::plain_vm::{PlainInstance, PlainValueRef, PlainVmBuilder, PlainVmClass};
 
 thread_local! {
     /// Cumulative count of FFI "hops" — calls that cross into the Noesis C++
@@ -578,6 +580,17 @@ pub(crate) struct NoesisRenderState {
     /// pass after a scene rebuild); released in [`Drop`] before the registered
     /// device. See [`crate::binding`].
     binding_entries: HashMap<(Entity, String, String), BindingEntry>,
+    /// Live mounted panels keyed by the **panel entity** (`UiPanel`, distinct
+    /// from the host [`NoesisView`] entity). Each owns a loaded sub-XAML fragment
+    /// plus an aggregated plain-VM (the union of the panel entity's bound
+    /// components) set as that fragment's `DataContext`, mounted as a hosted child
+    /// into a named `Panel` in its host view's scene. Re-mounts after a host-scene
+    /// rebuild (the host's [`Self::teardown_scene`] resets each child's stamp) and
+    /// is reaped — fragment removed from the host panel first — by
+    /// [`Self::teardown_panel_for`] on despawn. Released in [`Drop`] after the
+    /// scenes (so the host has already released its child refs). See
+    /// [`crate::panel`].
+    panels: HashMap<Entity, PanelEntry>,
     /// Process-global integration callback guards (cursor / open-URL /
     /// play-audio) registered once by [`crate::integration::NoesisIntegrationPlugin`].
     /// Owned here (rather than in that plugin's own resource) so their `Drop`
@@ -722,6 +735,142 @@ struct InstalledKeyBinding {
     binding: KeyBinding,
 }
 
+/// Process-global monotonic sequence for synthesizing a unique Noesis class name
+/// per mounted panel. Noesis registers reflected classes globally by name, so two
+/// panels — even of the same component set — get distinct classes (hence distinct
+/// `DataContext`s and scopes). One counter for the process is enough; it only ever
+/// increments on the main thread inside [`PanelEntry::build`].
+static PANEL_CLASS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One live mounted panel (see [`NoesisRenderState::panels`]). Field order is the
+/// drop order Noesis requires: `fragment` first (it is held by the host panel and
+/// holds a `DataContext` ref to `instance`), then `instance`, then `_class` (whose
+/// drop unregisters the class — must outlive every live instance of it).
+struct PanelEntry {
+    /// The loaded sub-XAML, its own namescope. `DataContext` set once at build.
+    fragment: FrameworkElement,
+    /// Aggregated plain-VM instance: one synthetic class whose properties are the
+    /// union of the panel entity's bound components.
+    instance: PlainInstance,
+    _class: PlainVmClass,
+    /// Aggregated property names in global index order, for `set_and_notify`.
+    prop_names: Vec<String>,
+    /// UI→Rust writeback sink the `on_set` hook pushes `(global_index, value)`
+    /// onto; drained each frame and routed back to the originating component by
+    /// the per-type [`crate::panel`] writeback systems.
+    set_sink: SetSink,
+    /// Host [`NoesisView`] entity whose scene contains the mount target.
+    host: Entity,
+    /// `x:Name` of the `Panel` in the host scene to mount the fragment into.
+    host_name: String,
+    /// `built_for_uri` stamp of the host scene we are mounted into; `None` until
+    /// mounted (and reset on a host-scene rebuild, forcing a re-mount).
+    mounted_for_uri: Option<String>,
+    /// Last text per watched fragment-scope `x:Name`, to dedupe
+    /// [`crate::panel::NoesisPanelTextChanged`] emissions. Resolved against the
+    /// fragment's *own* namescope (mounted fragments are private to the host).
+    text_snapshots: HashMap<String, String>,
+}
+
+impl PanelEntry {
+    /// Load the sub-XAML, register a uniquely-named synthetic class for the
+    /// aggregated `props`, instantiate, set it as the fragment's `DataContext`.
+    /// `None` if the XAML doesn't resolve or registration/instantiation fails.
+    fn build(
+        uri: &str,
+        host: Entity,
+        host_name: &str,
+        props: &[(String, PlainType)],
+    ) -> Option<Self> {
+        let mut fragment = FrameworkElement::load(uri)?;
+        let seq = PANEL_CLASS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let class_name = format!("DmPanel.{seq}");
+        let prop_names: Vec<String> = props.iter().map(|(n, _)| n.clone()).collect();
+        let kinds: Vec<PlainType> = props.iter().map(|(_, k)| *k).collect();
+        let set_sink: SetSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut builder = PlainVmBuilder::new(&class_name);
+        for (name, kind) in props {
+            builder.add_property(name, *kind);
+        }
+        let sink_for_handler = Arc::clone(&set_sink);
+        let class = builder
+            .on_set(move |idx: u32, value: &PlainValueRef| {
+                let kind = kinds
+                    .get(idx as usize)
+                    .copied()
+                    .unwrap_or(PlainType::BaseComponent);
+                let owned = unbox(kind, value);
+                if let Ok(mut queue) = sink_for_handler.lock() {
+                    queue.push((idx, owned));
+                }
+            })
+            .register()?;
+        let instance = class.create_instance()?;
+        if !instance.set_data_context(&mut fragment) {
+            warn!("UiPanel: set_data_context returned false for fragment {uri:?}");
+        }
+        Some(Self {
+            fragment,
+            instance,
+            _class: class,
+            prop_names,
+            set_sink,
+            host,
+            host_name: host_name.to_owned(),
+            mounted_for_uri: None,
+            text_snapshots: HashMap::new(),
+        })
+    }
+
+    /// Push changed aggregated properties into the instance (Rust→UI). `pushes`
+    /// carries `(global_index, value)` for only the components that changed.
+    fn apply_pushes(&self, pushes: &[(u32, PlainValue)]) {
+        for (gi, value) in pushes {
+            if let Some(name) = self.prop_names.get(*gi as usize) {
+                let _ = self.instance.set_and_notify(*gi, name, value.clone());
+            }
+        }
+    }
+
+    /// Take pending UI→Rust writebacks (drained each frame, routed to components).
+    fn drain_writebacks(&self) -> Vec<(u32, PlainValue)> {
+        let mut guard = self.set_sink.lock().expect("panel set sink poisoned");
+        if guard.is_empty() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut *guard)
+        }
+    }
+
+    /// Best-effort removal of our fragment from the host panel, so the host
+    /// releases its child ref before this entry drops. No-op if the host scene is
+    /// already gone (its tree drop already released the fragment). Matches by
+    /// pointer identity since sibling panels share the collection and indices
+    /// shift as children come and go.
+    fn unmount(&self, scenes: &HashMap<Entity, SceneInstance>) {
+        let Some(scene) = scenes.get(&self.host) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let Some(host_el) = resolve_named(&content, &self.host_name) else {
+            return;
+        };
+        let Some(mut children) = panel_children(&host_el) else {
+            return;
+        };
+        let target = self.fragment.raw();
+        for i in 0..children.count() {
+            if std::ptr::eq(children.get_raw(i), target) {
+                let _ = children.remove_at(i);
+                break;
+            }
+        }
+    }
+}
+
 /// A persistent, camera-less Noesis view reused to bake label panels to
 /// offscreen textures. Unlike [`SceneInstance`] it owns no intermediate (it
 /// renders straight into a caller-supplied [`wgpu::TextureView`]) and is never
@@ -824,6 +973,7 @@ impl NoesisRenderState {
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
             binding_entries: HashMap::new(),
+            panels: HashMap::new(),
             integration_guards: Vec::new(),
         }
     }
@@ -1216,6 +1366,127 @@ impl NoesisRenderState {
             .get(&key)
             .map(PlainVmEntry::drain_writebacks)
             .unwrap_or_default()
+    }
+
+    /// Reconcile the mounted panel for `entity`: build it on first sight (load
+    /// `uri`, register the aggregated class from `props`, set `DataContext`), push
+    /// the changed aggregated properties (Rust→UI), mount the fragment into the
+    /// host scene's named `Panel` once that scene exists (re-mounting after a
+    /// rebuild), and return any queued two-way edits (UI→Rust) keyed by global
+    /// property index for the caller to route back to the originating components.
+    /// `props` is the frozen aggregated layout; `pushes` are the changed-only
+    /// `(global_index, value)` pairs. See [`crate::panel`].
+    pub(crate) fn sync_panel(
+        &mut self,
+        entity: Entity,
+        uri: &str,
+        host: Entity,
+        host_name: &str,
+        props: &[(String, PlainType)],
+        pushes: &[(u32, PlainValue)],
+    ) -> Vec<(u32, PlainValue)> {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.panels.entry(entity) {
+            let Some(built) = PanelEntry::build(uri, host, host_name, props) else {
+                warn!("UiPanel: failed to load {uri:?} or register class for panel {entity:?}",);
+                return Vec::new();
+            };
+            slot.insert(built);
+        }
+
+        if let Some(entry) = self.panels.get(&entity)
+            && !pushes.is_empty()
+        {
+            entry.apply_pushes(pushes);
+        }
+
+        // Mount into the host scene's named Panel once it exists; re-mount after a
+        // host rebuild (the stamp was reset by `teardown_scene`). Resolve the host
+        // content + uri first so the `scenes` borrow ends before the `panels`
+        // mutable borrow (disjoint fields).
+        let mount = self
+            .scenes
+            .get(&host)
+            .and_then(|s| s.view.content().map(|c| (c, s.built_for_uri.clone())));
+        if let Some((content, host_uri)) = mount
+            && let Some(entry) = self.panels.get_mut(&entity)
+            && entry.mounted_for_uri.as_deref() != Some(host_uri.as_str())
+        {
+            match resolve_named(&content, &entry.host_name) {
+                Some(host_el) => match panel_children(&host_el) {
+                    Some(mut children) => {
+                        record_ffi_hop(); // collection op: mount a hosted child.
+                        if children.add(&entry.fragment).is_some() {
+                            entry.mounted_for_uri = Some(host_uri);
+                        } else {
+                            warn!(
+                                "UiPanel: failed to add fragment to host {:?} for panel {entity:?}",
+                                entry.host_name,
+                            );
+                        }
+                    }
+                    None => warn!(
+                        "UiPanel: host {:?} is not a Panel (panel {entity:?})",
+                        entry.host_name,
+                    ),
+                },
+                None => warn!(
+                    "UiPanel: host {:?} not found in scene {host_uri:?} (panel {entity:?})",
+                    entry.host_name,
+                ),
+            }
+        }
+
+        self.panels
+            .get(&entity)
+            .map(PanelEntry::drain_writebacks)
+            .unwrap_or_default()
+    }
+
+    /// Terminal teardown of a despawned panel entity: unmount its fragment from
+    /// the host panel (so the host releases its child ref) then drop the entry in
+    /// Noesis drop order (fragment → instance → class). Driven by
+    /// [`teardown_removed_panels`] off `RemovedComponents<UiPanel>`. No-op for an
+    /// entity that owns no panel.
+    pub(crate) fn teardown_panel_for(&mut self, entity: Entity) {
+        if let Some(entry) = self.panels.remove(&entity) {
+            entry.unmount(&self.scenes);
+            drop(entry);
+        }
+    }
+
+    /// Poll panel `entity`'s watched fragment-scope names, returning `(name,
+    /// text)` for each whose text changed since the last poll. Resolves against
+    /// the fragment's *own* namescope — a mounted fragment's inner names are
+    /// invisible to a host-root lookup — so the watch names are fragment-local
+    /// (optionally `/`-qualified within the fragment). Drives the
+    /// [`crate::panel::NoesisPanelText`] read-back. No-op until the panel is built.
+    pub(crate) fn poll_panel_text_for(
+        &mut self,
+        entity: Entity,
+        watched: &[String],
+    ) -> Vec<(String, String)> {
+        let mut changed = Vec::new();
+        let Some(entry) = self.panels.get_mut(&entity) else {
+            return changed;
+        };
+        entry
+            .text_snapshots
+            .retain(|k, _| watched.iter().any(|w| w == k));
+        if watched.is_empty() {
+            return changed;
+        }
+        for name in watched {
+            let Some(element) = resolve_named(&entry.fragment, name) else {
+                continue;
+            };
+            let current = element.text().unwrap_or_default();
+            if entry.text_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            entry.text_snapshots.insert(name.clone(), current.clone());
+            changed.push((name.clone(), current));
+        }
+        changed
     }
 
     /// Eagerly register every `(folder, filename)` pair currently in
@@ -3527,6 +3798,14 @@ impl NoesisRenderState {
                 entry.reset_bind();
             }
         }
+        // Panels mounted into *this* view's scene lose their host child on the
+        // rebuild; reset their stamp so the next `sync_panel` re-mounts them into
+        // the fresh tree. (Keyed by host, not by the scene entity.)
+        for entry in self.panels.values_mut() {
+            if entry.host == entity {
+                entry.mounted_for_uri = None;
+            }
+        }
         let Some(mut scene) = self.scenes.remove(&entity) else {
             return;
         };
@@ -3552,6 +3831,14 @@ impl NoesisRenderState {
     #[must_use]
     pub(crate) fn live_scene_count(&self) -> usize {
         self.scenes.len()
+    }
+
+    /// Number of live mounted panels. Mirrors `self.panels.len()`; surfaced
+    /// through [`NoesisDiagnostics`](crate::diagnostics::NoesisDiagnostics::live_panels)
+    /// so a despawn-reap test can assert the panel table drains back to baseline.
+    #[must_use]
+    pub(crate) fn live_panel_count(&self) -> usize {
+        self.panels.len()
     }
 
     /// Fully reap every Noesis resource owned on behalf of `entity` — its scene
@@ -3605,6 +3892,10 @@ impl Drop for NoesisRenderState {
         self.view_models.clear();
         self.items_sources.clear();
         self.plain_vms.clear();
+        // Panels after the scenes: the host views are now torn down, so each host
+        // has already released its child ref; clearing just drops our handles in
+        // field order (fragment → instance → class).
+        self.panels.clear();
         self.command_hosts.clear();
         self.binding_entries.clear();
         self.teardown_bake_rig();
@@ -3920,6 +4211,24 @@ fn teardown_removed_views(
     }
 }
 
+/// Reap the Noesis state of any panel whose [`UiPanel`](crate::panel::UiPanel)
+/// was removed — entity despawned or component dropped. Panels are distinct
+/// entities from their host [`NoesisView`], so the view removal hook does not see
+/// them; this is their dedicated reap. Runs main-thread (the `NonSendMut` pins it)
+/// at the head of [`NoesisSet::Ensure`], before the survivors are reconciled.
+#[allow(clippy::needless_pass_by_value)]
+fn teardown_removed_panels(
+    mut removed: RemovedComponents<crate::panel::UiPanel>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        state.teardown_panel_for(entity);
+    }
+}
+
 /// Stamp the start of the [`NoesisSet::Apply`] phase. Pairs with
 /// [`apply_timer_end`]; see [`NoesisApplyTimer`].
 fn apply_timer_start(mut timer: ResMut<NoesisApplyTimer>) {
@@ -4216,6 +4525,9 @@ impl Plugin for NoesisRenderPlugin {
                 // timer start sits at the tail of Ensure so it brackets the whole
                 // Apply set (the four phases are `.chain()`-ed above).
                 teardown_removed_views
+                    .in_set(NoesisSet::Ensure)
+                    .before(ensure_noesis_scene),
+                teardown_removed_panels
                     .in_set(NoesisSet::Ensure)
                     .before(ensure_noesis_scene),
                 ensure_noesis_scene.in_set(NoesisSet::Ensure),

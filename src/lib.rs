@@ -31,6 +31,7 @@ pub mod integration;
 pub mod items;
 pub mod layout;
 pub mod markup;
+pub mod panel;
 pub mod plain_vm;
 pub mod reconcile;
 pub mod render;
@@ -103,6 +104,10 @@ pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 /// Derive macro for [`NoesisViewModel`]: binds a plain struct's fields by name.
 pub use noesis_bevy_derive::NoesisViewModel;
+pub use panel::{
+    NoesisPanelAppExt, NoesisPanelPlugin, NoesisPanelSet, NoesisPanelText, NoesisPanelTextChanged,
+    UiPanel,
+};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
 pub use resources::{
@@ -235,6 +240,7 @@ impl Plugin for NoesisPlugin {
             styles::NoesisStylesPlugin,
             shapes::NoesisShapesPlugin,
             resources::NoesisResourcesPlugin,
+            panel::NoesisPanelPlugin,
         ));
     }
 }
