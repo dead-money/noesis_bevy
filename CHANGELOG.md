@@ -6,6 +6,8 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-29
+
 ### Added
 
 - **Scope-qualified element names.** Every bridge that targets an element by
@@ -20,6 +22,16 @@ pre-1.0, any `0.x` release may contain breaking changes.
   names are unchanged and resolve exactly as before. Read-backs echo the original
   qualified string you supplied, so two controls that each contain an
   `"OkButton"` stay distinguishable.
+
+- **Entity-driven UI API.** A Bevy entity is the unit of UI, across three
+  primitives: `UiPanel` (its bound `#[derive(NoesisViewModel)]` components are the
+  panel's `DataContext`), a query-backed `UiList` (rows are entities; the bound
+  `ObservableCollection` is reconciled by `Entity` with minimal
+  Add/Remove/Move/Update, and selection round-trips as a `Selected` marker), and
+  UI events delivered as `EntityEvent`s (`On<UiClicked>`) targeting the
+  originating entity. Runnable end to end in `examples/ecs_ui.rs`. Includes
+  reactive teardown of despawned views and panels (releasing their Noesis state)
+  and `ffi_hops` / apply-time diagnostics.
 
 ## [0.10.0] - 2026-06-29
 

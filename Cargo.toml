@@ -1,6 +1,6 @@
 [package]
 name = "noesis_bevy"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.87"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
@@ -35,7 +35,7 @@ bevy_render = "0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
 # The derive crate ships in this repo and releases in lockstep (path for local
 # dev, version for the published crate).
-noesis_bevy_derive = { path = "./derive", version = "0.10" }
+noesis_bevy_derive = { path = "./derive", version = "0.11" }
 # The public crate from crates.io. This branch needs 0.11 (the ECS-UI FFI). Until
 # 0.11 is published, the `[patch.crates-io]` override below builds against the
 # sibling checkout; remove it once 0.11 is on crates.io (see RELEASING.md).
@@ -132,9 +132,3 @@ path = "examples/scoreboard.rs"
 [[example]]
 name = "ecs_ui"
 path = "examples/ecs_ui.rs"
-
-# TEMPORARY (feat/ecs-ui-api): build against the unpublished sibling runtime 0.11.0
-# that carries the new ECS-UI FFI. Remove this patch once noesis_runtime 0.11.0 is
-# published to crates.io (tag-triggered); this branch can't merge cleanly until then.
-[patch.crates-io]
-noesis_runtime = { path = "../noesis_runtime" }
