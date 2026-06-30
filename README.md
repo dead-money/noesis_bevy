@@ -83,6 +83,49 @@ The mental model is closer to "Bevy hosts an embedded retained-mode GUI runtime 
 - **You reach the controls through bridges, not entities.** Instead of querying widget entities, you attach bridge components to the view entity, and reconcile systems in `NoesisSet::Apply` push values into and pull them out of the live scene: `NoesisText` for text, `NoesisDp` for dependency properties, `NoesisVm` for view models, `NoesisCommands` for commands, and so on. Read-backs arrive as `Message { view, .. }` events, not as changed components on a widget. Data binding, commands, and view models are the seam, the idiomatic XAML/WPF approach rather than immediate-mode or an entity per widget.
 - **The tradeoff.** You don't get ECS-native features like per-widget `Transform`, picking, or change detection for free. Anything you want to drive from gameplay goes through the bridge layer, or means adding to it.
 
+On top of this base, the entity-driven API below raises whole panels and list rows to first-class entities when you want plain ECS ergonomics; the bridges stay the lower-level seam beneath it.
+
+## The entity-driven UI API
+
+When you'd rather drive the UI as plain ECS, three primitives make a Bevy entity the unit of UI. You still author the XAML; you spawn entities and write ordinary systems instead of string-keyed bridges. `examples/ecs_ui.rs` runs all three end to end.
+
+**Panel = entity.** A `UiPanel` mounts a sub-XAML fragment into a host slot, and the entity's bound components are its `DataContext`:
+
+```rust
+#[derive(Component, NoesisViewModel, Clone, Copy)]
+struct Health(f32);   // binds {Binding Health} inside the fragment
+
+commands.spawn((UiPanel::new("hud.xaml").mount_into(view, "Slot"), Health(100.0)));
+
+fn regen(mut q: Query<&mut Health, With<UiPanel>>) {
+    for mut h in &mut q { h.0 = (h.0 + 1.0).min(100.0); }
+}
+```
+
+Two panels of the same type bind independently. Show and hide is a `String` field bound to `Visibility` (`visibility::{VISIBLE, COLLAPSED, HIDDEN}`), with no converter.
+
+**List = query.** A list's rows are entities. Tag an entity into a list and it appears as a row; the bound `ObservableCollection` is reconciled by `Entity`, so mutating one component updates only its row and selection survives a reorder:
+
+```rust
+#[derive(Component, NoesisViewModel, Clone)]
+struct Item { name: String, qty: i32 }
+
+commands.entity(view).insert(UiList::new("Inventory"));
+commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(view)));
+```
+
+The selected row carries a `Selected` marker, read back with `Query<&Item, With<Selected>>`.
+
+**Events = observers.** UI events arrive as `EntityEvent`s targeting the entity they came from, a panel or a row:
+
+```rust
+fn use_item(on: On<UiClicked>, items: Query<&Item>) {
+    if let Ok(item) = items.get(on.event_target()) {
+        // the row the click came from
+    }
+}
+```
+
 ## Driving the UI from systems
 
 Each piece of UI state (text, visibility, list contents, and more) is a bridge component on the view entity. Spawning a `NoesisView` auto-attaches every per-view bridge as a Bevy required component, each defaulting to empty at no cost, so you write to them without spawning them by hand. A write set from `Startup` or `OnEnter`, before the scene exists, lands once the scene builds. The two binding bridges `NoesisVm` and `NoesisCommands` are the exception: add those yourself, since they need a class or command name.
