@@ -92,6 +92,34 @@ fn newtype_maps_property_after_the_type() {
     assert!(matches!(r.noesis_snapshot()[0], PlainValue::Int32(3)));
 }
 
+/// Named-field `#[noesis(rename = "...")]`: the Rust field stays `snake_case`, the
+/// bound XAML property takes the override name; unannotated fields are unchanged.
+#[derive(NoesisViewModel)]
+struct WithRename {
+    #[noesis(rename = "MasterVolume")]
+    master_volume: f32,
+    muted: bool,
+}
+
+#[test]
+fn field_rename_overrides_the_property_name() {
+    assert_eq!(
+        WithRename::noesis_properties(),
+        &[
+            ("MasterVolume", PlainType::Double),
+            ("muted", PlainType::Bool),
+        ],
+    );
+    // The Rust field name is unchanged; only the bound property name differs.
+    let mut vm = WithRename {
+        master_volume: 0.7,
+        muted: true,
+    };
+    assert!(matches!(vm.noesis_snapshot()[0], PlainValue::Double(d) if (d - 0.7).abs() < 1e-6));
+    vm.noesis_apply(0, &PlainValue::Double(0.25));
+    assert!((vm.master_volume - 0.25).abs() < 1e-6);
+}
+
 #[test]
 fn derive_metadata_and_value_round_trip() {
     // `#[noesis(skip)]` excludes `internal`; the rest map by field order.

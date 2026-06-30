@@ -62,6 +62,10 @@ pre-1.0, any `0.x` release may contain breaking changes.
   (Noesis tolerates many *malformed* fragments by returning a partial tree with
   only its own parser warning; those don't reach this error path.)
 
+- **`#[noesis(rename = "…")]`** field attribute on `#[derive(NoesisViewModel)]`:
+  bind a snake_case Rust field to a different (e.g. PascalCase) XAML property name,
+  so `master_volume` can back `{Binding MasterVolume}` without renaming the field.
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into

@@ -14,7 +14,9 @@
 //! Two struct shapes are supported:
 //!
 //! * **Named struct**: each field maps to a property named after the *field*
-//!   (`title: String` → `{Binding title}`). `#[noesis(skip)]` excludes a field.
+//!   (`title: String` → `{Binding title}`). `#[noesis(skip)]` excludes a field;
+//!   `#[noesis(rename = "Title")]` binds a `snake_case` field to a different XAML
+//!   property name (e.g. `PascalCase`).
 //! * **Newtype tuple struct**: a single-field tuple struct
 //!   (`struct Health(f32);`) maps to one property named after the *type*
 //!   (`{Binding Health}`). This is the shape the `UiPanel` primitive expects:
@@ -105,6 +107,25 @@ fn type_name_override(attrs: &[syn::Attribute]) -> Option<String> {
         if attr.path().is_ident("noesis") {
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("name") {
+                    let value = meta.value()?;
+                    let lit: LitStr = value.parse()?;
+                    name = Some(lit.value());
+                }
+                Ok(())
+            });
+        }
+    }
+    name
+}
+
+/// Read a field-level `#[noesis(rename = "...")]` property-name override, so a
+/// snake_case Rust field can bind to a different (e.g. PascalCase) XAML property.
+fn field_rename(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut name = None;
+    for attr in attrs {
+        if attr.path().is_ident("noesis") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
                     let value = meta.value()?;
                     let lit: LitStr = value.parse()?;
                     name = Some(lit.value());
@@ -212,7 +233,7 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
                 }
                 let ident = field.ident.as_ref().expect("named field");
                 let access = quote!(#ident);
-                let name_str = ident.to_string();
+                let name_str = field_rename(&field.attrs).unwrap_or_else(|| ident.to_string());
                 let Some(kind) = field_kind(&access, &field.ty) else {
                     return unsupported_type_error(field.ty.span());
                 };
