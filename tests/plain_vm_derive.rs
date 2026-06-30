@@ -56,8 +56,68 @@ fn decode(kind: PlainType, value: &PlainValueRef) -> PlainValue {
             .as_bool()
             .map(PlainValue::Bool)
             .unwrap_or(PlainValue::Null),
+        PlainType::U64 => value
+            .as_u64()
+            .map(PlainValue::U64)
+            .unwrap_or(PlainValue::Null),
         PlainType::BaseComponent => PlainValue::Null,
     }
+}
+
+/// Newtype shape: the property is named after the *type* (`Health`), not a field.
+#[derive(NoesisViewModel)]
+struct Health(f32);
+
+/// Newtype with an explicit `#[noesis(as = "...")]` property-name override.
+#[derive(NoesisViewModel)]
+#[noesis(as = "HP")]
+struct Renamed(i32);
+
+#[test]
+fn newtype_maps_property_after_the_type() {
+    assert_eq!(Health::noesis_type_name(), "Health");
+    assert_eq!(
+        Health::noesis_properties(),
+        &[("Health", PlainType::Double)],
+    );
+    let mut h = Health(100.0);
+    let snap = h.noesis_snapshot();
+    assert!(matches!(snap[0], PlainValue::Double(d) if (d - 100.0).abs() < 1e-9));
+    h.noesis_apply(0, &PlainValue::Double(25.0));
+    assert!((h.0 - 25.0).abs() < 1e-6);
+
+    // `#[noesis(as = "HP")]` renames just the bound property.
+    assert_eq!(Renamed::noesis_properties(), &[("HP", PlainType::Int32)]);
+    let r = Renamed(3);
+    assert!(matches!(r.noesis_snapshot()[0], PlainValue::Int32(3)));
+}
+
+/// Named-field `#[noesis(rename = "...")]`: the Rust field stays `snake_case`, the
+/// bound XAML property takes the override name; unannotated fields are unchanged.
+#[derive(NoesisViewModel)]
+struct WithRename {
+    #[noesis(rename = "MasterVolume")]
+    master_volume: f32,
+    muted: bool,
+}
+
+#[test]
+fn field_rename_overrides_the_property_name() {
+    assert_eq!(
+        WithRename::noesis_properties(),
+        &[
+            ("MasterVolume", PlainType::Double),
+            ("muted", PlainType::Bool),
+        ],
+    );
+    // The Rust field name is unchanged; only the bound property name differs.
+    let mut vm = WithRename {
+        master_volume: 0.7,
+        muted: true,
+    };
+    assert!(matches!(vm.noesis_snapshot()[0], PlainValue::Double(d) if (d - 0.7).abs() < 1e-6));
+    vm.noesis_apply(0, &PlainValue::Double(0.25));
+    assert!((vm.master_volume - 0.25).abs() < 1e-6);
 }
 
 #[test]

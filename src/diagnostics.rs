@@ -37,6 +37,26 @@ pub struct NoesisDiagnostics {
     pub allocated_memory_accum: u32,
     /// Number of live allocations (`GetAllocationsCount`).
     pub allocations_count: u32,
+    /// Cumulative count of FFI "hops" into the Noesis engine (name lookups, DP
+    /// get/set, collection ops) since process start. Monotonic non-decreasing;
+    /// reason about the per-frame *delta* to see how much engine traffic a frame
+    /// cost. Stays 0 in a build with no live view.
+    pub ffi_hops: u64,
+    /// Number of live Noesis scenes (one per built [`crate::NoesisView`]). Returns
+    /// to 0 after every view despawns, which is the despawn-teardown invariant.
+    pub live_scenes: usize,
+    /// Number of live mounted panels (one per [`crate::UiPanel`] entity whose
+    /// fragment has been built). Returns to 0 after every panel despawns, mirroring
+    /// [`live_scenes`](Self::live_scenes) for the panel primitive.
+    pub live_panels: usize,
+    /// Number of live entity-keyed list bindings (one per `(view, x:Name)` a
+    /// [`crate::UiList`] reconciles). Returns to 0 after every owning view
+    /// despawns, mirroring [`live_panels`](Self::live_panels) for the list
+    /// primitive.
+    pub live_lists: usize,
+    /// Wall-time of the previous frame's `NoesisSet::Apply` phase (every bridge's
+    /// FFI push). `ZERO` until the first frame with a live view has run.
+    pub apply_time: std::time::Duration,
 }
 
 /// App-level plugin exposing [`NoesisDiagnostics`] and (optionally) routing the
@@ -95,13 +115,26 @@ fn install_error_routing() {
     std::mem::forget(guard);
 }
 
-/// Pull the current allocator counters into [`NoesisDiagnostics`]. `set_if_neq`
-/// keeps change-detection quiet on the (common) frames where nothing moved.
-fn refresh_diagnostics(mut diag: ResMut<NoesisDiagnostics>) {
+/// Pull the current allocator counters, FFI-hop tally, live-scene count and last
+/// Apply wall-time into [`NoesisDiagnostics`]. The Noesis-sourced figures
+/// (`ffi_hops`, `live_scenes`) come from the render state when it exists;
+/// headless builds without a `RenderApp` have none, so they read 0. `set_if_neq`
+/// keeps change-detection quiet on frames where nothing moved.
+#[allow(clippy::needless_pass_by_value)]
+fn refresh_diagnostics(
+    mut diag: ResMut<NoesisDiagnostics>,
+    state: Option<NonSend<crate::render::NoesisRenderState>>,
+    timer: Option<Res<crate::render::NoesisApplyTimer>>,
+) {
     let next = NoesisDiagnostics {
         allocated_memory: diagnostics::allocated_memory(),
         allocated_memory_accum: diagnostics::allocated_memory_accum(),
         allocations_count: diagnostics::allocations_count(),
+        ffi_hops: crate::render::ffi_hops(),
+        live_scenes: state.as_ref().map_or(0, |s| s.live_scene_count()),
+        live_panels: state.as_ref().map_or(0, |s| s.live_panel_count()),
+        live_lists: state.as_ref().map_or(0, |s| s.live_list_count()),
+        apply_time: timer.as_ref().map_or(std::time::Duration::ZERO, |t| t.last),
     };
     diag.set_if_neq(next);
 }

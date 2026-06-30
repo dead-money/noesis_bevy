@@ -30,8 +30,11 @@ pub mod input;
 pub mod integration;
 pub mod items;
 pub mod layout;
+pub mod list;
 pub mod markup;
+pub mod panel;
 pub mod plain_vm;
+pub mod reconcile;
 pub mod render;
 pub mod render_device;
 pub mod resources;
@@ -69,8 +72,8 @@ pub use commands::{
 pub use diagnostics::{NoesisDiagnostics, NoesisDiagnosticsPlugin};
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
 pub use events::{
-    Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin, NoesisKeyDown,
-    NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue,
+    ClickWatchEntry, Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin,
+    NoesisKeyDown, NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue, UiClicked, UiKeyDown,
 };
 pub use focus::{NoesisFocus, NoesisFocusPlugin};
 pub use focus_input::{
@@ -99,9 +102,17 @@ pub use items::{
     ObjectRow, ObjectSource,
 };
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
+pub use list::{
+    ListSort, ListedIn, NoesisListAppExt, NoesisListOps, NoesisListPlugin, NoesisListSelection,
+    NoesisListSet, Selected, UiList,
+};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 /// Derive macro for [`NoesisViewModel`]: binds a plain struct's fields by name.
 pub use noesis_bevy_derive::NoesisViewModel;
+pub use panel::{
+    NoesisPanelAppExt, NoesisPanelPlugin, NoesisPanelSet, NoesisPanelText, NoesisPanelTextChanged,
+    SealPanel, UiPanel,
+};
 pub use plain_vm::{NoesisViewModel, NoesisViewModelAppExt, PlainType, PlainValue, PlainValueRef};
 pub use render::{NoesisCamera, NoesisIntermediate, NoesisRenderPlugin, NoesisSet, NoesisView};
 pub use resources::{
@@ -109,7 +120,7 @@ pub use resources::{
 };
 pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
-    RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
+    RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue, UiRoutedEvent,
 };
 pub use shapes::{NoesisShapes, NoesisShapesPlugin, ShapeKind, ShapeSpec};
 pub use styles::{
@@ -234,6 +245,8 @@ impl Plugin for NoesisPlugin {
             styles::NoesisStylesPlugin,
             shapes::NoesisShapesPlugin,
             resources::NoesisResourcesPlugin,
+            panel::NoesisPanelPlugin,
+            list::NoesisListPlugin,
         ));
     }
 }

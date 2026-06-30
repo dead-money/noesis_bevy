@@ -50,8 +50,8 @@ use bevy_render::{
 use noesis_runtime::animation::{Animation, DoubleAnimation, Timeline};
 use noesis_runtime::commands::Command;
 use noesis_runtime::events::{
-    ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, subscribe_click,
-    subscribe_event, subscribe_keydown,
+    ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, RoutedEvent,
+    subscribe_click, subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
 use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D, MatrixTransform3D};
@@ -63,11 +63,55 @@ use crate::events::{SharedClickQueue, SharedKeyDownQueue};
 use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::{CollectionViewOp, ItemValue, ItemsBinding, ObjectSource};
-use crate::plain_vm::PlainVmEntry;
+use crate::plain_vm::{PlainType, PlainValue, PlainVmEntry, SetSink, unbox};
 use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
+use noesis_runtime::element_tree::panel_children;
+use noesis_runtime::plain_vm::{PlainInstance, PlainValueRef, PlainVmBuilder, PlainVmClass};
+
+thread_local! {
+    /// Cumulative count of FFI "hops" (calls that cross into the Noesis C++
+    /// engine) made on the Noesis thread, this frame and every frame before it.
+    /// Lives in a `thread_local` rather than on [`NoesisRenderState`] because the
+    /// dominant choke point, [`resolve_named`], is a free function with no `self`
+    /// to hang a field off. All Noesis work happens on one thread (the engine is
+    /// thread-affine), so a non-atomic `Cell` is both correct and as cheap as a
+    /// plain field. Surfaced per frame through
+    /// [`NoesisDiagnostics::ffi_hops`](crate::diagnostics::NoesisDiagnostics::ffi_hops).
+    static FFI_HOPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one FFI hop into the engine. Cheap: a single non-atomic `Cell` bump on
+/// the Noesis thread. Called at the FFI choke points (element resolution via
+/// [`resolve_named`], DP get/set, and collection ops) so later perf work can
+/// reason about how much engine traffic a frame costs. See [`FFI_HOPS`].
+#[inline]
+pub(crate) fn record_ffi_hop() {
+    FFI_HOPS.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// Read the cumulative FFI-hop count for the Noesis thread. Zero until the first
+/// engine call. See [`FFI_HOPS`].
+#[inline]
+#[must_use]
+pub(crate) fn ffi_hops() -> u64 {
+    FFI_HOPS.with(std::cell::Cell::get)
+}
+
+/// Wall-time of the most recent [`NoesisSet::Apply`] phase, plus the in-flight
+/// start stamp. A plain `Send` resource (not Noesis state) so it can be read from
+/// ordinary systems; [`apply_timer_start`]/[`apply_timer_end`] bracket the whole
+/// Apply set (they sit at the tail of Ensure and the head of Drive, and the four
+/// `NoesisSet` phases are `.chain()`-ed), and [`crate::diagnostics`] mirrors
+/// [`last`](Self::last) into [`NoesisDiagnostics`](crate::diagnostics::NoesisDiagnostics).
+#[derive(Resource, Default)]
+pub(crate) struct NoesisApplyTimer {
+    started: Option<std::time::Instant>,
+    /// Duration of the previous frame's Apply phase.
+    pub(crate) last: std::time::Duration,
+}
 
 /// Color format of the per-view intermediate Noesis paints into. Must match
 /// the private `RT_COLOR_FORMAT` in `render_device::wgpu_device`.
@@ -486,18 +530,23 @@ pub(crate) struct NoesisRenderState {
     /// Drives storyboard progression; `elapsed_secs_f64()` each frame
     /// vs. Noesis's requirement for monotonically-increasing seconds.
     clock_origin: std::time::Instant,
-    /// Last `swallow` set installed for each subscribed keydown name.
-    /// Used by [`Self::sync_keydown_subscriptions`] to detect when a
-    /// swallow list has changed and re-bind the C++-side handler with
-    /// the new closure (which captures `swallow` by value).
-    last_keydown_swallow: HashMap<(Entity, String), Vec<Key>>,
+    /// Last `(swallow set, UiKeyDown target)` installed for each subscribed
+    /// keydown name. Used by [`Self::sync_keydown_subscriptions`] to detect when
+    /// either has changed and re-bind the C++-side handler with the new closure
+    /// (which captures both by value).
+    last_keydown_swallow: HashMap<(Entity, String), (Vec<Key>, Entity)>,
+    /// Last [`UiClicked`](crate::events::UiClicked) target installed per
+    /// subscribed `(view, x:Name)`. The click callback captures the target by
+    /// value, so a target change re-binds the C++-side handler. Mirrors
+    /// [`Self::last_keydown_swallow`].
+    last_click_target: HashMap<(Entity, String), Entity>,
     /// Last `(mark_handled, handled_too)` flags installed per subscribed
     /// `(view, x:Name, event name)`. The routed-event callback captures these
     /// by value, so a flag change can't be patched in place; we detect it
     /// here and drop + re-create the subscription. Mirrors
     /// [`Self::last_keydown_swallow`]. Keyed across views; pruned per view at
     /// sync time.
-    last_event_config: HashMap<(Entity, String, &'static str), (bool, bool)>,
+    last_event_config: HashMap<(Entity, String, &'static str), (bool, bool, Entity)>,
     /// Reusable offscreen view for baking label panels (lazily built). Lives
     /// here so it shares the single registered device and its renderer is torn
     /// down before the device drops (see [`Drop`]).
@@ -536,6 +585,29 @@ pub(crate) struct NoesisRenderState {
     /// pass after a scene rebuild); released in [`Drop`] before the registered
     /// device. See [`crate::binding`].
     binding_entries: HashMap<(Entity, String, String), BindingEntry>,
+    /// Live mounted panels keyed by the **panel entity** (`UiPanel`, distinct
+    /// from the host [`NoesisView`] entity). Each owns a loaded sub-XAML fragment
+    /// plus an aggregated plain-VM (the union of the panel entity's bound
+    /// components) set as that fragment's `DataContext`, mounted as a hosted child
+    /// into a named `Panel` in its host view's scene. Re-mounts after a host-scene
+    /// rebuild (the host's [`Self::teardown_scene`] resets each child's stamp) and
+    /// is reaped (fragment removed from the host panel first) by
+    /// [`Self::teardown_panel_for`] on despawn. Released in [`Drop`] after the
+    /// scenes (so the host has already released its child refs). See
+    /// [`crate::panel`].
+    panels: HashMap<Entity, PanelEntry>,
+    /// `(panel entity, fragment uri)` pairs whose XAML failed to load, so the
+    /// `error!` fires once instead of every frame (a failed build leaves the
+    /// `panels` slot vacant, so `sync_panel` retries it each frame).
+    failed_fragments: HashSet<(Entity, String)>,
+    /// Rust-owned, entity-keyed list bindings (Primitive 2), keyed by `(view
+    /// entity, x:Name)`. Each owns an `ObservableCollection` of row instances
+    /// reconciled from the view's row query, bound to a named `ItemsControl`.
+    /// Outlives scene rebuilds (re-bound by the apply pass) and is released in
+    /// [`Drop`] / [`Self::teardown_for`] before the registered device, in the
+    /// collection→instances→registration order its fields encode. See
+    /// [`crate::list`].
+    lists: HashMap<(Entity, String), crate::list::ListBinding>,
     /// Process-global integration callback guards (cursor / open-URL /
     /// play-audio) registered once by [`crate::integration::NoesisIntegrationPlugin`].
     /// Owned here (rather than in that plugin's own resource) so their `Drop`
@@ -592,6 +664,14 @@ struct SceneInstance {
     /// `&'static str` half is `RoutedEvent::as_str()` (the enum is not `Hash`,
     /// its stable name is).
     event_subs: HashMap<(String, &'static str), EventSubscription>,
+    /// Per-row click subscriptions for entity-keyed lists, keyed by the list
+    /// control's `x:Name`. One `MouseLeftButtonUp` handler is installed on each
+    /// bound `ItemsControl`; its callback walks the clicked element's
+    /// `DataContext` to the row's hidden `__entity` field and pushes a
+    /// row-targeted [`UiClicked`](crate::events::UiClicked). Installed by
+    /// [`NoesisRenderState::apply_list_for`] when the `ItemsSource` binds; drops
+    /// with the scene, same orphan-safety rules as [`Self::event_subs`].
+    row_click_subs: HashMap<String, EventSubscription>,
     /// Last text snapshot per name in [`crate::text::NoesisTextReadWatch`].
     /// Used to dedupe `NoesisTextChanged` emissions: only push when the
     /// text actually differs from the previous frame's snapshot. Names
@@ -680,6 +760,155 @@ struct InstalledKeyBinding {
     binding: KeyBinding,
 }
 
+/// Process-global monotonic sequence for synthesizing a unique Noesis class name
+/// per mounted panel. Noesis registers reflected classes globally by name, so two
+/// panels (even of the same component set) get distinct classes (hence distinct
+/// `DataContext`s and scopes). One counter for the process is enough; it only ever
+/// increments on the main thread inside [`PanelEntry::build`].
+static PANEL_CLASS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One live mounted panel (see [`NoesisRenderState::panels`]). Field order is the
+/// drop order Noesis requires: the click/keydown subscription maps first (each drop
+/// fires the C++ unsubscribe on a fragment element), then `fragment` (held by the
+/// host panel and holding a `DataContext` ref to `instance`), then `instance`, then
+/// `_class` (whose drop unregisters the class, so it must outlive every live
+/// instance of it).
+struct PanelEntry {
+    /// `BaseButton::Click` subscriptions on fragment-internal elements, keyed by
+    /// `x:Name`, for a [`crate::events::NoesisClickWatch`] placed on this panel
+    /// entity. Resolved against the fragment's private namescope (a host-view
+    /// `FindName` can't see inside it). Drops before `fragment`; same orphan-safety
+    /// as the scene's `click_subs`.
+    click_subs: HashMap<String, ClickSubscription>,
+    /// `UIElement::KeyDown` subscriptions on fragment-internal elements, keyed by
+    /// `x:Name`. Same rules as [`Self::click_subs`].
+    keydown_subs: HashMap<String, KeyDownSubscription>,
+    /// The loaded sub-XAML, its own namescope. `DataContext` set once at build.
+    fragment: FrameworkElement,
+    /// Aggregated plain-VM instance: one synthetic class whose properties are the
+    /// union of the panel entity's bound components.
+    instance: PlainInstance,
+    _class: PlainVmClass,
+    /// Aggregated property names in global index order, for `set_and_notify`.
+    prop_names: Vec<String>,
+    /// UI→Rust writeback sink the `on_set` hook pushes `(global_index, value)`
+    /// onto; drained each frame and routed back to the originating component by
+    /// the per-type [`crate::panel`] writeback systems.
+    set_sink: SetSink,
+    /// Host [`NoesisView`] entity whose scene contains the mount target.
+    host: Entity,
+    /// `x:Name` of the `Panel` in the host scene to mount the fragment into.
+    host_name: String,
+    /// `built_for_uri` stamp of the host scene we are mounted into; `None` until
+    /// mounted (and reset on a host-scene rebuild, forcing a re-mount).
+    mounted_for_uri: Option<String>,
+    /// Last text per watched fragment-scope `x:Name`, to dedupe
+    /// [`crate::panel::NoesisPanelTextChanged`] emissions. Resolved against the
+    /// fragment's *own* namescope (mounted fragments are private to the host).
+    text_snapshots: HashMap<String, String>,
+}
+
+impl PanelEntry {
+    /// Load the sub-XAML, register a uniquely-named synthetic class for the
+    /// aggregated `props`, instantiate, set it as the fragment's `DataContext`.
+    /// `None` if the XAML doesn't resolve or registration/instantiation fails.
+    fn build(
+        uri: &str,
+        host: Entity,
+        host_name: &str,
+        props: &[(String, PlainType)],
+    ) -> Option<Self> {
+        let mut fragment = FrameworkElement::load(uri)?;
+        let seq = PANEL_CLASS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let class_name = format!("DmPanel.{seq}");
+        let prop_names: Vec<String> = props.iter().map(|(n, _)| n.clone()).collect();
+        let kinds: Vec<PlainType> = props.iter().map(|(_, k)| *k).collect();
+        let set_sink: SetSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut builder = PlainVmBuilder::new(&class_name);
+        for (name, kind) in props {
+            builder.add_property(name, *kind);
+        }
+        let sink_for_handler = Arc::clone(&set_sink);
+        let class = builder
+            .on_set(move |idx: u32, value: &PlainValueRef| {
+                let kind = kinds
+                    .get(idx as usize)
+                    .copied()
+                    .unwrap_or(PlainType::BaseComponent);
+                let owned = unbox(kind, value);
+                if let Ok(mut queue) = sink_for_handler.lock() {
+                    queue.push((idx, owned));
+                }
+            })
+            .register()?;
+        let instance = class.create_instance()?;
+        if !instance.set_data_context(&mut fragment) {
+            warn!("UiPanel: set_data_context returned false for fragment {uri:?}");
+        }
+        Some(Self {
+            click_subs: HashMap::new(),
+            keydown_subs: HashMap::new(),
+            fragment,
+            instance,
+            _class: class,
+            prop_names,
+            set_sink,
+            host,
+            host_name: host_name.to_owned(),
+            mounted_for_uri: None,
+            text_snapshots: HashMap::new(),
+        })
+    }
+
+    /// Push changed aggregated properties into the instance (Rust→UI). `pushes`
+    /// carries `(global_index, value)` for only the components that changed.
+    fn apply_pushes(&self, pushes: &[(u32, PlainValue)]) {
+        for (gi, value) in pushes {
+            if let Some(name) = self.prop_names.get(*gi as usize) {
+                let _ = self.instance.set_and_notify(*gi, name, value.clone());
+            }
+        }
+    }
+
+    /// Take pending UI→Rust writebacks (drained each frame, routed to components).
+    fn drain_writebacks(&self) -> Vec<(u32, PlainValue)> {
+        let mut guard = self.set_sink.lock().expect("panel set sink poisoned");
+        if guard.is_empty() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut *guard)
+        }
+    }
+
+    /// Best-effort removal of our fragment from the host panel, so the host
+    /// releases its child ref before this entry drops. No-op if the host scene is
+    /// already gone (its tree drop already released the fragment). Matches by
+    /// pointer identity since sibling panels share the collection and indices
+    /// shift as children come and go.
+    fn unmount(&self, scenes: &HashMap<Entity, SceneInstance>) {
+        let Some(scene) = scenes.get(&self.host) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let Some(host_el) = resolve_named(&content, &self.host_name) else {
+            return;
+        };
+        let Some(mut children) = panel_children(&host_el) else {
+            return;
+        };
+        let target = self.fragment.raw();
+        for i in 0..children.count() {
+            if std::ptr::eq(children.get_raw(i), target) {
+                let _ = children.remove_at(i);
+                break;
+            }
+        }
+    }
+}
+
 /// A persistent, camera-less Noesis view reused to bake label panels to
 /// offscreen textures. Unlike [`SceneInstance`] it owns no intermediate (it
 /// renders straight into a caller-supplied [`wgpu::TextureView`]) and is never
@@ -714,6 +943,9 @@ struct BakeRig {
 ///
 /// Returns [`None`] if any segment along the path fails to resolve.
 fn resolve_named(root: &FrameworkElement, path: &str) -> Option<FrameworkElement> {
+    // The single most-travelled FFI choke point: nearly every per-element apply
+    // resolves a name first, so counting here captures the bulk of engine traffic.
+    record_ffi_hop();
     resolve_scope_path(root, path, |host, name| host.find_name(name))
 }
 
@@ -772,6 +1004,7 @@ impl NoesisRenderState {
             loaded_app_resources_chain: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
+            last_click_target: HashMap::new(),
             last_event_config: HashMap::new(),
             bake_rig: None,
             view_models: HashMap::new(),
@@ -779,6 +1012,9 @@ impl NoesisRenderState {
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
             binding_entries: HashMap::new(),
+            panels: HashMap::new(),
+            failed_fragments: HashSet::new(),
+            lists: HashMap::new(),
             integration_guards: Vec::new(),
         }
     }
@@ -999,6 +1235,7 @@ impl NoesisRenderState {
                 continue;
             };
             if binding.needs_bind(&uri) {
+                record_ffi_hop();
                 if element.set_items_source(binding.collection()) {
                     binding.mark_bound(&uri);
                 } else {
@@ -1048,6 +1285,120 @@ impl NoesisRenderState {
             }
         }
         out
+    }
+
+    /// Reconcile view `entity`'s entity-keyed list `name` (Primitive 2): ensure
+    /// the row class, diff the live collection to `desired` (minimal
+    /// Add/Remove/Update/Move, never a clear), bind the collection to the named
+    /// `ItemsControl` once the scene + element exist (re-binding after a rebuild),
+    /// and reconcile selection (currency). Returns the op tally and any UI-driven
+    /// selection change for the caller to mirror onto a [`Selected`](crate::list::Selected)
+    /// marker. See [`crate::list`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_list_for(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        class: &str,
+        schema: &[(&'static str, crate::plain_vm::PlainType)],
+        desired: &[crate::list::DesiredRow],
+        desired_selected: Option<Entity>,
+        click_queue: &SharedClickQueue,
+    ) -> (crate::list::ListOps, crate::list::SelectionOutcome) {
+        let key = (entity, name.to_owned());
+        let ops = {
+            let binding = self.lists.entry(key.clone()).or_default();
+            binding.reconcile_into(class, schema, desired)
+        };
+
+        // Bind the ItemsSource once the scene + named control exist; re-bind after
+        // a rebuild. Resolve the scene content first so the `scenes` borrow ends
+        // before the `lists` mutable borrow (disjoint fields).
+        let mount = self
+            .scenes
+            .get(&entity)
+            .and_then(|s| s.view.content().map(|c| (c, s.built_for_uri.clone())));
+        if let Some((content, uri)) = mount
+            && self.lists.get(&key).is_some_and(|b| b.needs_bind(&uri))
+        {
+            match resolve_named(&content, name) {
+                Some(mut element) => {
+                    record_ffi_hop();
+                    let bound = {
+                        let binding = self.lists.get_mut(&key).expect("checked above");
+                        let ok = element.set_items_source(binding.collection());
+                        if ok {
+                            binding.mark_bound(&uri);
+                            // Stash a handle on the control so selection is read /
+                            // driven on the live control itself (its own selection
+                            // is the source of truth; no separate CollectionView).
+                            binding.set_control(element.clone_ref());
+                        }
+                        ok
+                    };
+                    if bound {
+                        self.install_row_click_sub(entity, name, &element, click_queue);
+                    } else {
+                        warn!("UiList: element {name:?} is not an ItemsControl; skipped");
+                    }
+                }
+                None => warn!("UiList: x:Name {name:?} not found in scene {uri:?}"),
+            }
+        }
+
+        let selection = self
+            .lists
+            .get_mut(&key)
+            .map_or(crate::list::SelectionOutcome::Unchanged, |b| {
+                b.poll_selection(desired_selected)
+            });
+        (ops, selection)
+    }
+
+    /// Install the one per-row `MouseLeftButtonUp` handler on the `ItemsControl`
+    /// named `name` (Primitive 3, per-row events). Templated rows carry no
+    /// `x:Name`, so instead of subscribing each row we subscribe the control once
+    /// and recover the clicked row from the event: the callback walks the event
+    /// source's `DataContext` to the hidden `__entity` `u64` field (stashed per
+    /// row by [`crate::list`]) and pushes a row-targeted [`UiClicked`] onto the
+    /// shared click queue. Stored in the scene so it drops with the view; re-run
+    /// only when the list (re-)binds.
+    fn install_row_click_sub(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        element: &FrameworkElement,
+        click_queue: &SharedClickQueue,
+    ) {
+        let queue_handle = click_queue.clone();
+        let list_name = name.to_owned();
+        let Some(sub) = subscribe_event(
+            element,
+            RoutedEvent::MouseLeftButtonUp,
+            // Observe only: never consume the click, so the control's own
+            // selection / currency handling still runs.
+            false,
+            move |args: &EventArgs| {
+                if let Some(bits) = args.source_data_context_u64(crate::list::ENTITY_FIELD)
+                    && let Some(row) = Entity::try_from_bits(bits)
+                {
+                    queue_handle.push(entity, row, list_name.clone());
+                }
+                false
+            },
+        ) else {
+            warn!("UiList: element {name:?} is not a UIElement; per-row clicks disabled");
+            return;
+        };
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.row_click_subs.insert(name.to_owned(), sub);
+        }
+    }
+
+    /// Number of live entity-keyed list bindings. Mirrors `self.lists.len()`.
+    #[must_use]
+    pub(crate) fn live_list_count(&self) -> usize {
+        self.lists.len()
     }
 
     /// Whether view `entity` already has a built binding for `(element,
@@ -1170,6 +1521,140 @@ impl NoesisRenderState {
             .get(&key)
             .map(PlainVmEntry::drain_writebacks)
             .unwrap_or_default()
+    }
+
+    /// Reconcile the mounted panel for `entity`: build it on first sight (load
+    /// `uri`, register the aggregated class from `props`, set `DataContext`), push
+    /// the changed aggregated properties (Rust→UI), mount the fragment into the
+    /// host scene's named `Panel` once that scene exists (re-mounting after a
+    /// rebuild), and return any queued two-way edits (UI→Rust) keyed by global
+    /// property index for the caller to route back to the originating components.
+    /// `props` is the frozen aggregated layout; `pushes` are the changed-only
+    /// `(global_index, value)` pairs. See [`crate::panel`].
+    pub(crate) fn sync_panel(
+        &mut self,
+        entity: Entity,
+        uri: &str,
+        host: Entity,
+        host_name: &str,
+        props: &[(String, PlainType)],
+        pushes: &[(u32, PlainValue)],
+    ) -> Vec<(u32, PlainValue)> {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.panels.entry(entity) {
+            match PanelEntry::build(uri, host, host_name, props) {
+                Some(built) => {
+                    slot.insert(built);
+                    self.failed_fragments.remove(&(entity, uri.to_owned()));
+                }
+                None => {
+                    // Vacant slot retries every frame; dedupe the log to once per (entity, uri).
+                    if self.failed_fragments.insert((entity, uri.to_owned())) {
+                        error!(
+                            "UiPanel {entity:?}: fragment {uri:?} failed to load \
+                             (unregistered/typo'd URI, or XAML Noesis rejected outright). \
+                             The panel will not mount until it resolves.",
+                        );
+                    }
+                    return Vec::new();
+                }
+            }
+        }
+
+        if let Some(entry) = self.panels.get(&entity)
+            && !pushes.is_empty()
+        {
+            entry.apply_pushes(pushes);
+        }
+
+        // Mount into the host scene's named Panel once it exists; re-mount after a
+        // host rebuild (the stamp was reset by `teardown_scene`). Resolve the host
+        // content + uri first so the `scenes` borrow ends before the `panels`
+        // mutable borrow (disjoint fields).
+        let mount = self
+            .scenes
+            .get(&host)
+            .and_then(|s| s.view.content().map(|c| (c, s.built_for_uri.clone())));
+        if let Some((content, host_uri)) = mount
+            && let Some(entry) = self.panels.get_mut(&entity)
+            && entry.mounted_for_uri.as_deref() != Some(host_uri.as_str())
+        {
+            match resolve_named(&content, &entry.host_name) {
+                Some(host_el) => match panel_children(&host_el) {
+                    Some(mut children) => {
+                        record_ffi_hop();
+                        if children.add(&entry.fragment).is_some() {
+                            entry.mounted_for_uri = Some(host_uri);
+                        } else {
+                            warn!(
+                                "UiPanel: failed to add fragment to host {:?} for panel {entity:?}",
+                                entry.host_name,
+                            );
+                        }
+                    }
+                    None => warn!(
+                        "UiPanel: host {:?} is not a Panel (panel {entity:?})",
+                        entry.host_name,
+                    ),
+                },
+                None => warn!(
+                    "UiPanel: host {:?} not found in scene {host_uri:?} (panel {entity:?})",
+                    entry.host_name,
+                ),
+            }
+        }
+
+        self.panels
+            .get(&entity)
+            .map(PanelEntry::drain_writebacks)
+            .unwrap_or_default()
+    }
+
+    /// Terminal teardown of a despawned panel entity: unmount its fragment from
+    /// the host panel (so the host releases its child ref) then drop the entry in
+    /// Noesis drop order (fragment → instance → class). Driven by
+    /// [`teardown_removed_panels`] off `RemovedComponents<UiPanel>`. No-op for an
+    /// entity that owns no panel.
+    pub(crate) fn teardown_panel_for(&mut self, entity: Entity) {
+        if let Some(entry) = self.panels.remove(&entity) {
+            entry.unmount(&self.scenes);
+            drop(entry);
+        }
+        self.failed_fragments.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Poll panel `entity`'s watched fragment-scope names, returning `(name,
+    /// text)` for each whose text changed since the last poll. Resolves against
+    /// the fragment's *own* namescope (a mounted fragment's inner names are
+    /// invisible to a host-root lookup) so the watch names are fragment-local
+    /// (optionally `/`-qualified within the fragment). Drives the
+    /// [`crate::panel::NoesisPanelText`] read-back. No-op until the panel is built.
+    pub(crate) fn poll_panel_text_for(
+        &mut self,
+        entity: Entity,
+        watched: &[String],
+    ) -> Vec<(String, String)> {
+        let mut changed = Vec::new();
+        let Some(entry) = self.panels.get_mut(&entity) else {
+            return changed;
+        };
+        entry
+            .text_snapshots
+            .retain(|k, _| watched.iter().any(|w| w == k));
+        if watched.is_empty() {
+            return changed;
+        }
+        for name in watched {
+            let Some(element) = resolve_named(&entry.fragment, name) else {
+                continue;
+            };
+            let current = element.text().unwrap_or_default();
+            if entry.text_snapshots.get(name) == Some(&current) {
+                continue;
+            }
+            entry.text_snapshots.insert(name.clone(), current.clone());
+            changed.push((name.clone(), current));
+        }
+        changed
     }
 
     /// Eagerly register every `(folder, filename)` pair currently in
@@ -1423,6 +1908,7 @@ impl NoesisRenderState {
                 click_subs: HashMap::new(),
                 keydown_subs: HashMap::new(),
                 event_subs: HashMap::new(),
+                row_click_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
                 transform_handles: HashMap::new(),
@@ -1481,6 +1967,16 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope.
+            if let Some(panel) = self.panels.get(&entity) {
+                for (name, &[left, top, right, bottom]) in desired {
+                    let Some(mut element) = resolve_named(&panel.fragment, name) else {
+                        warn!("NoesisLayout: x:Name {name:?} not found in panel fragment");
+                        continue;
+                    };
+                    element.set_margin(left, top, right, bottom);
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -1589,47 +2085,141 @@ impl NoesisRenderState {
     pub(crate) fn sync_click_subscriptions_for(
         &mut self,
         entity: Entity,
-        watch: &[String],
+        entries: &[crate::events::ClickWatchEntry],
         queue: &SharedClickQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Not a view: a NoesisClickWatch may sit on a panel whose fragment
+            // owns a private namescope the host scene can't see.
+            if self.panels.contains_key(&entity) {
+                self.sync_click_subs_panel(entity, entries, queue);
+            }
             return;
         };
 
         // Drop subscriptions that are no longer requested. `retain` runs
         // each entry's drop in place, which fires the C++ unsubscribe.
-        scene.click_subs.retain(|k, _| watch.iter().any(|w| w == k));
+        scene
+            .click_subs
+            .retain(|k, _| entries.iter().any(|e| &e.name == k));
 
-        // Add new subscriptions. Pull the View's content tree once per
-        // frame; `find_name` is cheap but the FFI hop isn't free.
-        let needs_new = watch.iter().any(|n| !scene.click_subs.contains_key(n));
-        if !needs_new {
+        // Re-bind any entry whose target changed (the callback captures the
+        // target by value), and add brand-new ones. The sibling map keyed by
+        // (view, name) records the captured target.
+        let needs_change = entries.iter().any(|e| {
+            let target = e.target.unwrap_or(entity);
+            !scene.click_subs.contains_key(&e.name)
+                || self
+                    .last_click_target
+                    .get(&(entity, e.name.clone()))
+                    .is_none_or(|prev| *prev != target)
+        });
+        if !needs_change {
             return;
         }
         let Some(content) = scene.view.content() else {
             return;
         };
-        for name in watch {
-            if scene.click_subs.contains_key(name) {
+        for entry in entries {
+            let target = entry.target.unwrap_or(entity);
+            if scene.click_subs.contains_key(&entry.name)
+                && self
+                    .last_click_target
+                    .get(&(entity, entry.name.clone()))
+                    .is_some_and(|prev| *prev == target)
+            {
                 continue;
             }
-            let Some(element) = resolve_named(&content, name) else {
+            let Some(element) = resolve_named(&content, &entry.name) else {
                 warn!(
                     "NoesisClickWatch: x:Name {:?} not found in scene {:?}",
-                    name, scene.built_for_uri,
+                    entry.name, scene.built_for_uri,
                 );
                 continue;
             };
             let queue_handle = queue.clone();
-            let captured_name = name.clone();
+            let captured_name = entry.name.clone();
             let Some(sub) = subscribe_click(&element, move || {
-                queue_handle.push(entity, captured_name.clone());
+                queue_handle.push(entity, target, captured_name.clone());
             }) else {
-                warn!("NoesisClickWatch: element {name:?} is not a BaseButton; skipping");
+                warn!(
+                    "NoesisClickWatch: element {:?} is not a BaseButton; skipping",
+                    entry.name
+                );
                 continue;
             };
-            scene.click_subs.insert(name.clone(), sub);
+            scene.click_subs.insert(entry.name.clone(), sub);
+            self.last_click_target
+                .insert((entity, entry.name.clone()), target);
         }
+
+        // Prune this view's target snapshots whose name is no longer watched.
+        self.last_click_target
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
+    }
+
+    /// Panel branch of [`Self::sync_click_subscriptions_for`]: a
+    /// [`crate::events::NoesisClickWatch`] on a mounted `UiPanel` entity. Resolves
+    /// names against the fragment's private namescope, reports the host view as the
+    /// click's `view`, and defaults the target to the panel entity.
+    fn sync_click_subs_panel(
+        &mut self,
+        entity: Entity,
+        entries: &[crate::events::ClickWatchEntry],
+        queue: &SharedClickQueue,
+    ) {
+        let Some(panel) = self.panels.get_mut(&entity) else {
+            return;
+        };
+        let host = panel.host;
+        panel
+            .click_subs
+            .retain(|k, _| entries.iter().any(|e| &e.name == k));
+        let needs_change = entries.iter().any(|e| {
+            let target = e.target.unwrap_or(entity);
+            !panel.click_subs.contains_key(&e.name)
+                || self
+                    .last_click_target
+                    .get(&(entity, e.name.clone()))
+                    .is_none_or(|prev| *prev != target)
+        });
+        if !needs_change {
+            return;
+        }
+        for entry in entries {
+            let target = entry.target.unwrap_or(entity);
+            if panel.click_subs.contains_key(&entry.name)
+                && self
+                    .last_click_target
+                    .get(&(entity, entry.name.clone()))
+                    .is_some_and(|prev| *prev == target)
+            {
+                continue;
+            }
+            let Some(element) = resolve_named(&panel.fragment, &entry.name) else {
+                warn!(
+                    "NoesisClickWatch: x:Name {:?} not found in panel fragment (host {host:?})",
+                    entry.name,
+                );
+                continue;
+            };
+            let queue_handle = queue.clone();
+            let captured_name = entry.name.clone();
+            let Some(sub) = subscribe_click(&element, move || {
+                queue_handle.push(host, target, captured_name.clone());
+            }) else {
+                warn!(
+                    "NoesisClickWatch: element {:?} is not a BaseButton; skipping",
+                    entry.name
+                );
+                continue;
+            };
+            panel.click_subs.insert(entry.name.clone(), sub);
+            self.last_click_target
+                .insert((entity, entry.name.clone()), target);
+        }
+        self.last_click_target
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }
 
     /// Reconcile the active `UIElement::KeyDown` subscription set against
@@ -1645,6 +2235,10 @@ impl NoesisRenderState {
         queue: &SharedKeyDownQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope, not the host scene.
+            if self.panels.contains_key(&entity) {
+                self.sync_keydown_subs_panel(entity, entries, queue);
+            }
             return;
         };
 
@@ -1658,14 +2252,17 @@ impl NoesisRenderState {
         // Cheap: a single FFI ref-bump + delegate add per entry, only on
         // the frames the watch actually changes.
         for entry in entries {
-            // If the existing subscription's swallow set matches the
-            // requested one, leave it alone. We track this on the Bevy
-            // side via a sibling map keyed by name.
+            let target = entry.target.unwrap_or(entity);
+            // If the existing subscription's swallow set + target match the
+            // requested ones, leave it alone. We track this on the Bevy side via
+            // a sibling map keyed by name (the closure captures both by value).
             if scene.keydown_subs.contains_key(&entry.name)
                 && self
                     .last_keydown_swallow
                     .get(&(entity, entry.name.clone()))
-                    .is_some_and(|prev| prev == &entry.swallow)
+                    .is_some_and(|(swallow, prev_target)| {
+                        swallow == &entry.swallow && *prev_target == target
+                    })
             {
                 continue;
             }
@@ -1685,7 +2282,7 @@ impl NoesisRenderState {
             let captured_name = entry.name.clone();
             let swallow = entry.swallow.clone();
             let Some(sub) = subscribe_keydown(&element, move |key: Key| {
-                queue_handle.push(entity, captured_name.clone(), key);
+                queue_handle.push(entity, target, captured_name.clone(), key);
                 swallow.contains(&key)
             }) else {
                 warn!(
@@ -1695,12 +2292,73 @@ impl NoesisRenderState {
                 continue;
             };
             scene.keydown_subs.insert(entry.name.clone(), sub);
-            self.last_keydown_swallow
-                .insert((entity, entry.name.clone()), entry.swallow.clone());
+            self.last_keydown_swallow.insert(
+                (entity, entry.name.clone()),
+                (entry.swallow.clone(), target),
+            );
         }
 
         // Prune this view's swallow snapshots whose name is no longer watched
         // (leave other views' entries intact).
+        self.last_keydown_swallow
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
+    }
+
+    /// Panel branch of [`Self::sync_keydown_subscriptions_for`]: a
+    /// [`crate::events::NoesisKeyDownWatch`] on a mounted `UiPanel` entity, resolved
+    /// against the fragment's private namescope. Reports the host view; default
+    /// target is the panel entity.
+    fn sync_keydown_subs_panel(
+        &mut self,
+        entity: Entity,
+        entries: &[crate::events::KeyDownWatchEntry],
+        queue: &SharedKeyDownQueue,
+    ) {
+        let Some(panel) = self.panels.get_mut(&entity) else {
+            return;
+        };
+        let host = panel.host;
+        panel
+            .keydown_subs
+            .retain(|k, _| entries.iter().any(|e| e.name == *k));
+        for entry in entries {
+            let target = entry.target.unwrap_or(entity);
+            if panel.keydown_subs.contains_key(&entry.name)
+                && self
+                    .last_keydown_swallow
+                    .get(&(entity, entry.name.clone()))
+                    .is_some_and(|(swallow, prev_target)| {
+                        swallow == &entry.swallow && *prev_target == target
+                    })
+            {
+                continue;
+            }
+            let Some(element) = resolve_named(&panel.fragment, &entry.name) else {
+                warn!(
+                    "NoesisKeyDownWatch: x:Name {:?} not found in panel fragment (host {host:?})",
+                    entry.name,
+                );
+                continue;
+            };
+            let queue_handle = queue.clone();
+            let captured_name = entry.name.clone();
+            let swallow = entry.swallow.clone();
+            let Some(sub) = subscribe_keydown(&element, move |key: Key| {
+                queue_handle.push(host, target, captured_name.clone(), key);
+                swallow.contains(&key)
+            }) else {
+                warn!(
+                    "NoesisKeyDownWatch: element {:?} is not a UIElement; skipping",
+                    entry.name
+                );
+                continue;
+            };
+            panel.keydown_subs.insert(entry.name.clone(), sub);
+            self.last_keydown_swallow.insert(
+                (entity, entry.name.clone()),
+                (entry.swallow.clone(), target),
+            );
+        }
         self.last_keydown_swallow
             .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }
@@ -1734,13 +2392,15 @@ impl NoesisRenderState {
             let evname = entry.event.as_str();
             let key = (entry.name.clone(), evname);
 
-            // Leave an existing subscription alone iff its captured flags still
-            // match the requested ones (sibling map keyed by view + name + event).
+            let target = entry.target.unwrap_or(entity);
+            // Leave an existing subscription alone iff its captured flags + target
+            // still match the requested ones (sibling map keyed by view + name +
+            // event; the callback captures all three by value).
             if scene.event_subs.contains_key(&key)
                 && self
                     .last_event_config
                     .get(&(entity, entry.name.clone(), evname))
-                    .is_some_and(|prev| *prev == (entry.mark_handled, entry.handled_too))
+                    .is_some_and(|prev| *prev == (entry.mark_handled, entry.handled_too, target))
             {
                 continue;
             }
@@ -1768,7 +2428,13 @@ impl NoesisRenderState {
                 entry.handled_too,
                 move |args: &EventArgs| {
                     let snapshot = RoutedEventSnapshot::capture(args);
-                    queue_handle.push(entity, captured_name.clone(), captured_event, snapshot);
+                    queue_handle.push(
+                        entity,
+                        target,
+                        captured_name.clone(),
+                        captured_event,
+                        snapshot,
+                    );
                     mark_handled
                 },
             ) else {
@@ -1779,11 +2445,11 @@ impl NoesisRenderState {
                 continue;
             };
 
-            // Replace any stale sub (flag change); drop runs the C++ unsubscribe.
+            // Replace any stale sub (flag/target change); drop runs the C++ unsubscribe.
             scene.event_subs.insert(key, sub);
             self.last_event_config.insert(
                 (entity, entry.name.clone(), evname),
-                (entry.mark_handled, entry.handled_too),
+                (entry.mark_handled, entry.handled_too, target),
             );
         }
 
@@ -2057,6 +2723,21 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope (host
+            // FindName can't see inside).
+            if let Some(panel) = self.panels.get(&entity) {
+                for (name, points) in desired {
+                    let Some(mut element) = resolve_named(&panel.fragment, name) else {
+                        warn!("NoesisGeometry: x:Name {name:?} not found in panel fragment");
+                        continue;
+                    };
+                    if !element.set_path_points(points) {
+                        warn!(
+                            "NoesisGeometry: element {name:?} is not a Path (or < 2 points); skipped"
+                        );
+                    }
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2220,6 +2901,17 @@ impl NoesisRenderState {
             return;
         };
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope.
+            if let Some(panel) = self.panels.get(&entity) {
+                match resolve_named(&panel.fragment, name) {
+                    Some(mut element) => {
+                        if !element.focus() {
+                            warn!("NoesisFocus: element {name:?} refused focus (non-focusable?)");
+                        }
+                    }
+                    None => warn!("NoesisFocus: x:Name {name:?} not found in panel fragment"),
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2249,6 +2941,24 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope.
+            if let Some(panel) = self.panels.get(&entity) {
+                for m in moves {
+                    let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
+                        warn!(
+                            "NoesisFocusControl: move-from x:Name {:?} not found in panel fragment",
+                            m.from,
+                        );
+                        continue;
+                    };
+                    if !element.move_focus(m.direction, m.wrapped) {
+                        warn!(
+                            "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
+                            m.direction, m.wrapped, m.from,
+                        );
+                    }
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2282,6 +2992,24 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope.
+            if let Some(panel) = self.panels.get(&entity) {
+                for e in engages {
+                    let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
+                        warn!(
+                            "NoesisFocusControl: engage x:Name {:?} not found in panel fragment",
+                            e.name,
+                        );
+                        continue;
+                    };
+                    if !element.focus_engage(e.engage) {
+                        warn!(
+                            "NoesisFocusControl: element {:?} refused focus(engage={})",
+                            e.name, e.engage,
+                        );
+                    }
+                }
+            }
             return;
         };
         let Some(content) = scene.view.content() else {
@@ -2511,6 +3239,7 @@ impl NoesisRenderState {
                 );
                 continue;
             };
+            record_ffi_hop();
             if value.write_to(&mut element, property) {
                 // Update the snapshot eagerly so the read pass doesn't emit a
                 // phantom change for a write we just issued ourselves.
@@ -2550,6 +3279,7 @@ impl NoesisRenderState {
             let Some(element) = resolve_named(&content, &watch.name) else {
                 continue;
             };
+            record_ffi_hop();
             let Some(current) = watch.kind.read_from(&element, &watch.property) else {
                 continue;
             };
@@ -2573,6 +3303,23 @@ impl NoesisRenderState {
         desired: &HashMap<String, crate::transforms::TransformSpec>,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Panel entity: resolve in the fragment's private namescope. Write-only:
+            // the +1 RenderTransform handle isn't retained (panels have no transform
+            // poll), but Noesis keeps its own ref.
+            if let Some(panel) = self.panels.get(&entity) {
+                for (name, spec) in desired {
+                    let Some(mut element) = resolve_named(&panel.fragment, name) else {
+                        warn!("NoesisTransform: x:Name {name:?} not found in panel fragment");
+                        continue;
+                    };
+                    let transform = CompositeTransform::new(spec.to_fields());
+                    if !element.set_render_transform(&transform) {
+                        warn!(
+                            "NoesisTransform: {name:?} has no RenderTransform (not a UIElement?) in panel fragment"
+                        );
+                    }
+                }
+            }
             return;
         };
         // Drop handles for names no longer requested; releasing each handle's +1
@@ -3466,6 +4213,11 @@ impl NoesisRenderState {
                 binding.reset_bind();
             }
         }
+        for ((ent, _), binding) in &mut self.lists {
+            if *ent == entity {
+                binding.reset_bind();
+            }
+        }
         for ((ent, _), entry) in &mut self.plain_vms {
             if *ent == entity {
                 entry.reset_attach();
@@ -3477,6 +4229,14 @@ impl NoesisRenderState {
         for ((ent, _, _), entry) in &mut self.binding_entries {
             if *ent == entity {
                 entry.reset_bind();
+            }
+        }
+        // Panels mounted into *this* view's scene lose their host child on the
+        // rebuild; reset their stamp so the next `sync_panel` re-mounts them into
+        // the fresh tree. (Keyed by host, not by the scene entity.)
+        for entry in self.panels.values_mut() {
+            if entry.host == entity {
+                entry.mounted_for_uri = None;
             }
         }
         let Some(mut scene) = self.scenes.remove(&entity) else {
@@ -3497,6 +4257,52 @@ impl NoesisRenderState {
             self.teardown_scene(entity);
         }
     }
+
+    /// Number of live scene instances. Mirrors `self.scenes.len()`; surfaced
+    /// through [`NoesisDiagnostics`](crate::diagnostics::NoesisDiagnostics::live_scenes)
+    /// so a despawn-leak test can assert the side table drains back to baseline.
+    #[must_use]
+    pub(crate) fn live_scene_count(&self) -> usize {
+        self.scenes.len()
+    }
+
+    /// Number of live mounted panels. Mirrors `self.panels.len()`; surfaced
+    /// through [`NoesisDiagnostics`](crate::diagnostics::NoesisDiagnostics::live_panels)
+    /// so a despawn-reap test can assert the panel table drains back to baseline.
+    #[must_use]
+    pub(crate) fn live_panel_count(&self) -> usize {
+        self.panels.len()
+    }
+
+    /// Fully reap every Noesis resource owned on behalf of `entity` (its scene
+    /// *and* every per-entity side-table entry) when the view (or, later, panel)
+    /// is despawned or loses its [`NoesisView`]. Unlike [`Self::teardown_scene`]
+    /// (a *rebuild* step that drops only the scene and leaves the view models /
+    /// collections / bindings parked for re-attach), this is the *terminal*
+    /// teardown: it drops the owners too, so nothing leaks once the entity is gone.
+    ///
+    /// Drop order mirrors [`Drop`]: the scene (`View`) first, because it holds
+    /// refs to the VM `ClassInstance`s and `ObservableCollection`s set as its
+    /// `DataContext`/`ItemsSource`; only once those refs release is it safe to
+    /// drop the owners (or a live View-held instance would outlive the
+    /// `ClassRegistration` that unregisters its class → use-after-free). The
+    /// scratch dedupe tables are keyed by entity and just dropped. No-op for an
+    /// entity we never tracked.
+    pub(crate) fn teardown_for(&mut self, entity: Entity) {
+        self.teardown_scene(entity);
+        self.view_models.remove(&entity);
+        self.items_sources.retain(|(ent, _), _| *ent != entity);
+        self.lists.retain(|(ent, _), _| *ent != entity);
+        self.plain_vms.retain(|(ent, _), _| *ent != entity);
+        self.command_hosts.remove(&entity);
+        self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
+        self.last_keydown_swallow
+            .retain(|(ent, _), _| *ent != entity);
+        self.last_click_target.retain(|(ent, _), _| *ent != entity);
+        self.last_event_config
+            .retain(|(ent, _, _), _| *ent != entity);
+        self.scenes_built_this_frame.remove(&entity);
+    }
 }
 
 impl Drop for NoesisRenderState {
@@ -3516,7 +4322,14 @@ impl Drop for NoesisRenderState {
         self.teardown_all_scenes();
         self.view_models.clear();
         self.items_sources.clear();
+        // Lists after the scenes (the View held ItemsSource refs to each
+        // collection); each binding drops collection → instances → registration.
+        self.lists.clear();
         self.plain_vms.clear();
+        // Panels after the scenes: the host views are now torn down, so each host
+        // has already released its child ref; clearing just drops our handles in
+        // field order (fragment → instance → class).
+        self.panels.clear();
         self.command_hosts.clear();
         self.binding_entries.clear();
         self.teardown_bake_rig();
@@ -3812,6 +4625,58 @@ fn ensure_noesis_scene(
     }
 }
 
+/// Reap the Noesis state of any view whose [`NoesisView`] was removed since last
+/// frame, whether the whole entity was despawned or just the component dropped.
+/// This is the crate's only teardown-on-removal hook: without it a despawned view
+/// leaks its (`!Send`) scene + side-table entries for the life of the process.
+/// Runs on the main thread (the `NonSendMut` forces it there, where Noesis lives)
+/// at the head of [`NoesisSet::Ensure`], before [`ensure_noesis_scene`] rebuilds
+/// the survivors.
+#[allow(clippy::needless_pass_by_value)]
+fn teardown_removed_views(
+    mut removed: RemovedComponents<NoesisView>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        state.teardown_for(entity);
+    }
+}
+
+/// Reap the Noesis state of any panel whose [`UiPanel`](crate::panel::UiPanel)
+/// was removed (entity despawned or component dropped). Panels are distinct
+/// entities from their host [`NoesisView`], so the view removal hook does not see
+/// them; this is their dedicated reap. Runs main-thread (the `NonSendMut` pins it)
+/// at the head of [`NoesisSet::Ensure`], before the survivors are reconciled.
+#[allow(clippy::needless_pass_by_value)]
+fn teardown_removed_panels(
+    mut removed: RemovedComponents<crate::panel::UiPanel>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        state.teardown_panel_for(entity);
+    }
+}
+
+/// Stamp the start of the [`NoesisSet::Apply`] phase. Pairs with
+/// [`apply_timer_end`]; see [`NoesisApplyTimer`].
+fn apply_timer_start(mut timer: ResMut<NoesisApplyTimer>) {
+    timer.started = Some(std::time::Instant::now());
+}
+
+/// Close the [`NoesisSet::Apply`] timing window opened by [`apply_timer_start`],
+/// recording the elapsed wall-time into [`NoesisApplyTimer::last`].
+fn apply_timer_end(mut timer: ResMut<NoesisApplyTimer>) {
+    if let Some(start) = timer.started.take() {
+        timer.last = start.elapsed();
+    }
+}
+
 /// Re-apply each view's per-frame live settings (PPAA + DPI scale). Cheap:
 /// compares against the last-applied value and only fires an FFI call on change.
 #[allow(clippy::needless_pass_by_value)]
@@ -4070,6 +4935,7 @@ impl Plugin for NoesisRenderPlugin {
         // Main-world driving pipeline: all on the main thread (the one thread
         // Bevy pins reliably), satisfying Noesis's thread-affinity contract.
         // Bridge plugins slot their per-view apply systems into `NoesisSet::Apply`.
+        app.init_resource::<NoesisApplyTimer>();
         app.configure_sets(
             PostUpdate,
             (
@@ -4089,8 +4955,23 @@ impl Plugin for NoesisRenderPlugin {
                     sync_texture_provider_map,
                 )
                     .in_set(NoesisSet::Sync),
+                // Reap before rebuild; timer_start at the tail of Ensure brackets
+                // the whole Apply set (the four phases are `.chain()`-ed above).
+                teardown_removed_views
+                    .in_set(NoesisSet::Ensure)
+                    .before(ensure_noesis_scene),
+                teardown_removed_panels
+                    .in_set(NoesisSet::Ensure)
+                    .before(ensure_noesis_scene),
                 ensure_noesis_scene.in_set(NoesisSet::Ensure),
+                apply_timer_start
+                    .in_set(NoesisSet::Ensure)
+                    .after(ensure_noesis_scene),
                 (apply_live_scene_flags, apply_noesis_input).in_set(NoesisSet::Apply),
+                // Timer end leads Drive, closing the window after every Apply system.
+                apply_timer_end
+                    .in_set(NoesisSet::Drive)
+                    .before(drive_noesis_frame),
                 drive_noesis_frame.in_set(NoesisSet::Drive),
             ),
         );

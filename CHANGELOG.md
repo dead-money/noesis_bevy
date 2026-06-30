@@ -6,20 +6,47 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-29
+
 ### Added
 
-- **Scope-qualified element names.** Every bridge that targets an element by
-  `x:Name` (text, dependency properties, visibility, geometry, transforms,
-  brushes, styles, classes, focus, items, command/view-model `DataContext`
-  attach, binding targets and `ElementName` sources, …) now accepts a
-  `/`-separated path such as `"MainMenu/PlayButton"`. Each segment but the last
-  names a composed control to descend into; the final segment resolves inside
-  that control's own namescope. This lifts the long-standing limitation that a
-  root-level `FindName` cannot see the names declared inside a composed
-  `UserControl` (each such control owns a private namescope). Plain, unqualified
-  names are unchanged and resolve exactly as before. Read-backs echo the original
-  qualified string you supplied, so two controls that each contain an
-  `"OkButton"` stay distinguishable.
+- **Scope-qualified element names.** Bridges that target an element by `x:Name`
+  now accept a `/`-separated path (`"MainMenu/PlayButton"`) to reach inside a
+  composed control's private namescope. Plain names are unchanged; read-backs echo
+  the qualified string.
+
+- **Entity-driven UI API.** A Bevy entity is the unit of UI: `UiPanel` (its bound
+  `#[derive(NoesisViewModel)]` components are its `DataContext`), a query-backed
+  `UiList` (rows are entities, reconciled by `Entity`; selection round-trips as a
+  `Selected` marker), and UI events as `EntityEvent`s (`On<UiClicked>`) targeting
+  the entity. See `examples/ecs_ui.rs`. Adds despawn teardown and `ffi_hops` /
+  apply-time diagnostics.
+
+- **Panel-entity input watches.** `NoesisClickWatch` / `NoesisKeyDownWatch` on a
+  `UiPanel` entity resolve `x:Name`s inside the panel's own fragment and fire
+  `UiClicked` / `UiKeyDown` targeting the panel entity.
+
+- **Panel-entity write bridges.** `NoesisGeometry`, `NoesisLayout`, `NoesisFocus`,
+  `NoesisFocusControl`, and `NoesisTransform` on a `UiPanel` entity now resolve
+  `x:Name`s inside the panel's fragment (like the input watches), so those panels
+  can live in their own mounted fragments.
+
+- **Deferred panel seal.** `UiPanel::deferred_seal()` and the `SealPanel` marker
+  let a panel whose bound components come from several modules across frames freeze
+  its `DataContext` on demand instead of on first sight. The default and
+  `static_context()` are unchanged.
+
+- **Loud fragment load failures.** A `UiPanel` fragment whose URI can't load now
+  logs a deduped Bevy `error!` with the panel entity and URI, instead of a silent
+  empty slot. (Malformed-but-loadable fragments still get only Noesis's own parser
+  warning.)
+
+- **`#[noesis(rename = "…")]`** field attribute: bind a snake_case field to a
+  different XAML property name (`master_volume` → `{Binding MasterVolume}`).
+
+- **`visibility::{VISIBLE, COLLAPSED, HIDDEN}`** consts for the show/hide pattern:
+  bind a `String` field to `Visibility="{Binding …}"`; no `bool`-to-`Visibility`
+  converter needed.
 
 ## [0.10.0] - 2026-06-29
 

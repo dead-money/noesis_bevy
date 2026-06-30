@@ -11,9 +11,22 @@
 //! | `bool`                 | `Bool`               |
 //! | `String`               | `String`             |
 //!
+//! Two struct shapes are supported:
+//!
+//! * **Named struct**: each field maps to a property named after the *field*
+//!   (`title: String` → `{Binding title}`). `#[noesis(skip)]` excludes a field;
+//!   `#[noesis(rename = "Title")]` binds a `snake_case` field to a different XAML
+//!   property name (e.g. `PascalCase`).
+//! * **Newtype tuple struct**: a single-field tuple struct
+//!   (`struct Health(f32);`) maps to one property named after the *type*
+//!   (`{Binding Health}`). This is the shape the `UiPanel` primitive expects:
+//!   spawn `Health(100.0)` on a panel entity and bind `{Binding Health}`.
+//!
 //! Unsupported field types are a compile error; annotate them `#[noesis(skip)]`
 //! to exclude them from the view model. The Noesis type name defaults to the
-//! struct's identifier; override with `#[noesis(name = "...")]`.
+//! struct's identifier; override with `#[noesis(name = "...")]`. A newtype's
+//! property name defaults to the type identifier; override with
+//! `#[noesis(as = "Name")]`.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -105,6 +118,92 @@ fn type_name_override(attrs: &[syn::Attribute]) -> Option<String> {
     name
 }
 
+/// Read a field-level `#[noesis(rename = "...")]` property-name override, so a
+/// snake_case Rust field can bind to a different (e.g. PascalCase) XAML property.
+fn field_rename(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut name = None;
+    for attr in attrs {
+        if attr.path().is_ident("noesis") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    let value = meta.value()?;
+                    let lit: LitStr = value.parse()?;
+                    name = Some(lit.value());
+                }
+                Ok(())
+            });
+        }
+    }
+    name
+}
+
+/// Read a `#[noesis(as = "Name")]` property-name override (newtype shape). `as`
+/// is a Rust keyword, so it never parses as a `syn` meta path; we scan the
+/// attribute's raw tokens for the `as = "<lit>"` triple instead.
+fn prop_name_override(attrs: &[syn::Attribute]) -> Option<String> {
+    use proc_macro2::TokenTree;
+    for attr in attrs {
+        if !attr.path().is_ident("noesis") {
+            continue;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let mut trees = list.tokens.clone().into_iter().peekable();
+        while let Some(tree) = trees.next() {
+            // keywords are plain idents at the token level, so `as` matches here
+            let TokenTree::Ident(ident) = &tree else {
+                continue;
+            };
+            if *ident != "as" {
+                continue;
+            }
+            if let Some(TokenTree::Punct(p)) = trees.peek() {
+                if p.as_char() == '=' {
+                    trees.next();
+                    if let Some(TokenTree::Literal(lit)) = trees.next() {
+                        if let Ok(s) = syn::parse_str::<LitStr>(&lit.to_string()) {
+                            return Some(s.value());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Append one resolved property's codegen to the running collections.
+fn push_field(
+    prop_entries: &mut Vec<proc_macro2::TokenStream>,
+    snapshot_pushes: &mut Vec<proc_macro2::TokenStream>,
+    apply_arms: &mut Vec<proc_macro2::TokenStream>,
+    index: &mut u32,
+    name_str: &str,
+    kind: FieldKind,
+) {
+    let FieldKind {
+        plain_type,
+        snapshot,
+        apply,
+    } = kind;
+    let i = *index;
+    prop_entries.push(quote!((#name_str, #plain_type)));
+    snapshot_pushes.push(snapshot);
+    apply_arms.push(quote!(#i => { #apply }));
+    *index += 1;
+}
+
+fn unsupported_type_error(span: proc_macro2::Span) -> TokenStream {
+    syn::Error::new(
+        span,
+        "NoesisViewModel: unsupported field type (expected f32, f64, i32, u32, bool, or String). \
+         Annotate the field `#[noesis(skip)]` to exclude it.",
+    )
+    .to_compile_error()
+    .into()
+}
+
 #[proc_macro_derive(NoesisViewModel, attributes(noesis))]
 pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -113,17 +212,7 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
     let type_name = type_name_override(&input.attrs).unwrap_or_else(|| struct_ident.to_string());
 
     let fields = match &input.data {
-        Data::Struct(s) => match &s.fields {
-            Fields::Named(named) => &named.named,
-            _ => {
-                return syn::Error::new(
-                    input.span(),
-                    "NoesisViewModel requires a struct with named fields",
-                )
-                .to_compile_error()
-                .into();
-            }
-        },
+        Data::Struct(s) => &s.fields,
         _ => {
             return syn::Error::new(input.span(), "NoesisViewModel can only derive on a struct")
                 .to_compile_error()
@@ -136,31 +225,64 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
     let mut apply_arms = Vec::new();
     let mut index: u32 = 0;
 
-    for field in fields {
-        if is_skipped(&field.attrs) {
-            continue;
+    match fields {
+        Fields::Named(named) => {
+            for field in &named.named {
+                if is_skipped(&field.attrs) {
+                    continue;
+                }
+                let ident = field.ident.as_ref().expect("named field");
+                let access = quote!(#ident);
+                let name_str = field_rename(&field.attrs).unwrap_or_else(|| ident.to_string());
+                let Some(kind) = field_kind(&access, &field.ty) else {
+                    return unsupported_type_error(field.ty.span());
+                };
+                push_field(
+                    &mut prop_entries,
+                    &mut snapshot_pushes,
+                    &mut apply_arms,
+                    &mut index,
+                    &name_str,
+                    kind,
+                );
+            }
         }
-        let ident = field.ident.as_ref().expect("named field");
-        let ident_tokens = quote!(#ident);
-        let name_str = ident.to_string();
-        let Some(kind) = field_kind(&ident_tokens, &field.ty) else {
+        // Newtype: one property named after the *type* (override: `#[noesis(as)]`).
+        Fields::Unnamed(unnamed) => {
+            if unnamed.unnamed.len() != 1 {
+                return syn::Error::new(
+                    input.span(),
+                    "NoesisViewModel on a tuple struct requires exactly one field \
+                     (a newtype, e.g. `struct Health(f32);`)",
+                )
+                .to_compile_error()
+                .into();
+            }
+            let field = &unnamed.unnamed[0];
+            let zero = syn::Index::from(0);
+            let access = quote!(#zero);
+            let name_str =
+                prop_name_override(&input.attrs).unwrap_or_else(|| struct_ident.to_string());
+            let Some(kind) = field_kind(&access, &field.ty) else {
+                return unsupported_type_error(field.ty.span());
+            };
+            push_field(
+                &mut prop_entries,
+                &mut snapshot_pushes,
+                &mut apply_arms,
+                &mut index,
+                &name_str,
+                kind,
+            );
+        }
+        Fields::Unit => {
             return syn::Error::new(
-                field.ty.span(),
-                "NoesisViewModel: unsupported field type (expected f32, f64, i32, u32, bool, or \
-                 String). Annotate the field `#[noesis(skip)]` to exclude it.",
+                input.span(),
+                "NoesisViewModel requires a struct with fields (named or a single-field newtype)",
             )
             .to_compile_error()
             .into();
-        };
-        let FieldKind {
-            plain_type,
-            snapshot,
-            apply,
-        } = kind;
-        prop_entries.push(quote!((#name_str, #plain_type)));
-        snapshot_pushes.push(snapshot);
-        apply_arms.push(quote!(#index => { #apply }));
-        index += 1;
+        }
     }
 
     let expanded = quote! {
