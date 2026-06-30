@@ -150,35 +150,10 @@ pub const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/
        row's MouseLeftButtonUp still bubbles out as a per-row UiClicked. -->
   <Border Grid.Row="2" Background="#FF161B22" Margin="12" CornerRadius="6">
     <ListBox x:Name="Inventory" Background="Transparent" BorderThickness="0">
-      <!-- A bare ListBox/ListBoxItem has no ControlTemplate without the SDK theme
-           (it would render as magenta placeholders), so the example supplies a
-           minimal one: a flat container and a row Border that turns blue on
-           IsSelected. This keeps `cargo run --example ecs_ui` selectable with no
-           theme. -->
-      <ListBox.Template>
-        <ControlTemplate TargetType="ListBox">
-          <ItemsPresenter Margin="6"/>
-        </ControlTemplate>
-      </ListBox.Template>
-      <ListBox.ItemContainerStyle>
-        <Style TargetType="ListBoxItem">
-          <Setter Property="Template">
-            <Setter.Value>
-              <ControlTemplate TargetType="ListBoxItem">
-                <Border x:Name="Bd" Background="#FF222B36" CornerRadius="4"
-                        Margin="0,3" Padding="10,6">
-                  <ContentPresenter/>
-                </Border>
-                <ControlTemplate.Triggers>
-                  <Trigger Property="IsSelected" Value="True">
-                    <Setter TargetName="Bd" Property="Background" Value="#FF2D6DF0"/>
-                  </Trigger>
-                </ControlTemplate.Triggers>
-              </ControlTemplate>
-            </Setter.Value>
-          </Setter>
-        </Style>
-      </ListBox.ItemContainerStyle>
+      <!-- The SDK theme (loaded by default; see `main`) skins the ListBox and its
+           ListBoxItems, including the selection highlight. A bare ListBox without a
+           theme renders as magenta "no template" placeholders, which is why the
+           example defaults to a theme rather than hand-rolling control chrome. -->
       <ListBox.ItemTemplate>
         <DataTemplate>
           <StackPanel Orientation="Horizontal">
@@ -472,7 +447,12 @@ fn main() {
         noesis_runtime::set_license(&name, &key);
     }
 
-    let theme = std::env::var("NOESIS_ECS_UI_THEME").ok();
+    // Default to the DarkBlue SDK theme so the Buttons and the inventory ListBox
+    // render skinned (and the ListBox highlights its selected row). Override with a
+    // different NOESIS_ECS_UI_THEME, or set it empty to run theme-less (magenta
+    // placeholder chrome).
+    let theme =
+        Some(std::env::var("NOESIS_ECS_UI_THEME").unwrap_or_else(|_| "DarkBlue".to_string()));
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
