@@ -42,17 +42,7 @@ const FRAG_XAML: &str = r##"<TextBox xmlns="http://schemas.microsoft.com/winfx/2
 const KEY_AT: usize = 40;
 const EXIT_AT: usize = 80;
 
-// IGNORED: surfaces a real gap, not a flaky harness. Headless keydown routing
-// works for a focused *view-scene* element (see `headless_app_focus_predict_remove`),
-// but here a `KeyDown` injected at a *focused fragment* element produces no
-// `UiKeyDown`, so one of the links in the keydown-into-a-mounted-fragment chain
-// (NoesisFocus→fragment focus via F6, NoesisKeyDownWatch→fragment subscribe via F4,
-// or keyboard-focus routing into a hosted child) does not complete. The click-in-
-// fragment path is verified (`headless_panel_click`); this is kept as the spec for
-// the keydown path until that chain is fixed. Not currently blocking (the console,
-// the keydown consumer, lives in the host scene).
 #[test]
-#[ignore = "keydown-into-focused-fragment chain incomplete; see comment (F4/F6 follow-up)"]
 fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
     noesis_license_from_env();
 

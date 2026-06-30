@@ -6,6 +6,13 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Focus / keydown into mounted fragments.** A `NoesisFocus` set on a `UiPanel`
+  entity now re-applies once the panel's fragment mounts, instead of applying only
+  on the frame the component was set (before the fragment existed) and never
+  retrying. This makes keyed input into a focused fragment element work end to end.
+
 ### Added
 
 - **Loud lenient-parse fragment failures.** A malformed-but-loadable `UiPanel`

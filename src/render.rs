@@ -506,6 +506,11 @@ pub(crate) struct NoesisRenderState {
     /// bridge's apply against the current component state. Cleared at the top of
     /// each Ensure pass.
     scenes_built_this_frame: HashSet<Entity>,
+    /// Panel entities whose fragment first mounted into its host this frame. The
+    /// focus bridge ORs this so a once-set `NoesisFocus` on a panel still lands
+    /// once the fragment exists (a panel has no scene, so `scenes_built_this_frame`
+    /// never covers it). Cleared alongside `scenes_built_this_frame`.
+    panels_mounted_this_frame: HashSet<Entity>,
     /// One-time flag for `SetFontFallbacks`/`SetFontDefaultProperties`;
     /// must fire AFTER Bevy has loaded at least one font into
     /// `SharedFontMap`, because Noesis's `SetFontFallbacks` eagerly runs
@@ -999,6 +1004,7 @@ impl NoesisRenderState {
             registered_textures: Some(registered_textures),
             scenes: HashMap::new(),
             scenes_built_this_frame: HashSet::new(),
+            panels_mounted_this_frame: HashSet::new(),
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
             loaded_app_resources_chain: None,
@@ -1614,6 +1620,7 @@ impl NoesisRenderState {
                         record_ffi_hop();
                         if children.add(&entry.fragment).is_some() {
                             entry.mounted_for_uri = Some(host_uri);
+                            self.panels_mounted_this_frame.insert(entity);
                         } else {
                             warn!(
                                 "UiPanel: failed to add fragment to host {:?} for panel {entity:?}",
@@ -1965,6 +1972,13 @@ impl NoesisRenderState {
     /// current component state. See [`Self::scenes_built_this_frame`].
     pub(crate) fn scene_rebuilt_this_frame(&self, entity: Entity) -> bool {
         self.scenes_built_this_frame.contains(&entity)
+    }
+
+    /// Whether `entity`'s panel fragment first mounted this frame. The focus bridge
+    /// ORs this so a once-set panel `NoesisFocus` re-applies once the fragment
+    /// exists. See [`Self::panels_mounted_this_frame`].
+    pub(crate) fn panel_mounted_this_frame(&self, entity: Entity) -> bool {
+        self.panels_mounted_this_frame.contains(&entity)
     }
 
     /// Apply view `entity`'s desired element visibility (`x:Name → visible`).
@@ -4650,6 +4664,7 @@ fn ensure_noesis_scene(
     // Reset the per-frame rebuild set before this pass repopulates it; the
     // Apply systems that follow read it within the same frame.
     state.scenes_built_this_frame.clear();
+    state.panels_mounted_this_frame.clear();
     for (entity, config) in &views {
         state.ensure_scene(entity, config);
     }
