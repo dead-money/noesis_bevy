@@ -259,6 +259,20 @@ fn collect_panel_field<T: NoesisViewModel + Component>(
     for (mut agg, field) in &mut panels {
         if !agg.built {
             agg.note_present(tid, reg, T::noesis_properties());
+        } else if !agg.slots.contains_key(&tid) {
+            // The panel's aggregated DataContext class is registered once, when the
+            // panel first reconciles (`freeze`), so a bound component inserted after
+            // that can't be added to it — its `{Binding}`s would silently stay empty.
+            // `Ref<T>` in the query means we only iterate panels that actually have
+            // `T`, so reaching here means `T` is genuinely a late addition. Make it
+            // loud instead of dropping it on the floor in `take_pushes`.
+            bevy::log::warn_once!(
+                "NoesisPanel: bound component `{}` was inserted after the panel's \
+                 DataContext froze on its first reconcile; its fields are not bound. \
+                 Insert every bound component before the panel's first frame (e.g. in \
+                 the same spawn bundle).",
+                std::any::type_name::<T>(),
+            );
         }
         if field.is_changed() {
             agg.set_pending(tid, field.noesis_snapshot());
