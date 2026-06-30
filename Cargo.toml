@@ -55,6 +55,9 @@ wgpu = "27.0.1"
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
+# Capture `error!` events in the F5b parse-warning test (resolve to Bevy's versions).
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [lints.rust]
 unsafe_code = "forbid"

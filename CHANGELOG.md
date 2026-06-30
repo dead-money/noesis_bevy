@@ -6,6 +6,14 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Loud lenient-parse fragment failures.** A malformed-but-loadable `UiPanel`
+  fragment (a tag mismatch loads as a partial tree with only a Noesis parser
+  warning) now logs a Bevy `error!` naming the panel entity, URI, and the warning
+  (with line/column), instead of a silent half-render. Complements the 0.11.0
+  hard-load-failure error.
+
 ## [0.11.0] - 2026-06-29
 
 ### Added

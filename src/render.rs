@@ -1541,17 +1541,47 @@ impl NoesisRenderState {
         pushes: &[(u32, PlainValue)],
     ) -> Vec<(u32, PlainValue)> {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.panels.entry(entity) {
-            match PanelEntry::build(uri, host, host_name, props) {
+            // F5b: a malformed-but-loadable fragment (e.g. a tag mismatch) loads as a
+            // partial tree and only warns through Noesis's parser, so capture any error
+            // raised on this (render) thread during the load and surface it as a Bevy
+            // error! rather than leaving a silent half-render.
+            let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let captured = std::sync::Arc::clone(&sink);
+            let built = {
+                let _guard = noesis_runtime::diagnostics::set_thread_error_handler(
+                    move |_file, _line, message, _fatal, ctx| {
+                        let at = ctx
+                            .filter(|c| c.line != 0)
+                            .map(|c| format!(" (line {}, col {})", c.line, c.column))
+                            .unwrap_or_default();
+                        captured.lock().unwrap().push(format!("{message}{at}"));
+                    },
+                );
+                PanelEntry::build(uri, host, host_name, props)
+                // guard drops here, restoring the prior handler before any ECS access
+            };
+            let warnings = std::mem::take(&mut *sink.lock().unwrap());
+            match built {
                 Some(built) => {
                     slot.insert(built);
                     self.failed_fragments.remove(&(entity, uri.to_owned()));
+                    if !warnings.is_empty() {
+                        error!(
+                            "UiPanel {entity:?}: fragment {uri:?} loaded with parser warning(s): {}",
+                            warnings.join("; "),
+                        );
+                    }
                 }
                 None => {
                     // Vacant slot retries every frame; dedupe the log to once per (entity, uri).
                     if self.failed_fragments.insert((entity, uri.to_owned())) {
+                        let why = if warnings.is_empty() {
+                            "unregistered/typo'd URI, or XAML Noesis rejected outright".to_owned()
+                        } else {
+                            warnings.join("; ")
+                        };
                         error!(
-                            "UiPanel {entity:?}: fragment {uri:?} failed to load \
-                             (unregistered/typo'd URI, or XAML Noesis rejected outright). \
+                            "UiPanel {entity:?}: fragment {uri:?} failed to load: {why}. \
                              The panel will not mount until it resolves.",
                         );
                     }
