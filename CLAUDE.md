@@ -25,5 +25,7 @@ footers to PR bodies. Author lines and PR bodies stay clean.
   entity + a reconcile system in `NoesisSet::Apply` that calls a `NoesisRenderState`
   `apply_*_for(entity, …)` / `poll_*_for(entity, …)` method against that view's live scene;
   read-backs surface as a `Message { view, … }`. Mirror an existing bridge module in `src/`
-  (`text.rs`, `dp.rs`, `viewmodel.rs`, `commands.rs`, …) when adding a new one.
+  (`text.rs`, `dp.rs`, `viewmodel.rs`, `commands.rs`, …) when adding a new one. An `x:Name`
+  passed to any bridge may be scope-qualified (`"Host/Leaf"`) to reach an element inside a
+  composed control's private namescope; the shared `resolve_named` in `render.rs` walks it.
 - Try XAML live: `cargo run -p noesis_bevy --example xaml_viewer <path>`.

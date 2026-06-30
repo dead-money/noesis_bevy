@@ -21,6 +21,13 @@
 //! }
 //! ```
 //!
+//! Each `x:Name` may be **scope-qualified** with `/` to reach an element inside
+//! a composed control whose private namescope a root-level lookup can't see —
+//! e.g. `with("MainMenu/Title", "Hello")` writes the `Title` inside a hosted
+//! `MainMenu` control. Watched qualified names are echoed back verbatim on
+//! [`NoesisTextChanged`], so two controls that each contain a `"Title"` stay
+//! distinguishable. Plain names are unchanged.
+//!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there):
 //! the reconcile system reads each view's component, applies writes + polls the
 //! watch list against that view's live scene, and emits messages directly; no

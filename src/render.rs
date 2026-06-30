@@ -695,6 +695,44 @@ struct BakeRig {
     size: UVec2,
 }
 
+/// Resolve an element by its (optionally scope-qualified) `x:Name`, starting
+/// from a scene's root element.
+///
+/// A plain name like `"PlayButton"` is a single `FindName` against `root`'s
+/// namescope — the long-standing behavior, unchanged.
+///
+/// A name may also be *scope-qualified* with `/` to reach into a composed
+/// control. Noesis (like WPF) gives every control loaded from its own XAML —
+/// a `UserControl`, a templated part — a **private namescope**: the names
+/// declared inside it are invisible to a `FindName` on the outer root. So if
+/// `main_menu.xaml` is hosted as `<local:MainMenu x:Name="MainMenu"/>`, its
+/// inner `PlayButton` is *not* reachable as `"PlayButton"` from the view root.
+/// Write `"MainMenu/PlayButton"` instead: each segment but the last names a
+/// host control to descend into, and the final segment is resolved inside that
+/// host's own namescope. Nesting goes as deep as you like
+/// (`"MainMenu/Footer/PlayButton"`).
+///
+/// Returns [`None`] if any segment along the path fails to resolve.
+fn resolve_named(root: &FrameworkElement, path: &str) -> Option<FrameworkElement> {
+    resolve_scope_path(root, path, |host, name| host.find_name(name))
+}
+
+/// Walk a `/`-separated scope `path`, descending one namescope per segment via
+/// `find`: each segment but the last names a host to step into, the last names
+/// the target. Generic over the node type so the traversal is unit-testable
+/// without a live Noesis scene; [`resolve_named`] specializes it to
+/// [`FrameworkElement::find_name`].
+fn resolve_scope_path<T>(
+    root: &T,
+    path: &str,
+    find: impl Fn(&T, &str) -> Option<T> + Copy,
+) -> Option<T> {
+    match path.split_once('/') {
+        None => find(root, path),
+        Some((host, rest)) => resolve_scope_path(&find(root, host)?, rest, find),
+    }
+}
+
 impl NoesisRenderState {
     fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let shared_map = SharedXamlMap::default();
@@ -810,7 +848,7 @@ impl NoesisRenderState {
             }
             let target = match entry.target() {
                 AttachTarget::Root => scene.view.content(),
-                AttachTarget::Named(name) => content.find_name(name),
+                AttachTarget::Named(name) => resolve_named(&content, name),
             };
             let Some(mut element) = target else {
                 warn!(
@@ -882,7 +920,7 @@ impl NoesisRenderState {
             }
             let target = match entry.target() {
                 AttachTarget::Root => scene.view.content(),
-                AttachTarget::Named(name) => content.find_name(name),
+                AttachTarget::Named(name) => resolve_named(&content, name),
             };
             let Some(mut element) = target else {
                 warn!(
@@ -951,7 +989,7 @@ impl NoesisRenderState {
             if *ent != entity {
                 continue;
             }
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 if binding.needs_bind(&uri) {
                     warn!(
                         "NoesisItems: x:Name {:?} not found in scene {:?}",
@@ -994,7 +1032,7 @@ impl NoesisRenderState {
             if *ent != entity {
                 continue;
             }
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             if let Some((count, selected_index, current_position, current)) =
@@ -1048,7 +1086,7 @@ impl NoesisRenderState {
             if *ent != entity || !entry.needs_bind(&uri) {
                 continue;
             }
-            let Some(target) = content.find_name(element) else {
+            let Some(target) = resolve_named(&content, element) else {
                 warn!(
                     "NoesisBinding: x:Name {:?} not found in scene {:?}",
                     element, scene.built_for_uri,
@@ -1109,7 +1147,7 @@ impl NoesisRenderState {
             {
                 let element = match entry.target() {
                     AttachTarget::Root => scene.view.content(),
-                    AttachTarget::Named(name) => content.find_name(name),
+                    AttachTarget::Named(name) => resolve_named(&content, name),
                 };
                 match element {
                     Some(mut element) => {
@@ -1426,7 +1464,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, &visible) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisVisibility: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1449,7 +1487,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, &[left, top, right, bottom]) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisLayout: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1480,7 +1518,7 @@ impl NoesisRenderState {
         };
         for (name, (state, use_transitions)) in desired {
             // `go_to_state` takes `&self`, so no `mut` binding needed.
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisVisualState: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1518,7 +1556,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, spec) in desired {
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisAnimation: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1575,7 +1613,7 @@ impl NoesisRenderState {
             if scene.click_subs.contains_key(name) {
                 continue;
             }
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisClickWatch: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1635,7 +1673,7 @@ impl NoesisRenderState {
             let Some(content) = scene.view.content() else {
                 return;
             };
-            let Some(element) = content.find_name(&entry.name) else {
+            let Some(element) = resolve_named(&content, &entry.name) else {
                 warn!(
                     "NoesisKeyDownWatch: x:Name {:?} not found in scene {:?}",
                     entry.name, scene.built_for_uri,
@@ -1712,7 +1750,7 @@ impl NoesisRenderState {
             let Some(content) = scene.view.content() else {
                 return;
             };
-            let Some(element) = content.find_name(&entry.name) else {
+            let Some(element) = resolve_named(&content, &entry.name) else {
                 warn!(
                     "NoesisEventWatch: x:Name {:?} not found in scene {:?}",
                     entry.name, scene.built_for_uri,
@@ -1777,7 +1815,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, text) in set {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisText: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1817,7 +1855,7 @@ impl NoesisRenderState {
             if styling.is_empty() {
                 continue;
             }
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisTypography: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1884,7 +1922,7 @@ impl NoesisRenderState {
             return changed;
         };
         for watch in watched {
-            let Some(element) = content.find_name(&watch.name) else {
+            let Some(element) = resolve_named(&content, &watch.name) else {
                 continue;
             };
             let current = match watch.field {
@@ -1940,7 +1978,7 @@ impl NoesisRenderState {
             if specs.is_empty() {
                 continue;
             }
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisInlines: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -1988,7 +2026,7 @@ impl NoesisRenderState {
             return changed;
         };
         for name in watched {
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             let Some(collection) = noesis_runtime::text_inlines::text_block_inlines(&element)
@@ -2025,7 +2063,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, points) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisGeometry: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2084,7 +2122,7 @@ impl NoesisRenderState {
         }
 
         for (name, spec) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisShapes: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2151,7 +2189,7 @@ impl NoesisRenderState {
             return applied;
         };
         for (name, source) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisSvg: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2187,7 +2225,7 @@ impl NoesisRenderState {
         let Some(content) = scene.view.content() else {
             return;
         };
-        let Some(mut element) = content.find_name(name) else {
+        let Some(mut element) = resolve_named(&content, name) else {
             warn!(
                 "NoesisFocus: x:Name {:?} not found in scene {:?}",
                 name, scene.built_for_uri,
@@ -2217,7 +2255,7 @@ impl NoesisRenderState {
             return;
         };
         for m in moves {
-            let Some(mut element) = content.find_name(&m.from) else {
+            let Some(mut element) = resolve_named(&content, &m.from) else {
                 warn!(
                     "NoesisFocusControl: move-from x:Name {:?} not found in scene {:?}",
                     m.from, scene.built_for_uri,
@@ -2250,7 +2288,7 @@ impl NoesisRenderState {
             return;
         };
         for e in engages {
-            let Some(mut element) = content.find_name(&e.name) else {
+            let Some(mut element) = resolve_named(&content, &e.name) else {
                 warn!(
                     "NoesisFocusControl: engage x:Name {:?} not found in scene {:?}",
                     e.name, scene.built_for_uri,
@@ -2306,7 +2344,7 @@ impl NoesisRenderState {
         // firing immediately, not just when the scene tears down.
         for ident in dropped {
             if let Some(installed) = scene.input_bindings.remove(&ident)
-                && let Some(element) = content.find_name(&ident.0)
+                && let Some(element) = resolve_named(&content, &ident.0)
             {
                 installed.binding.remove_from(&element);
             }
@@ -2317,7 +2355,7 @@ impl NoesisRenderState {
             if scene.input_bindings.contains_key(&ident) {
                 continue;
             }
-            let Some(element) = content.find_name(&spec.name) else {
+            let Some(element) = resolve_named(&content, &spec.name) else {
                 warn!(
                     "NoesisFocusControl: binding x:Name {:?} not found in scene {:?}",
                     spec.name, scene.built_for_uri,
@@ -2387,7 +2425,7 @@ impl NoesisRenderState {
             return changed;
         };
         for p in predicts {
-            let Some(from) = content.find_name(&p.from) else {
+            let Some(from) = resolve_named(&content, &p.from) else {
                 continue;
             };
             let candidate = from.predict_focus(p.direction).is_some();
@@ -2436,7 +2474,7 @@ impl NoesisRenderState {
             return changed;
         };
         for name in watched {
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             let current = element.text().unwrap_or_default();
@@ -2466,7 +2504,7 @@ impl NoesisRenderState {
             return;
         };
         for ((name, property), value) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisDp: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2509,7 +2547,7 @@ impl NoesisRenderState {
             return changed;
         };
         for watch in watched {
-            let Some(element) = content.find_name(&watch.name) else {
+            let Some(element) = resolve_named(&content, &watch.name) else {
                 continue;
             };
             let Some(current) = watch.kind.read_from(&element, &watch.property) else {
@@ -2549,7 +2587,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, spec) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisTransform: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2595,7 +2633,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, spec) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisTransform3D: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2645,7 +2683,7 @@ impl NoesisRenderState {
             let Some(handle) = scene.transform3d_handles.get(name) else {
                 continue;
             };
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             // Read the element's live Transform3D; only trust it when it is the
@@ -2694,7 +2732,7 @@ impl NoesisRenderState {
             return;
         };
         for (name, matrix) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisTransform3D(matrix): x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2745,7 +2783,7 @@ impl NoesisRenderState {
             let Some(handle) = scene.matrix_transform3d_handles.get(name) else {
                 continue;
             };
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             // Trust the value only when the element's live Transform3D is the very
@@ -2808,7 +2846,7 @@ impl NoesisRenderState {
         }
 
         for ((name, target), spec) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisBrushes: x:Name {:?} not found in scene {:?}",
                     name, scene.built_for_uri,
@@ -2863,7 +2901,7 @@ impl NoesisRenderState {
         };
 
         for (name, spec) in desired {
-            let Some(mut element) = content.find_name(name) else {
+            let Some(mut element) = resolve_named(&content, name) else {
                 warn!("NoesisStyles: x:Name {name:?} not found in scene {uri:?}");
                 continue;
             };
@@ -2983,7 +3021,7 @@ impl NoesisRenderState {
             let Some(handle) = scene.transform_handles.get(name) else {
                 continue;
             };
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             // Read the element's live RenderTransform; only trust it when it is
@@ -3039,7 +3077,7 @@ impl NoesisRenderState {
             return changed;
         };
         for (name, target) in desired.keys() {
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             let property = target.property();
@@ -3093,7 +3131,7 @@ impl NoesisRenderState {
             return changed;
         };
         for name in desired.keys() {
-            let Some(element) = content.find_name(name) else {
+            let Some(element) = resolve_named(&content, name) else {
                 continue;
             };
             let current = ImageReadback {
@@ -3372,7 +3410,7 @@ impl NoesisRenderState {
 
         if let Some(content) = rig.view.content() {
             for (name, text) in fields {
-                if let Some(mut element) = content.find_name(name) {
+                if let Some(mut element) = resolve_named(&content, name) {
                     let _ = element.set_text(text);
                 } else {
                     warn!("bake_into: x:Name {name:?} not found in {xaml_uri:?}");
@@ -4115,8 +4153,59 @@ impl Plugin for NoesisRenderPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::is_linear_float;
+    use super::{is_linear_float, resolve_scope_path};
     use wgpu::TextureFormat;
+
+    // A toy namescope tree: each node owns named children, mirroring how a
+    // composed control nests a private namescope inside its host. `find` only
+    // looks one level down, exactly like Noesis `FindName` against one scope.
+    struct Scope {
+        name: &'static str,
+        children: Vec<Scope>,
+    }
+    impl Scope {
+        fn child(&self, name: &str) -> Option<&Scope> {
+            self.children.iter().find(|c| c.name == name)
+        }
+    }
+
+    fn resolve<'a>(root: &'a Scope, path: &str) -> Option<&'a str> {
+        // `find` returns owned references; resolve_scope_path threads them by value.
+        resolve_scope_path(&root, path, |node, seg| node.child(seg)).map(|n| n.name)
+    }
+
+    #[test]
+    fn scope_path_walks_into_nested_namescopes() {
+        let tree = Scope {
+            name: "Root",
+            children: vec![Scope {
+                name: "MainMenu",
+                children: vec![Scope {
+                    name: "Footer",
+                    children: vec![Scope {
+                        name: "PlayButton",
+                        children: vec![],
+                    }],
+                }],
+            }],
+        };
+
+        // Plain name: one hop in the root scope (unchanged classic behavior).
+        assert_eq!(resolve(&tree, "MainMenu"), Some("MainMenu"));
+        // Qualified: descend into the host's private scope to reach its leaf.
+        assert_eq!(resolve(&tree, "MainMenu/Footer"), Some("Footer"));
+        assert_eq!(
+            resolve(&tree, "MainMenu/Footer/PlayButton"),
+            Some("PlayButton")
+        );
+
+        // A leaf that only exists *inside* the host is unreachable as a plain
+        // name from the root — the whole reason qualified names exist.
+        assert_eq!(resolve(&tree, "PlayButton"), None);
+        // Any unresolved segment fails the whole path.
+        assert_eq!(resolve(&tree, "MainMenu/Nope"), None);
+        assert_eq!(resolve(&tree, "Nope/Footer"), None);
+    }
 
     #[test]
     fn hdr_float_targets_decode_srgb() {
