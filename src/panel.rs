@@ -30,6 +30,13 @@
 //! the same component set bind **independently**: each loads its own fragment
 //! with its own aggregated `DataContext`, isolated by Noesis namescope.
 //!
+//! Show/hide a fragment element the same way: give the component a `String` field,
+//! bind it with `Visibility="{Binding MyVis}"`, and set it to one of
+//! [`visibility::VISIBLE`](crate::visibility::VISIBLE) /
+//! [`COLLAPSED`](crate::visibility::COLLAPSED) /
+//! [`HIDDEN`](crate::visibility::HIDDEN). Noesis's enum converter parses the
+//! string, so no `bool`-to-`Visibility` plumbing is needed.
+//!
 //! # How the aggregation works
 //!
 //! A panel entity may carry *several* bound components (`Health`, `Score`, …). They

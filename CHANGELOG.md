@@ -66,6 +66,11 @@ pre-1.0, any `0.x` release may contain breaking changes.
   bind a snake_case Rust field to a different (e.g. PascalCase) XAML property name,
   so `master_volume` can back `{Binding MasterVolume}` without renaming the field.
 
+- **`visibility::{VISIBLE, COLLAPSED, HIDDEN}`** string consts for the show/hide
+  pattern: bind a `String` field to an element's `Visibility="{Binding …}"` and set
+  it to one of these. Noesis's enum converter parses the string, so no
+  `bool`-to-`Visibility` converter is needed.
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into

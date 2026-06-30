@@ -29,6 +29,27 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
+/// `Visibility="Visible"` — show an element.
+///
+/// These three consts back the **binding** show/hide pattern, the idiomatic way
+/// to show or hide an element from a panel's `DataContext` (as opposed to the
+/// [`NoesisVisibility`] name-bridge below): give a `#[derive(NoesisViewModel)]`
+/// component a `String` field, bind it in XAML with `Visibility="{Binding MyVis}"`,
+/// and set the field to one of these. Noesis's built-in enum converter parses the
+/// string, so no `bool`-to-`Visibility` converter is needed.
+///
+/// ```ignore
+/// #[derive(Component, NoesisViewModel)]
+/// struct Hud { panel_vis: String }            // bound: Visibility="{Binding panel_vis}"
+/// // ...
+/// hud.panel_vis = noesis_bevy::visibility::COLLAPSED.to_string();   // hide
+/// ```
+pub const VISIBLE: &str = "Visible";
+/// `Visibility="Collapsed"` — hide an element and remove it from layout. See [`VISIBLE`].
+pub const COLLAPSED: &str = "Collapsed";
+/// `Visibility="Hidden"` — hide an element but keep its layout space. See [`VISIBLE`].
+pub const HIDDEN: &str = "Hidden";
+
 /// Per-view visibility bridge. Attach to a [`NoesisView`](crate::NoesisView)
 /// entity.
 #[derive(Component, Clone, Default, Debug)]
