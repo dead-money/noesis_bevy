@@ -3386,6 +3386,7 @@ dependencies = [
  "bevy_render",
  "bytemuck",
  "image",
+ "indexmap",
  "noesis_bevy_derive",
  "noesis_runtime",
  "pollster",

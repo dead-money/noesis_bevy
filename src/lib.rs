@@ -30,6 +30,7 @@ pub mod input;
 pub mod integration;
 pub mod items;
 pub mod layout;
+pub mod list;
 pub mod markup;
 pub mod panel;
 pub mod plain_vm;
@@ -101,6 +102,10 @@ pub use items::{
     ObjectRow, ObjectSource,
 };
 pub use layout::{Margin, NoesisLayout, NoesisLayoutPlugin};
+pub use list::{
+    ListSort, ListedIn, NoesisListAppExt, NoesisListOps, NoesisListPlugin, NoesisListSelection,
+    NoesisListSet, Selected, UiList,
+};
 pub use markup::{NoesisMarkupExtensionPlugin, NoesisMarkupExtensionRegistry};
 /// Derive macro for [`NoesisViewModel`]: binds a plain struct's fields by name.
 pub use noesis_bevy_derive::NoesisViewModel;
@@ -241,6 +246,7 @@ impl Plugin for NoesisPlugin {
             shapes::NoesisShapesPlugin,
             resources::NoesisResourcesPlugin,
             panel::NoesisPanelPlugin,
+            list::NoesisListPlugin,
         ));
     }
 }

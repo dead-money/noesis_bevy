@@ -591,6 +591,14 @@ pub(crate) struct NoesisRenderState {
     /// scenes (so the host has already released its child refs). See
     /// [`crate::panel`].
     panels: HashMap<Entity, PanelEntry>,
+    /// Rust-owned, entity-keyed list bindings (Primitive 2), keyed by `(view
+    /// entity, x:Name)`. Each owns an `ObservableCollection` of row instances
+    /// reconciled from the view's row query, bound to a named `ItemsControl`.
+    /// Outlives scene rebuilds (re-bound by the apply pass) and is released in
+    /// [`Drop`] / [`Self::teardown_for`] before the registered device, in the
+    /// collection→instances→registration order its fields encode. See
+    /// [`crate::list`].
+    lists: HashMap<(Entity, String), crate::list::ListBinding>,
     /// Process-global integration callback guards (cursor / open-URL /
     /// play-audio) registered once by [`crate::integration::NoesisIntegrationPlugin`].
     /// Owned here (rather than in that plugin's own resource) so their `Drop`
@@ -974,6 +982,7 @@ impl NoesisRenderState {
             command_hosts: HashMap::new(),
             binding_entries: HashMap::new(),
             panels: HashMap::new(),
+            lists: HashMap::new(),
             integration_guards: Vec::new(),
         }
     }
@@ -1244,6 +1253,68 @@ impl NoesisRenderState {
             }
         }
         out
+    }
+
+    /// Reconcile view `entity`'s entity-keyed list `name` (Primitive 2): ensure
+    /// the row class, diff the live collection to `desired` (minimal
+    /// Add/Remove/Update/Move — never a clear), bind the collection to the named
+    /// `ItemsControl` once the scene + element exist (re-binding after a rebuild),
+    /// and reconcile selection (currency). Returns the op tally and any UI-driven
+    /// selection change for the caller to mirror onto a [`Selected`](crate::list::Selected)
+    /// marker. See [`crate::list`].
+    pub(crate) fn apply_list_for(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        class: &str,
+        schema: &[(&'static str, crate::plain_vm::PlainType)],
+        desired: &[crate::list::DesiredRow],
+        desired_selected: Option<Entity>,
+    ) -> (crate::list::ListOps, crate::list::SelectionOutcome) {
+        let key = (entity, name.to_owned());
+        let ops = {
+            let binding = self.lists.entry(key.clone()).or_default();
+            binding.reconcile_into(class, schema, desired)
+        };
+
+        // Bind the ItemsSource once the scene + named control exist; re-bind after
+        // a rebuild. Resolve the scene content first so the `scenes` borrow ends
+        // before the `lists` mutable borrow (disjoint fields).
+        let mount = self
+            .scenes
+            .get(&entity)
+            .and_then(|s| s.view.content().map(|c| (c, s.built_for_uri.clone())));
+        if let Some((content, uri)) = mount
+            && let Some(binding) = self.lists.get_mut(&key)
+            && binding.needs_bind(&uri)
+        {
+            match resolve_named(&content, name) {
+                Some(mut element) => {
+                    record_ffi_hop(); // collection op: bind an ItemsSource.
+                    if element.set_items_source(binding.collection()) {
+                        binding.mark_bound(&uri);
+                    } else {
+                        warn!("UiList: element {name:?} is not an ItemsControl; skipped");
+                    }
+                }
+                None => warn!("UiList: x:Name {name:?} not found in scene {uri:?}"),
+            }
+        }
+
+        let structurally_changed = ops.adds + ops.removes + ops.moves > 0;
+        let selection = self
+            .lists
+            .get_mut(&key)
+            .map_or(crate::list::SelectionOutcome::Unchanged, |b| {
+                b.poll_selection(desired_selected, structurally_changed)
+            });
+        (ops, selection)
+    }
+
+    /// Number of live entity-keyed list bindings. Mirrors `self.lists.len()`.
+    #[must_use]
+    pub(crate) fn live_list_count(&self) -> usize {
+        self.lists.len()
     }
 
     /// Whether view `entity` already has a built binding for `(element,
@@ -3785,6 +3856,11 @@ impl NoesisRenderState {
                 binding.reset_bind();
             }
         }
+        for ((ent, _), binding) in &mut self.lists {
+            if *ent == entity {
+                binding.reset_bind();
+            }
+        }
         for ((ent, _), entry) in &mut self.plain_vms {
             if *ent == entity {
                 entry.reset_attach();
@@ -3862,6 +3938,7 @@ impl NoesisRenderState {
         // 2. Now the last refs; drop the owners (same order as `Drop`).
         self.view_models.remove(&entity);
         self.items_sources.retain(|(ent, _), _| *ent != entity);
+        self.lists.retain(|(ent, _), _| *ent != entity);
         self.plain_vms.retain(|(ent, _), _| *ent != entity);
         self.command_hosts.remove(&entity);
         self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
@@ -3891,6 +3968,9 @@ impl Drop for NoesisRenderState {
         self.teardown_all_scenes();
         self.view_models.clear();
         self.items_sources.clear();
+        // Lists after the scenes (the View held ItemsSource refs to each
+        // collection); each binding drops collection → instances → registration.
+        self.lists.clear();
         self.plain_vms.clear();
         // Panels after the scenes: the host views are now torn down, so each host
         // has already released its child ref; clearing just drops our handles in

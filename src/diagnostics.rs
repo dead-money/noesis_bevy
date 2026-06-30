@@ -50,6 +50,11 @@ pub struct NoesisDiagnostics {
     /// fragment has been built). Returns to 0 after every panel despawns, mirroring
     /// [`live_scenes`](Self::live_scenes) for the panel primitive.
     pub live_panels: usize,
+    /// Number of live entity-keyed list bindings (one per `(view, x:Name)` a
+    /// [`crate::UiList`] reconciles). Returns to 0 after every owning view
+    /// despawns, mirroring [`live_panels`](Self::live_panels) for the list
+    /// primitive.
+    pub live_lists: usize,
     /// Wall-time of the previous frame's `NoesisSet::Apply` phase — every bridge's
     /// FFI push. `ZERO` until the first frame with a live view has run.
     pub apply_time: std::time::Duration,
@@ -130,6 +135,7 @@ fn refresh_diagnostics(
         ffi_hops: crate::render::ffi_hops(),
         live_scenes: state.as_ref().map_or(0, |s| s.live_scene_count()),
         live_panels: state.as_ref().map_or(0, |s| s.live_panel_count()),
+        live_lists: state.as_ref().map_or(0, |s| s.live_list_count()),
         apply_time: timer.as_ref().map_or(std::time::Duration::ZERO, |t| t.last),
     };
     diag.set_if_neq(next);
