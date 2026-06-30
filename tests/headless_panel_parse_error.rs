@@ -1,10 +1,10 @@
-//! F5 regression: a [`UiPanel`] whose fragment fails to load degrades gracefully
-//! — it simply never mounts, the app does not panic, and a sibling panel with a
-//! valid fragment is unaffected.
+//! F5 regression: a [`UiPanel`] whose fragment fails to load degrades gracefully.
+//! It never mounts, the app does not panic, and a sibling panel with a valid
+//! fragment is unaffected.
 //!
 //! The reliable hard failure is a missing / unregistered fragment URI (a typo'd
 //! registration key): `FrameworkElement::load` returns `None`, which F5 surfaces
-//! as a deduped Bevy `error!`. Note Noesis's XAML parser is lenient about *malformed*
+//! as a deduped Bevy `error!`. Noesis's XAML parser is lenient about *malformed*
 //! markup (an unbalanced or mismatched tag still returns a partial element, with
 //! only a Noesis-side parser warning), so this test exercises the missing-URI path.
 //!
@@ -31,7 +31,6 @@ const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006
   <StackPanel x:Name="Hud"/>
 </Grid>"##;
 
-// Valid fragment.
 const GOOD_XAML: &str = r##"<StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <TextBlock x:Name="GoodText" Text="{Binding Health}"/>

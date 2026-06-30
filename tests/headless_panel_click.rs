@@ -40,7 +40,7 @@ const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006
 
 // Panel fragment: one full-bleed Button named in the fragment's OWN namescope.
 // Both panels load this same XAML, so "PanelBtn" exists twice, once per private
-// namescope — exactly the case a root-level FindName can't disambiguate.
+// namescope: the case a root-level FindName can't disambiguate.
 const FRAG_XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="PanelBtn" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Content="X"/>"##;

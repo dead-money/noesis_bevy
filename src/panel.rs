@@ -132,11 +132,11 @@ impl UiPanel {
         self
     }
 
-    /// Mount even when the entity carries no bound components — a *static* fragment
+    /// Mount even when the entity carries no bound components: a *static* fragment
     /// with an empty `DataContext` (e.g. a button-only toolbar or a fixed help
     /// overlay). Without this, a panel whose `DataContext` never gains a field is
-    /// held back (the machinery otherwise waits for components to arrive before it
-    /// freezes the layout, so it can't tell "no data yet" from "no data ever").
+    /// held back (the reconcile waits for components before freezing the layout, so
+    /// it can't tell "no data yet" from "no data ever").
     #[must_use]
     pub fn static_context(mut self) -> Self {
         self.static_data = true;
@@ -362,10 +362,6 @@ fn sync_panels(
     };
     for (entity, panel, mut agg, sealed) in &mut panels {
         if !agg.built {
-            // When to freeze the DataContext layout, by mode:
-            //   deferred_seal  -> wait for an explicit `SealPanel`
-            //   static_context -> freeze now (an empty DataContext is fine)
-            //   default        -> freeze once the first bound component is present
             let freeze = if panel.deferred {
                 sealed
             } else {
@@ -376,7 +372,6 @@ fn sync_panels(
             }
             agg.freeze();
             if panel.deferred {
-                // One-shot: the seal is applied, drop the request marker.
                 commands.entity(entity).remove::<SealPanel>();
             }
         }

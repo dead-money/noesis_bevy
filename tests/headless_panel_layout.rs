@@ -10,7 +10,7 @@
 //! so a click at the left half's center MISSES it; the RIGHT panel's button has no
 //! margin and is the positive control (its click must land). If F6 were broken the
 //! margin wouldn't apply, the left button would stay full-bleed, and the left click
-//! would hit — so the assertion (only the right fired) fails before the fix.
+//! would hit, so the assertion (only the right fired) fails before the fix.
 //!
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 

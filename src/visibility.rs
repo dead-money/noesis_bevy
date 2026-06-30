@@ -29,7 +29,7 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// `Visibility="Visible"` — show an element.
+/// `Visibility="Visible"`: show an element.
 ///
 /// These three consts back the **binding** show/hide pattern, the idiomatic way
 /// to show or hide an element from a panel's `DataContext` (as opposed to the
@@ -45,9 +45,9 @@ use crate::render::{NoesisRenderState, NoesisSet};
 /// hud.panel_vis = noesis_bevy::visibility::COLLAPSED.to_string();   // hide
 /// ```
 pub const VISIBLE: &str = "Visible";
-/// `Visibility="Collapsed"` — hide an element and remove it from layout. See [`VISIBLE`].
+/// `Visibility="Collapsed"`: hide an element and remove it from layout. See [`VISIBLE`].
 pub const COLLAPSED: &str = "Collapsed";
-/// `Visibility="Hidden"` — hide an element but keep its layout space. See [`VISIBLE`].
+/// `Visibility="Hidden"`: hide an element but keep its layout space. See [`VISIBLE`].
 pub const HIDDEN: &str = "Hidden";
 
 /// Per-view visibility bridge. Attach to a [`NoesisView`](crate::NoesisView)

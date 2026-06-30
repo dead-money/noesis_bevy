@@ -596,10 +596,9 @@ pub(crate) struct NoesisRenderState {
     /// scenes (so the host has already released its child refs). See
     /// [`crate::panel`].
     panels: HashMap<Entity, PanelEntry>,
-    /// `(panel entity, fragment uri)` pairs whose XAML failed to load/parse, so the
+    /// `(panel entity, fragment uri)` pairs whose XAML failed to load, so the
     /// `error!` fires once instead of every frame (a failed build leaves the
-    /// `panels` slot vacant, so `sync_panel` retries it each frame). Cleared for a
-    /// pair once it builds, and pruned per entity on teardown.
+    /// `panels` slot vacant, so `sync_panel` retries it each frame).
     failed_fragments: HashSet<(Entity, String)>,
     /// Rust-owned, entity-keyed list bindings (Primitive 2), keyed by `(view
     /// entity, x:Name)`. Each owns an `ObservableCollection` of row instances
@@ -1548,8 +1547,7 @@ impl NoesisRenderState {
                     self.failed_fragments.remove(&(entity, uri.to_owned()));
                 }
                 None => {
-                    // A failed build leaves the slot vacant, so this path retries
-                    // every frame; dedupe the log to once per (entity, uri).
+                    // Vacant slot retries every frame; dedupe the log to once per (entity, uri).
                     if self.failed_fragments.insert((entity, uri.to_owned())) {
                         error!(
                             "UiPanel {entity:?}: fragment {uri:?} failed to load \
@@ -1969,7 +1967,7 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // NoesisLayout on a mounted UiPanel entity resolves fragment-internal names.
+            // Panel entity: resolve in the fragment's private namescope.
             if let Some(panel) = self.panels.get(&entity) {
                 for (name, &[left, top, right, bottom]) in desired {
                     let Some(mut element) = resolve_named(&panel.fragment, name) else {
@@ -2091,8 +2089,8 @@ impl NoesisRenderState {
         queue: &SharedClickQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // Not a view: a NoesisClickWatch may sit on a mounted UiPanel entity,
-            // whose fragment owns a private namescope the host scene can't see.
+            // Not a view: a NoesisClickWatch may sit on a panel whose fragment
+            // owns a private namescope the host scene can't see.
             if self.panels.contains_key(&entity) {
                 self.sync_click_subs_panel(entity, entries, queue);
             }
@@ -2237,8 +2235,7 @@ impl NoesisRenderState {
         queue: &SharedKeyDownQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // A NoesisKeyDownWatch on a mounted UiPanel entity resolves against the
-            // fragment's private namescope instead of the host scene.
+            // Panel entity: resolve in the fragment's private namescope, not the host scene.
             if self.panels.contains_key(&entity) {
                 self.sync_keydown_subs_panel(entity, entries, queue);
             }
@@ -2726,8 +2723,8 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // NoesisGeometry on a mounted UiPanel entity: resolve against the
-            // fragment's private namescope (a host-view FindName can't see inside).
+            // Panel entity: resolve in the fragment's private namescope (host
+            // FindName can't see inside).
             if let Some(panel) = self.panels.get(&entity) {
                 for (name, points) in desired {
                     let Some(mut element) = resolve_named(&panel.fragment, name) else {
@@ -2904,7 +2901,7 @@ impl NoesisRenderState {
             return;
         };
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // NoesisFocus on a mounted UiPanel entity resolves fragment-internal names.
+            // Panel entity: resolve in the fragment's private namescope.
             if let Some(panel) = self.panels.get(&entity) {
                 match resolve_named(&panel.fragment, name) {
                     Some(mut element) => {
@@ -2944,7 +2941,7 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // NoesisFocusControl moves on a mounted UiPanel entity resolve fragment names.
+            // Panel entity: resolve in the fragment's private namescope.
             if let Some(panel) = self.panels.get(&entity) {
                 for m in moves {
                     let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
@@ -2995,7 +2992,7 @@ impl NoesisRenderState {
             return;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // NoesisFocusControl engages on a mounted UiPanel entity resolve fragment names.
+            // Panel entity: resolve in the fragment's private namescope.
             if let Some(panel) = self.panels.get(&entity) {
                 for e in engages {
                     let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
@@ -3306,9 +3303,9 @@ impl NoesisRenderState {
         desired: &HashMap<String, crate::transforms::TransformSpec>,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
-            // NoesisTransform on a mounted UiPanel entity resolves fragment-internal
-            // names. Write-only: the +1 RenderTransform handle isn't retained for
-            // read-back (panels have no transform poll), but Noesis keeps its own ref.
+            // Panel entity: resolve in the fragment's private namescope. Write-only:
+            // the +1 RenderTransform handle isn't retained (panels have no transform
+            // poll), but Noesis keeps its own ref.
             if let Some(panel) = self.panels.get(&entity) {
                 for (name, spec) in desired {
                     let Some(mut element) = resolve_named(&panel.fragment, name) else {

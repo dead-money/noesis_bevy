@@ -45,7 +45,7 @@ const EXIT_AT: usize = 80;
 // IGNORED: surfaces a real gap, not a flaky harness. Headless keydown routing
 // works for a focused *view-scene* element (see `headless_app_focus_predict_remove`),
 // but here a `KeyDown` injected at a *focused fragment* element produces no
-// `UiKeyDown` — so one of the links in the keydown-into-a-mounted-fragment chain
+// `UiKeyDown`, so one of the links in the keydown-into-a-mounted-fragment chain
 // (NoesisFocus→fragment focus via F6, NoesisKeyDownWatch→fragment subscribe via F4,
 // or keyboard-focus routing into a hosted child) does not complete. The click-in-
 // fragment path is verified (`headless_panel_click`); this is kept as the spec for
