@@ -764,10 +764,21 @@ struct InstalledKeyBinding {
 static PANEL_CLASS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One live mounted panel (see [`NoesisRenderState::panels`]). Field order is the
-/// drop order Noesis requires: `fragment` first (it is held by the host panel and
-/// holds a `DataContext` ref to `instance`), then `instance`, then `_class` (whose
-/// drop unregisters the class, so it must outlive every live instance of it).
+/// drop order Noesis requires: the click/keydown subscription maps first (each drop
+/// fires the C++ unsubscribe on a fragment element), then `fragment` (held by the
+/// host panel and holding a `DataContext` ref to `instance`), then `instance`, then
+/// `_class` (whose drop unregisters the class, so it must outlive every live
+/// instance of it).
 struct PanelEntry {
+    /// `BaseButton::Click` subscriptions on fragment-internal elements, keyed by
+    /// `x:Name`, for a [`crate::events::NoesisClickWatch`] placed on this panel
+    /// entity. Resolved against the fragment's private namescope (a host-view
+    /// `FindName` can't see inside it). Drops before `fragment`; same orphan-safety
+    /// as the scene's `click_subs`.
+    click_subs: HashMap<String, ClickSubscription>,
+    /// `UIElement::KeyDown` subscriptions on fragment-internal elements, keyed by
+    /// `x:Name`. Same rules as [`Self::click_subs`].
+    keydown_subs: HashMap<String, KeyDownSubscription>,
     /// The loaded sub-XAML, its own namescope. `DataContext` set once at build.
     fragment: FrameworkElement,
     /// Aggregated plain-VM instance: one synthetic class whose properties are the
@@ -832,6 +843,8 @@ impl PanelEntry {
             warn!("UiPanel: set_data_context returned false for fragment {uri:?}");
         }
         Some(Self {
+            click_subs: HashMap::new(),
+            keydown_subs: HashMap::new(),
             fragment,
             instance,
             _class: class,
@@ -2048,6 +2061,11 @@ impl NoesisRenderState {
         queue: &SharedClickQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // Not a view: a NoesisClickWatch may sit on a mounted UiPanel entity,
+            // whose fragment owns a private namescope the host scene can't see.
+            if self.panels.contains_key(&entity) {
+                self.sync_click_subs_panel(entity, entries, queue);
+            }
             return;
         };
 
@@ -2112,6 +2130,70 @@ impl NoesisRenderState {
             .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }
 
+    /// Panel branch of [`Self::sync_click_subscriptions_for`]: a
+    /// [`crate::events::NoesisClickWatch`] on a mounted `UiPanel` entity. Resolves
+    /// names against the fragment's private namescope, reports the host view as the
+    /// click's `view`, and defaults the target to the panel entity.
+    fn sync_click_subs_panel(
+        &mut self,
+        entity: Entity,
+        entries: &[crate::events::ClickWatchEntry],
+        queue: &SharedClickQueue,
+    ) {
+        let Some(panel) = self.panels.get_mut(&entity) else {
+            return;
+        };
+        let host = panel.host;
+        panel
+            .click_subs
+            .retain(|k, _| entries.iter().any(|e| &e.name == k));
+        let needs_change = entries.iter().any(|e| {
+            let target = e.target.unwrap_or(entity);
+            !panel.click_subs.contains_key(&e.name)
+                || self
+                    .last_click_target
+                    .get(&(entity, e.name.clone()))
+                    .is_none_or(|prev| *prev != target)
+        });
+        if !needs_change {
+            return;
+        }
+        for entry in entries {
+            let target = entry.target.unwrap_or(entity);
+            if panel.click_subs.contains_key(&entry.name)
+                && self
+                    .last_click_target
+                    .get(&(entity, entry.name.clone()))
+                    .is_some_and(|prev| *prev == target)
+            {
+                continue;
+            }
+            let Some(element) = resolve_named(&panel.fragment, &entry.name) else {
+                warn!(
+                    "NoesisClickWatch: x:Name {:?} not found in panel fragment (host {host:?})",
+                    entry.name,
+                );
+                continue;
+            };
+            let queue_handle = queue.clone();
+            let captured_name = entry.name.clone();
+            let Some(sub) = subscribe_click(&element, move || {
+                queue_handle.push(host, target, captured_name.clone());
+            }) else {
+                warn!(
+                    "NoesisClickWatch: element {:?} is not a BaseButton; skipping",
+                    entry.name
+                );
+                continue;
+            };
+            panel.click_subs.insert(entry.name.clone(), sub);
+            self.last_click_target
+                .insert((entity, entry.name.clone()), target);
+        }
+        self.last_click_target
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
+    }
+
     /// Reconcile the active `UIElement::KeyDown` subscription set against
     /// `entries`. Mirrors [`Self::sync_click_subscriptions`]: adds /
     /// drops subscriptions to match the desired watch list. The
@@ -2125,6 +2207,11 @@ impl NoesisRenderState {
         queue: &SharedKeyDownQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
+            // A NoesisKeyDownWatch on a mounted UiPanel entity resolves against the
+            // fragment's private namescope instead of the host scene.
+            if self.panels.contains_key(&entity) {
+                self.sync_keydown_subs_panel(entity, entries, queue);
+            }
             return;
         };
 
@@ -2186,6 +2273,65 @@ impl NoesisRenderState {
 
         // Prune this view's swallow snapshots whose name is no longer watched
         // (leave other views' entries intact).
+        self.last_keydown_swallow
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
+    }
+
+    /// Panel branch of [`Self::sync_keydown_subscriptions_for`]: a
+    /// [`crate::events::NoesisKeyDownWatch`] on a mounted `UiPanel` entity, resolved
+    /// against the fragment's private namescope. Reports the host view; default
+    /// target is the panel entity.
+    fn sync_keydown_subs_panel(
+        &mut self,
+        entity: Entity,
+        entries: &[crate::events::KeyDownWatchEntry],
+        queue: &SharedKeyDownQueue,
+    ) {
+        let Some(panel) = self.panels.get_mut(&entity) else {
+            return;
+        };
+        let host = panel.host;
+        panel
+            .keydown_subs
+            .retain(|k, _| entries.iter().any(|e| e.name == *k));
+        for entry in entries {
+            let target = entry.target.unwrap_or(entity);
+            if panel.keydown_subs.contains_key(&entry.name)
+                && self
+                    .last_keydown_swallow
+                    .get(&(entity, entry.name.clone()))
+                    .is_some_and(|(swallow, prev_target)| {
+                        swallow == &entry.swallow && *prev_target == target
+                    })
+            {
+                continue;
+            }
+            let Some(element) = resolve_named(&panel.fragment, &entry.name) else {
+                warn!(
+                    "NoesisKeyDownWatch: x:Name {:?} not found in panel fragment (host {host:?})",
+                    entry.name,
+                );
+                continue;
+            };
+            let queue_handle = queue.clone();
+            let captured_name = entry.name.clone();
+            let swallow = entry.swallow.clone();
+            let Some(sub) = subscribe_keydown(&element, move |key: Key| {
+                queue_handle.push(host, target, captured_name.clone(), key);
+                swallow.contains(&key)
+            }) else {
+                warn!(
+                    "NoesisKeyDownWatch: element {:?} is not a UIElement; skipping",
+                    entry.name
+                );
+                continue;
+            };
+            panel.keydown_subs.insert(entry.name.clone(), sub);
+            self.last_keydown_swallow.insert(
+                (entity, entry.name.clone()),
+                (entry.swallow.clone(), target),
+            );
+        }
         self.last_keydown_swallow
             .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }

@@ -33,6 +33,12 @@ pre-1.0, any `0.x` release may contain breaking changes.
   reactive teardown of despawned views and panels (releasing their Noesis state)
   and `ffi_hops` / apply-time diagnostics.
 
+- **Panel-entity input watches.** A `NoesisClickWatch` / `NoesisKeyDownWatch` on a
+  `UiPanel` entity resolves `x:Name`s inside that panel's own fragment namescope
+  (a host-view lookup can't see them) and fires `UiClicked` / `UiKeyDown` targeting
+  the panel entity, with the host as `view`. Buttons and keyed input inside mounted
+  panel fragments now work without routing through the host scene.
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into
