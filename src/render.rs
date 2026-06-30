@@ -1311,6 +1311,10 @@ impl NoesisRenderState {
                         let ok = element.set_items_source(binding.collection());
                         if ok {
                             binding.mark_bound(&uri);
+                            // Stash a handle on the control so selection is read /
+                            // driven on the live control itself (its own selection
+                            // is the source of truth — no separate CollectionView).
+                            binding.set_control(element.clone_ref());
                         }
                         ok
                     };
@@ -1324,12 +1328,11 @@ impl NoesisRenderState {
             }
         }
 
-        let structurally_changed = ops.adds + ops.removes + ops.moves > 0;
         let selection = self
             .lists
             .get_mut(&key)
             .map_or(crate::list::SelectionOutcome::Unchanged, |b| {
-                b.poll_selection(desired_selected, structurally_changed)
+                b.poll_selection(desired_selected)
             });
         (ops, selection)
     }

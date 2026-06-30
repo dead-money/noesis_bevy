@@ -9,19 +9,15 @@
 //! It does NOT cover the literal mouse-down hit-test (a `ListBoxItem` consuming a
 //! pointer event); that path is `row_click_subs → UiClicked`, tested elsewhere.
 //!
-//! ## `#[ignore]` — known gap, not a flake
-//! This currently FAILS, and the reason is structural: the list binding observes
-//! its **own** `CollectionView`, which the runtime fabricates over the source list
-//! when the code-built `CollectionViewSource` isn't XAML-hosted
-//! (`noesis_collection_view_source_get_view`: `GetView()` is null → `new
-//! CollectionView(list)`). That object is **not** the live `ListBox`'s default
-//! view, so the control's `SelectedIndex`/currency and the binding's currency are
-//! independent — a control-side selection never reaches `poll_selection`.
-//!
-//! The fix is a design change (out of scope for the polish pass that added this
-//! test): bind the `ItemsSource` to the *shared* default view, or wire the
-//! Stage-1 `Selector.SelectionChanged` FFI to push control selection into the
-//! bridge. When that lands, drop the `#[ignore]` — this is the regression test.
+//! ## Regression guard for the control→bridge selection path
+//! The bridge reads selection straight off the bound `ListBox` (`selected_item` /
+//! `set_selected_index`) — the control's own selection is the single source of
+//! truth — so a control-side `SelectedIndex` write reaches `poll_selection` and
+//! marks the row `Selected`. An earlier build instead observed a *fabricated*
+//! `CollectionView` (the runtime's `GetView()` returns `new CollectionView(list)`
+//! for an unhosted, code-built `CollectionViewSource`), which is **not** the live
+//! `ListBox`'s default view, so control selection never arrived; this test guards
+//! against regressing to that.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,10 +53,6 @@ const CAPTURE_AT: usize = 30;
 const EXIT_AT: usize = 40;
 
 #[test]
-#[ignore = "known gap: the list binding's CollectionView is a separate object from \
-            the ListBox's default view (runtime fabricates it when unhosted), so a \
-            control-side SelectedIndex does not reach the bridge. Fix = bind the \
-            shared default view or wire Selector.SelectionChanged, then un-ignore."]
 fn control_selection_marks_selected_and_emits_message() {
     noesis_license_from_env();
 

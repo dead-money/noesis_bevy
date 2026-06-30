@@ -95,7 +95,7 @@ pub const HUD1_SLOT: &str = "Hud1";
 /// `x:Name` of the right HUD mount slot (player 2).
 pub const HUD2_SLOT: &str = "Hud2";
 
-/// `x:Name` of the inventory `ItemsControl`.
+/// `x:Name` of the inventory `ListBox` (a `Selector`, so row selection is real).
 pub const INVENTORY_NAME: &str = "Inventory";
 
 /// `x:Name` of the "heal player 1" host button.
@@ -144,23 +144,51 @@ pub const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/
     <Button x:Name="AddItem" Content="Add Item" Padding="10,4"/>
   </StackPanel>
 
-  <!-- Primitive 2: the inventory. Rows ARE entities; this ItemsControl binds the
-       reconciled collection. An ItemsControl (not a ListBox) lets each row's click
-       bubble out as a per-row UiClicked. -->
+  <!-- Primitive 2: the inventory. Rows ARE entities; this ListBox binds the
+       reconciled collection. A ListBox (a Selector) makes selection real: clicking
+       a row marks its entity `Selected` (read back via With<Selected>), and the
+       row's MouseLeftButtonUp still bubbles out as a per-row UiClicked. -->
   <Border Grid.Row="2" Background="#FF161B22" Margin="12" CornerRadius="6">
-    <ItemsControl x:Name="Inventory">
-      <ItemsControl.ItemTemplate>
+    <ListBox x:Name="Inventory" Background="Transparent" BorderThickness="0">
+      <!-- A bare ListBox/ListBoxItem has no ControlTemplate without the SDK theme
+           (it would render as magenta placeholders), so the example supplies a
+           minimal one: a flat container and a row Border that turns blue on
+           IsSelected. This keeps `cargo run --example ecs_ui` selectable with no
+           theme. -->
+      <ListBox.Template>
+        <ControlTemplate TargetType="ListBox">
+          <ItemsPresenter Margin="6"/>
+        </ControlTemplate>
+      </ListBox.Template>
+      <ListBox.ItemContainerStyle>
+        <Style TargetType="ListBoxItem">
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ListBoxItem">
+                <Border x:Name="Bd" Background="#FF222B36" CornerRadius="4"
+                        Margin="0,3" Padding="10,6">
+                  <ContentPresenter/>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsSelected" Value="True">
+                    <Setter TargetName="Bd" Property="Background" Value="#FF2D6DF0"/>
+                  </Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Style>
+      </ListBox.ItemContainerStyle>
+      <ListBox.ItemTemplate>
         <DataTemplate>
-          <Border Background="#FF222B36" CornerRadius="4" Margin="6,3" Padding="10,6">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock Text="{Binding name}" Foreground="#FFE6EDF3" Width="160"/>
-              <TextBlock Text="x" Foreground="#FF7D8590"/>
-              <TextBlock Text="{Binding qty}" Foreground="#FFE6EDF3" Margin="4,0,0,0"/>
-            </StackPanel>
-          </Border>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="{Binding name}" Foreground="#FFE6EDF3" Width="160"/>
+            <TextBlock Text="x" Foreground="#FF7D8590"/>
+            <TextBlock Text="{Binding qty}" Foreground="#FFE6EDF3" Margin="4,0,0,0"/>
+          </StackPanel>
         </DataTemplate>
-      </ItemsControl.ItemTemplate>
-    </ItemsControl>
+      </ListBox.ItemTemplate>
+    </ListBox>
   </Border>
 </Grid>"##;
 

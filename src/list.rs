@@ -35,12 +35,15 @@
 //!   Noesis sort/filter (the SDK exposes none); ordering is entirely Rust-side and
 //!   reconciled with `Move` ops, so a reorder keeps the moved container — and its
 //!   selection — alive. "Reset is the enemy."
-//! - **Currency *is* selection.** The control's `ICollectionView` current item is
-//!   the single source of selection truth (no parallel channel). A UI selection
-//!   surfaces as a [`Selected`] marker on the row entity (and a
-//!   [`NoesisListSelection`] message); setting / clearing [`Selected`] from a
-//!   system drives the current item the other way. Within a frame the **UI wins**
-//!   (record-then-apply), so the two authorities never oscillate.
+//! - **The control's selection *is* the selection.** The bound `Selector` /
+//!   `ListBox`'s own `SelectedItem` is the single source of truth (no parallel
+//!   channel, no separate `CollectionView`). A UI selection surfaces as a
+//!   [`Selected`] marker on the row entity (and a [`NoesisListSelection`] message);
+//!   setting / clearing [`Selected`] from a system drives the control's
+//!   `SelectedIndex` the other way. Within a frame the **UI wins**
+//!   (record-then-apply), so the two authorities never oscillate. A `Move`/reorder
+//!   needs no special handling: a `ListBox` tracks the selected *item*, not the
+//!   slot, so selection rides the `Move`.
 //!
 //! # Threading & lifetime
 //!
@@ -68,8 +71,8 @@ use noesis_runtime::binding::ObservableCollection;
 use noesis_runtime::classes::{
     ClassBuilder, ClassInstance, ClassRegistration, Instance, PropertyChangeHandler, PropertyValue,
 };
-use noesis_runtime::collection_view::{CollectionView, CollectionViewSource};
 use noesis_runtime::ffi::{ClassBase, PropType};
+use noesis_runtime::view::FrameworkElement;
 
 use crate::plain_vm::{NoesisViewModel, PlainType, PlainValue};
 use crate::render::{NoesisRenderState, NoesisSet};
@@ -319,11 +322,17 @@ impl ListOps {
 pub(crate) struct ListBinding {
     /// Backing collection bound as the control's `ItemsSource`.
     coll: ObservableCollection,
-    /// Source of the `ICollectionView` over `coll`; drops after `coll`.
-    cvs: CollectionViewSource,
-    /// Cached `ICollectionView`, held for the binding's lifetime so currency
-    /// (selection) is not reset by a fresh `GetView`.
-    view: Option<CollectionView>,
+    /// A `+1` handle on the bound list control (a `Selector` / `ListBox`), resolved
+    /// by `x:Name` when the `ItemsSource` binds and refreshed on a scene rebuild.
+    /// Selection is read (`selected_item`) and driven (`set_selected_index`)
+    /// directly on this control — the control's own selection is the single source
+    /// of truth, so there is no separate `CollectionView` to keep in sync. `None`
+    /// until the control is resolved.
+    control: Option<FrameworkElement>,
+    /// Whether the bound control is a `Selector` (has a selection). A plain
+    /// `ItemsControl` is not, so the control→[`Selected`] reconcile is skipped and
+    /// selection is left entirely to the app (e.g. a per-row click observer).
+    is_selector: bool,
     /// Realized rows in collection order. Drops after `coll`, before
     /// `registration`.
     rows: IndexMap<Entity, RowSlot>,
@@ -337,12 +346,11 @@ pub(crate) struct ListBinding {
     /// Last currency we observed/drove, as a row entity — the record half of the
     /// record-then-apply selection authority.
     last_currency: Option<Entity>,
-    /// Whether the first selection poll has run. A fresh `ICollectionView` starts
-    /// with row 0 current; without this we'd report that default currency as a
-    /// *UI selection* the very first frame a list fills, marking [`Selected`] and
-    /// emitting a [`NoesisListSelection`] before any user input. The first poll
-    /// instead adopts the default currency as the baseline silently, so only a
-    /// genuine later change is reported.
+    /// Whether the first selection poll has run. The first poll adopts the
+    /// control's initial selection as the baseline silently (a fresh `ListBox` has
+    /// none), so an unsolicited default selection is never reported as a *UI
+    /// selection* — only a genuine later change marks [`Selected`] / emits a
+    /// [`NoesisListSelection`].
     selection_primed: bool,
     /// The row-object class registration. **Last field**: drops after every
     /// instance, so the class outlives its instances.
@@ -358,14 +366,10 @@ impl Default for ListBinding {
 impl ListBinding {
     /// A fresh, empty, unbound list (with its collection view over it).
     pub(crate) fn new() -> Self {
-        let coll = ObservableCollection::new();
-        let mut cvs = CollectionViewSource::new();
-        cvs.set_source(&coll);
-        let view = cvs.view();
         Self {
-            coll,
-            cvs,
-            view,
+            coll: ObservableCollection::new(),
+            control: None,
+            is_selector: false,
             rows: IndexMap::new(),
             bound_for_uri: None,
             entity_field_index: 0,
@@ -566,69 +570,58 @@ impl ListBinding {
     }
 
     /// Detach (logically) so the next bind pass re-binds against a rebuilt scene.
+    /// The cached control handle points into the old scene, so drop it and re-prime
+    /// selection: the next bind re-resolves the control and re-baselines against it.
     pub(crate) fn reset_bind(&mut self) {
         self.bound_for_uri = None;
+        self.control = None;
+        self.is_selector = false;
+        self.last_currency = None;
+        self.selection_primed = false;
     }
 
-    /// Lazily (re-)fetch the `ICollectionView` over the collection.
-    fn live_view(&mut self) -> Option<&CollectionView> {
-        if self.view.is_none() {
-            self.view = self.cvs.view();
-        }
-        self.view.as_ref()
+    /// Stash a `+1` handle on the bound control so selection is read and driven on
+    /// it directly. Called when the `ItemsSource` binds (and on each rebind). Probes
+    /// whether the control is a `Selector`: `selected_index()` is `Some` iff it
+    /// `DynamicCast`s to one (a plain `ItemsControl` returns `None`), which gates the
+    /// control→[`Selected`] reconcile in [`Self::poll_selection`].
+    pub(crate) fn set_control(&mut self, control: FrameworkElement) {
+        self.is_selector = control.selected_index().is_some();
+        self.control = Some(control);
     }
 
-    /// The row entity matching the collection view's current item by pointer
-    /// identity, or `None` when the cursor is off the ends.
-    fn current_entity(&mut self) -> Option<Entity> {
-        let ptr: *mut c_void = {
-            let view = self.live_view()?;
-            view.current_item()?.raw()
-        };
+    /// The row entity matching the control's selected item by pointer identity, or
+    /// `None` when nothing is selected.
+    fn current_entity(&self) -> Option<Entity> {
+        let ptr: *mut c_void = self.control.as_ref()?.selected_item()?.as_ptr();
         self.rows
             .iter()
             .find(|(_, slot)| std::ptr::eq(slot.instance.raw(), ptr))
             .map(|(e, _)| *e)
     }
 
-    /// Reconcile selection (currency). **UI wins within a frame**: if the current
-    /// item changed since last poll, report it (the caller sets [`Selected`]).
-    /// Otherwise, if the app's [`Selected`] differs from currency, drive the
-    /// current item to it (record-then-apply). See the module docs.
+    /// Reconcile selection against the control's own `SelectedItem`. **UI wins
+    /// within a frame**: if the control's selection changed since the last poll,
+    /// report it (the caller sets [`Selected`]). Otherwise, if the app's
+    /// [`Selected`] differs from the control's selection, drive the control's
+    /// `SelectedIndex` to it (record-then-apply). See the module docs.
     ///
-    /// `structurally_changed` flags an Add/Remove/Move this frame. Noesis keeps the
-    /// `ICollectionView` cursor pinned to an *ordinal position*, not the moved
-    /// item, so after a reorder we re-anchor the cursor onto the selected row's new
-    /// index — otherwise a reorder would masquerade as a UI selection change. This
-    /// is what makes `Selected` (and scroll) ride a `Move`, per the contract.
-    pub(crate) fn poll_selection(
-        &mut self,
-        desired_selected: Option<Entity>,
-        structurally_changed: bool,
-    ) -> SelectionOutcome {
-        if structurally_changed && let Some(sel) = self.last_currency {
-            match self.rows.get_index_of(&sel).map(|p| p as i32) {
-                Some(position) => {
-                    if let Some(view) = self.live_view() {
-                        view.move_current_to_position(position);
-                    }
-                }
-                None => {
-                    // The selected row was removed; clear the cursor and let the
-                    // normal path below settle on "no selection".
-                    if let Some(view) = self.live_view() {
-                        view.move_current_to_position(-1);
-                    }
-                    self.last_currency = None;
-                }
-            }
+    /// No structural-change handling is needed: a `ListBox` tracks the selected
+    /// *item*, not the slot, so its selection rides an Add / Remove / `Move`
+    /// natively — the moved row stays selected, a removed selected row clears.
+    pub(crate) fn poll_selection(&mut self, desired_selected: Option<Entity>) -> SelectionOutcome {
+        // A non-Selector (plain `ItemsControl`) has no control selection to be the
+        // source of truth; leave [`Selected`] to the app (e.g. a per-row `UiClicked`
+        // observer) and never clear it.
+        if !self.is_selector {
+            return SelectionOutcome::Unchanged;
         }
         let current = self.current_entity();
         if !self.selection_primed {
-            // First poll: adopt the default currency (row 0 of a fresh view) as the
-            // baseline WITHOUT reporting it — an unsolicited selection isn't a UI
-            // event. Fall through so an app-set `desired_selected` is still honored
-            // this frame.
+            // First poll: adopt the control's initial selection (a fresh `ListBox`
+            // has none) as the baseline WITHOUT reporting it — an unsolicited
+            // default isn't a UI event. Fall through so an app-set `desired_selected`
+            // is still honored this frame.
             self.selection_primed = true;
             self.last_currency = current;
         } else if current != self.last_currency {
@@ -636,12 +629,14 @@ impl ListBinding {
             return SelectionOutcome::UiSelected(current);
         }
         if desired_selected != current {
-            let position = match desired_selected {
+            let index = match desired_selected {
                 Some(e) => self.rows.get_index_of(&e).map_or(-1, |i| i as i32),
                 None => -1,
             };
-            if let Some(view) = self.live_view() {
-                view.move_current_to_position(position);
+            if let Some(control) = self.control.as_mut() {
+                // Best-effort drive of the control's selection to match the app's
+                // `Selected`; a false return (bad index / read-only) is non-fatal.
+                let _ = control.set_selected_index(index);
             }
             self.last_currency = desired_selected;
         }
