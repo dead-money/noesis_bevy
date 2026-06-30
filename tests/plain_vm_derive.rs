@@ -56,6 +56,10 @@ fn decode(kind: PlainType, value: &PlainValueRef) -> PlainValue {
             .as_bool()
             .map(PlainValue::Bool)
             .unwrap_or(PlainValue::Null),
+        PlainType::U64 => value
+            .as_u64()
+            .map(PlainValue::U64)
+            .unwrap_or(PlainValue::Null),
         PlainType::BaseComponent => PlainValue::Null,
     }
 }

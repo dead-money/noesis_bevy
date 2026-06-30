@@ -124,3 +124,10 @@ path = "examples/xaml_viewer.rs"
 [[example]]
 name = "scoreboard"
 path = "examples/scoreboard.rs"
+
+# TEMPORARY (feat/ecs-ui-api): build against the unpublished sibling runtime that
+# carries the new ECS-UI FFI (ObservableCollection::Move, element u64 user-data +
+# source->DataContext accessor, SelectionChanged). Revert to the published 0.10.x
+# bump before this branch merges; do NOT publish with this patch in place.
+[patch.crates-io]
+noesis_runtime = { path = "../noesis_runtime" }

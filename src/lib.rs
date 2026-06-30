@@ -32,6 +32,7 @@ pub mod items;
 pub mod layout;
 pub mod markup;
 pub mod plain_vm;
+pub mod reconcile;
 pub mod render;
 pub mod render_device;
 pub mod resources;

@@ -69,6 +69,48 @@ use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedXamlMap, XamlRegistry};
 
+thread_local! {
+    /// Cumulative count of FFI "hops" — calls that cross into the Noesis C++
+    /// engine — made on the Noesis thread, this frame and every frame before it.
+    /// Lives in a `thread_local` rather than on [`NoesisRenderState`] because the
+    /// dominant choke point, [`resolve_named`], is a free function with no `self`
+    /// to hang a field off. All Noesis work happens on one thread (the engine is
+    /// thread-affine), so a non-atomic `Cell` is both correct and as cheap as a
+    /// plain field. Surfaced per frame through
+    /// [`NoesisDiagnostics::ffi_hops`](crate::diagnostics::NoesisDiagnostics::ffi_hops).
+    static FFI_HOPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one FFI hop into the engine. Cheap: a single non-atomic `Cell` bump on
+/// the Noesis thread. Called at the FFI choke points — element resolution
+/// ([`resolve_named`]), DP get/set, and collection ops — so later perf work can
+/// reason about how much engine traffic a frame costs. See [`FFI_HOPS`].
+#[inline]
+pub(crate) fn record_ffi_hop() {
+    FFI_HOPS.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// Read the cumulative FFI-hop count for the Noesis thread. Zero until the first
+/// engine call. See [`FFI_HOPS`].
+#[inline]
+#[must_use]
+pub(crate) fn ffi_hops() -> u64 {
+    FFI_HOPS.with(std::cell::Cell::get)
+}
+
+/// Wall-time of the most recent [`NoesisSet::Apply`] phase, plus the in-flight
+/// start stamp. A plain `Send` resource (not Noesis state) so it can be read from
+/// ordinary systems; [`apply_timer_start`]/[`apply_timer_end`] bracket the whole
+/// Apply set (they sit at the tail of Ensure and the head of Drive, and the four
+/// `NoesisSet` phases are `.chain()`-ed), and [`crate::diagnostics`] mirrors
+/// [`last`](Self::last) into [`NoesisDiagnostics`](crate::diagnostics::NoesisDiagnostics).
+#[derive(Resource, Default)]
+pub(crate) struct NoesisApplyTimer {
+    started: Option<std::time::Instant>,
+    /// Duration of the previous frame's Apply phase.
+    pub(crate) last: std::time::Duration,
+}
+
 /// Color format of the per-view intermediate Noesis paints into. Must match
 /// the private `RT_COLOR_FORMAT` in `render_device::wgpu_device`.
 const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -714,6 +756,9 @@ struct BakeRig {
 ///
 /// Returns [`None`] if any segment along the path fails to resolve.
 fn resolve_named(root: &FrameworkElement, path: &str) -> Option<FrameworkElement> {
+    // The single most-travelled FFI choke point: nearly every per-element apply
+    // resolves a name first, so counting here captures the bulk of engine traffic.
+    record_ffi_hop();
     resolve_scope_path(root, path, |host, name| host.find_name(name))
 }
 
@@ -999,6 +1044,7 @@ impl NoesisRenderState {
                 continue;
             };
             if binding.needs_bind(&uri) {
+                record_ffi_hop(); // collection op: bind an ItemsSource into the engine.
                 if element.set_items_source(binding.collection()) {
                     binding.mark_bound(&uri);
                 } else {
@@ -2511,6 +2557,7 @@ impl NoesisRenderState {
                 );
                 continue;
             };
+            record_ffi_hop(); // DP set: a write into the engine.
             if value.write_to(&mut element, property) {
                 // Update the snapshot eagerly so the read pass doesn't emit a
                 // phantom change for a write we just issued ourselves.
@@ -2550,6 +2597,7 @@ impl NoesisRenderState {
             let Some(element) = resolve_named(&content, &watch.name) else {
                 continue;
             };
+            record_ffi_hop(); // DP get: a read out of the engine.
             let Some(current) = watch.kind.read_from(&element, &watch.property) else {
                 continue;
             };
@@ -3497,6 +3545,46 @@ impl NoesisRenderState {
             self.teardown_scene(entity);
         }
     }
+
+    /// Number of live scene instances. Mirrors `self.scenes.len()`; surfaced
+    /// through [`NoesisDiagnostics`](crate::diagnostics::NoesisDiagnostics::live_scenes)
+    /// so a despawn-leak test can assert the side table drains back to baseline.
+    #[must_use]
+    pub(crate) fn live_scene_count(&self) -> usize {
+        self.scenes.len()
+    }
+
+    /// Fully reap every Noesis resource owned on behalf of `entity` — its scene
+    /// *and* every per-entity side-table entry — when the view (or, later, panel)
+    /// is despawned or loses its [`NoesisView`]. Unlike [`Self::teardown_scene`]
+    /// (a *rebuild* step that drops only the scene and leaves the view models /
+    /// collections / bindings parked for re-attach), this is the *terminal*
+    /// teardown: it drops the owners too, so nothing leaks once the entity is gone.
+    ///
+    /// Drop order mirrors [`Drop`]: the scene (`View`) first, because it holds
+    /// refs to the VM `ClassInstance`s and `ObservableCollection`s set as its
+    /// `DataContext`/`ItemsSource`; only once those refs release is it safe to
+    /// drop the owners (or a live View-held instance would outlive the
+    /// `ClassRegistration` that unregisters its class → use-after-free). The
+    /// scratch dedupe tables are keyed by entity and just dropped. No-op for an
+    /// entity we never tracked.
+    pub(crate) fn teardown_for(&mut self, entity: Entity) {
+        // 1. Scene first: `Renderer::shutdown` + `View` drop releases the View's
+        //    refs to this entity's owned VMs / collections / bindings.
+        self.teardown_scene(entity);
+        // 2. Now the last refs; drop the owners (same order as `Drop`).
+        self.view_models.remove(&entity);
+        self.items_sources.retain(|(ent, _), _| *ent != entity);
+        self.plain_vms.retain(|(ent, _), _| *ent != entity);
+        self.command_hosts.remove(&entity);
+        self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
+        // 3. Per-entity scratch / dedupe state: just memory, no Noesis refs.
+        self.last_keydown_swallow
+            .retain(|(ent, _), _| *ent != entity);
+        self.last_event_config
+            .retain(|(ent, _, _), _| *ent != entity);
+        self.scenes_built_this_frame.remove(&entity);
+    }
 }
 
 impl Drop for NoesisRenderState {
@@ -3812,6 +3900,40 @@ fn ensure_noesis_scene(
     }
 }
 
+/// Reap the Noesis state of any view whose [`NoesisView`] was removed since last
+/// frame — whether the whole entity was despawned or just the component dropped.
+/// This is the crate's only teardown-on-removal hook: without it a despawned view
+/// leaks its (`!Send`) scene + side-table entries for the life of the process.
+/// Runs on the main thread (the `NonSendMut` forces it there, where Noesis lives)
+/// at the head of [`NoesisSet::Ensure`], before [`ensure_noesis_scene`] rebuilds
+/// the survivors.
+#[allow(clippy::needless_pass_by_value)]
+fn teardown_removed_views(
+    mut removed: RemovedComponents<NoesisView>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        state.teardown_for(entity);
+    }
+}
+
+/// Stamp the start of the [`NoesisSet::Apply`] phase. Pairs with
+/// [`apply_timer_end`]; see [`NoesisApplyTimer`].
+fn apply_timer_start(mut timer: ResMut<NoesisApplyTimer>) {
+    timer.started = Some(std::time::Instant::now());
+}
+
+/// Close the [`NoesisSet::Apply`] timing window opened by [`apply_timer_start`],
+/// recording the elapsed wall-time into [`NoesisApplyTimer::last`].
+fn apply_timer_end(mut timer: ResMut<NoesisApplyTimer>) {
+    if let Some(start) = timer.started.take() {
+        timer.last = start.elapsed();
+    }
+}
+
 /// Re-apply each view's per-frame live settings (PPAA + DPI scale). Cheap:
 /// compares against the last-applied value and only fires an FFI call on change.
 #[allow(clippy::needless_pass_by_value)]
@@ -4070,6 +4192,7 @@ impl Plugin for NoesisRenderPlugin {
         // Main-world driving pipeline: all on the main thread (the one thread
         // Bevy pins reliably), satisfying Noesis's thread-affinity contract.
         // Bridge plugins slot their per-view apply systems into `NoesisSet::Apply`.
+        app.init_resource::<NoesisApplyTimer>();
         app.configure_sets(
             PostUpdate,
             (
@@ -4089,8 +4212,21 @@ impl Plugin for NoesisRenderPlugin {
                     sync_texture_provider_map,
                 )
                     .in_set(NoesisSet::Sync),
+                // Reap despawned views first, then (re)build the survivors. The
+                // timer start sits at the tail of Ensure so it brackets the whole
+                // Apply set (the four phases are `.chain()`-ed above).
+                teardown_removed_views
+                    .in_set(NoesisSet::Ensure)
+                    .before(ensure_noesis_scene),
                 ensure_noesis_scene.in_set(NoesisSet::Ensure),
+                apply_timer_start
+                    .in_set(NoesisSet::Ensure)
+                    .after(ensure_noesis_scene),
                 (apply_live_scene_flags, apply_noesis_input).in_set(NoesisSet::Apply),
+                // Timer end leads Drive, closing the window after every Apply system.
+                apply_timer_end
+                    .in_set(NoesisSet::Drive)
+                    .before(drive_noesis_frame),
                 drive_noesis_frame.in_set(NoesisSet::Drive),
             ),
         );

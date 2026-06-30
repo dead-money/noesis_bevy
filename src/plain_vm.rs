@@ -81,6 +81,7 @@ pub(crate) fn unbox(kind: PlainType, value: &PlainValueRef) -> PlainValue {
         PlainType::Double => value.as_f64().map(PlainValue::Double),
         PlainType::Bool => value.as_bool().map(PlainValue::Bool),
         PlainType::String => value.as_str().map(|s| PlainValue::String(s.to_owned())),
+        PlainType::U64 => value.as_u64().map(PlainValue::U64),
         PlainType::BaseComponent => None,
     };
     decoded.unwrap_or(PlainValue::Null)
