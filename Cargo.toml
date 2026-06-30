@@ -129,6 +129,10 @@ path = "examples/xaml_viewer.rs"
 name = "scoreboard"
 path = "examples/scoreboard.rs"
 
+[[example]]
+name = "ecs_ui"
+path = "examples/ecs_ui.rs"
+
 # TEMPORARY (feat/ecs-ui-api): build against the unpublished sibling runtime that
 # carries the new ECS-UI FFI (ObservableCollection::Move, element u64 user-data +
 # source->DataContext accessor, SelectionChanged). Revert to the published 0.10.x
