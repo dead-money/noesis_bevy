@@ -109,6 +109,23 @@ pub struct NoesisRoutedEvent {
     pub args: RoutedEventSnapshot,
 }
 
+/// Observer-facing twin of [`NoesisRoutedEvent`]: a routed event surfaced as an
+/// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
+/// entity by default). Read the target with [`On::event_target`].
+#[derive(EntityEvent, Debug, Clone)]
+pub struct UiRoutedEvent {
+    /// Trigger target: the watch entry's `target` (the view entity by default).
+    pub entity: Entity,
+    /// The [`NoesisView`](crate::NoesisView) entity the event originated in.
+    pub view: Entity,
+    /// `x:Name` of the element the handler was attached to.
+    pub name: String,
+    /// Which routed event fired.
+    pub event: RoutedEvent,
+    /// Best-effort snapshot of the event args.
+    pub args: RoutedEventSnapshot,
+}
+
 /// One entry in [`NoesisEventWatch`]: an element `x:Name`, the [`RoutedEvent`] to
 /// subscribe, and two routing flags.
 ///
@@ -130,6 +147,8 @@ pub struct EventWatchEntry {
     /// Whether the handler runs even after a prior same-element handler marked
     /// the event handled.
     pub handled_too: bool,
+    /// Entity the fired [`UiRoutedEvent`] targets; `None` → the view entity.
+    pub target: Option<Entity>,
 }
 
 impl EventWatchEntry {
@@ -140,6 +159,7 @@ impl EventWatchEntry {
             event,
             mark_handled: false,
             handled_too: false,
+            target: None,
         }
     }
 
@@ -155,6 +175,14 @@ impl EventWatchEntry {
     #[must_use]
     pub fn handled_too(mut self) -> Self {
         self.handled_too = true;
+        self
+    }
+
+    /// Builder: target the fired [`UiRoutedEvent`] at `target` instead of the
+    /// view.
+    #[must_use]
+    pub fn target(mut self, target: Entity) -> Self {
+        self.target = Some(target);
         self
     }
 }
@@ -188,14 +216,15 @@ impl NoesisEventWatch {
 /// entity, the element name, the event, and the captured arg snapshot.
 #[derive(Resource, Clone, Default)]
 pub struct SharedRoutedEventQueue(
-    pub(crate) Arc<Mutex<Vec<(Entity, String, RoutedEvent, RoutedEventSnapshot)>>>,
+    pub(crate) Arc<Mutex<Vec<(Entity, Entity, String, RoutedEvent, RoutedEventSnapshot)>>>,
 );
 
 impl SharedRoutedEventQueue {
-    /// Push `(view, name, event, snapshot)` from a routed-event callback.
+    /// Push `(view, target, name, event, snapshot)` from a routed-event callback.
     pub(crate) fn push(
         &self,
         view: Entity,
+        target: Entity,
         name: String,
         event: RoutedEvent,
         args: RoutedEventSnapshot,
@@ -203,10 +232,10 @@ impl SharedRoutedEventQueue {
         self.0
             .lock()
             .expect("SharedRoutedEventQueue poisoned")
-            .push((view, name, event, args));
+            .push((view, target, name, event, args));
     }
 
-    fn drain(&self) -> Vec<(Entity, String, RoutedEvent, RoutedEventSnapshot)> {
+    fn drain(&self) -> Vec<(Entity, Entity, String, RoutedEvent, RoutedEventSnapshot)> {
         let mut guard = self.0.lock().expect("SharedRoutedEventQueue poisoned");
         if guard.is_empty() {
             Vec::new()
@@ -216,14 +245,23 @@ impl SharedRoutedEventQueue {
     }
 }
 
-/// Drain the routed-event queue into [`NoesisRoutedEvent`] messages (one per fire).
+/// Drain the routed-event queue: write a [`NoesisRoutedEvent`] message **and**
+/// trigger a [`UiRoutedEvent`] `EntityEvent` (one of each per fire).
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_routed_event_queue(
     queue: Res<SharedRoutedEventQueue>,
     mut messages: MessageWriter<NoesisRoutedEvent>,
+    mut commands: Commands,
 ) {
-    for (view, name, event, args) in queue.drain() {
+    for (view, target, name, event, args) in queue.drain() {
         messages.write(NoesisRoutedEvent {
+            view,
+            name: name.clone(),
+            event,
+            args: args.clone(),
+        });
+        commands.trigger(UiRoutedEvent {
+            entity: target,
             view,
             name,
             event,
@@ -279,23 +317,26 @@ mod tests {
     fn shared_routed_queue_drain_takes_all_and_resets() {
         let q = SharedRoutedEventQueue::default();
         let v = Entity::PLACEHOLDER;
+        let t = Entity::PLACEHOLDER;
         q.push(
             v,
+            t,
             "Alpha".into(),
             RoutedEvent::MouseDown,
             RoutedEventSnapshot::default(),
         );
         q.push(
             v,
+            t,
             "Beta".into(),
             RoutedEvent::MouseUp,
             RoutedEventSnapshot::default(),
         );
         let drained = q.drain();
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].1, "Alpha");
-        assert_eq!(drained[0].2, RoutedEvent::MouseDown);
-        assert_eq!(drained[1].2, RoutedEvent::MouseUp);
+        assert_eq!(drained[0].2, "Alpha");
+        assert_eq!(drained[0].3, RoutedEvent::MouseDown);
+        assert_eq!(drained[1].3, RoutedEvent::MouseUp);
         assert!(q.drain().is_empty());
     }
 

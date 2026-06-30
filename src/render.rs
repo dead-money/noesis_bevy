@@ -50,8 +50,8 @@ use bevy_render::{
 use noesis_runtime::animation::{Animation, DoubleAnimation, Timeline};
 use noesis_runtime::commands::Command;
 use noesis_runtime::events::{
-    ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, subscribe_click,
-    subscribe_event, subscribe_keydown,
+    ClickSubscription, EventArgs, EventSubscription, KeyDownSubscription, RoutedEvent,
+    subscribe_click, subscribe_event, subscribe_keydown,
 };
 use noesis_runtime::input::KeyBinding;
 use noesis_runtime::transforms::{CompositeTransform, CompositeTransform3D, MatrixTransform3D};
@@ -530,18 +530,23 @@ pub(crate) struct NoesisRenderState {
     /// Drives storyboard progression; `elapsed_secs_f64()` each frame
     /// vs. Noesis's requirement for monotonically-increasing seconds.
     clock_origin: std::time::Instant,
-    /// Last `swallow` set installed for each subscribed keydown name.
-    /// Used by [`Self::sync_keydown_subscriptions`] to detect when a
-    /// swallow list has changed and re-bind the C++-side handler with
-    /// the new closure (which captures `swallow` by value).
-    last_keydown_swallow: HashMap<(Entity, String), Vec<Key>>,
+    /// Last `(swallow set, UiKeyDown target)` installed for each subscribed
+    /// keydown name. Used by [`Self::sync_keydown_subscriptions`] to detect when
+    /// either has changed and re-bind the C++-side handler with the new closure
+    /// (which captures both by value).
+    last_keydown_swallow: HashMap<(Entity, String), (Vec<Key>, Entity)>,
+    /// Last [`UiClicked`](crate::events::UiClicked) target installed per
+    /// subscribed `(view, x:Name)`. The click callback captures the target by
+    /// value, so a target change re-binds the C++-side handler. Mirrors
+    /// [`Self::last_keydown_swallow`].
+    last_click_target: HashMap<(Entity, String), Entity>,
     /// Last `(mark_handled, handled_too)` flags installed per subscribed
     /// `(view, x:Name, event name)`. The routed-event callback captures these
     /// by value, so a flag change can't be patched in place; we detect it
     /// here and drop + re-create the subscription. Mirrors
     /// [`Self::last_keydown_swallow`]. Keyed across views; pruned per view at
     /// sync time.
-    last_event_config: HashMap<(Entity, String, &'static str), (bool, bool)>,
+    last_event_config: HashMap<(Entity, String, &'static str), (bool, bool, Entity)>,
     /// Reusable offscreen view for baking label panels (lazily built). Lives
     /// here so it shares the single registered device and its renderer is torn
     /// down before the device drops (see [`Drop`]).
@@ -655,6 +660,14 @@ struct SceneInstance {
     /// `&'static str` half is `RoutedEvent::as_str()` (the enum is not `Hash`,
     /// its stable name is).
     event_subs: HashMap<(String, &'static str), EventSubscription>,
+    /// Per-row click subscriptions for entity-keyed lists, keyed by the list
+    /// control's `x:Name`. One `MouseLeftButtonUp` handler is installed on each
+    /// bound `ItemsControl`; its callback walks the clicked element's
+    /// `DataContext` to the row's hidden `__entity` field and pushes a
+    /// row-targeted [`UiClicked`](crate::events::UiClicked). Installed by
+    /// [`NoesisRenderState::apply_list_for`] when the `ItemsSource` binds; drops
+    /// with the scene, same orphan-safety rules as [`Self::event_subs`].
+    row_click_subs: HashMap<String, EventSubscription>,
     /// Last text snapshot per name in [`crate::text::NoesisTextReadWatch`].
     /// Used to dedupe `NoesisTextChanged` emissions: only push when the
     /// text actually differs from the previous frame's snapshot. Names
@@ -974,6 +987,7 @@ impl NoesisRenderState {
             loaded_app_resources_chain: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
+            last_click_target: HashMap::new(),
             last_event_config: HashMap::new(),
             bake_rig: None,
             view_models: HashMap::new(),
@@ -1262,6 +1276,7 @@ impl NoesisRenderState {
     /// and reconcile selection (currency). Returns the op tally and any UI-driven
     /// selection change for the caller to mirror onto a [`Selected`](crate::list::Selected)
     /// marker. See [`crate::list`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_list_for(
         &mut self,
         entity: Entity,
@@ -1270,6 +1285,7 @@ impl NoesisRenderState {
         schema: &[(&'static str, crate::plain_vm::PlainType)],
         desired: &[crate::list::DesiredRow],
         desired_selected: Option<Entity>,
+        click_queue: &SharedClickQueue,
     ) -> (crate::list::ListOps, crate::list::SelectionOutcome) {
         let key = (entity, name.to_owned());
         let ops = {
@@ -1285,14 +1301,21 @@ impl NoesisRenderState {
             .get(&entity)
             .and_then(|s| s.view.content().map(|c| (c, s.built_for_uri.clone())));
         if let Some((content, uri)) = mount
-            && let Some(binding) = self.lists.get_mut(&key)
-            && binding.needs_bind(&uri)
+            && self.lists.get(&key).is_some_and(|b| b.needs_bind(&uri))
         {
             match resolve_named(&content, name) {
                 Some(mut element) => {
                     record_ffi_hop(); // collection op: bind an ItemsSource.
-                    if element.set_items_source(binding.collection()) {
-                        binding.mark_bound(&uri);
+                    let bound = {
+                        let binding = self.lists.get_mut(&key).expect("checked above");
+                        let ok = element.set_items_source(binding.collection());
+                        if ok {
+                            binding.mark_bound(&uri);
+                        }
+                        ok
+                    };
+                    if bound {
+                        self.install_row_click_sub(entity, name, &element, click_queue);
                     } else {
                         warn!("UiList: element {name:?} is not an ItemsControl; skipped");
                     }
@@ -1309,6 +1332,48 @@ impl NoesisRenderState {
                 b.poll_selection(desired_selected, structurally_changed)
             });
         (ops, selection)
+    }
+
+    /// Install the one per-row `MouseLeftButtonUp` handler on the `ItemsControl`
+    /// named `name` (Primitive 3, per-row events). Templated rows carry no
+    /// `x:Name`, so instead of subscribing each row we subscribe the control once
+    /// and recover the clicked row from the event: the callback walks the event
+    /// source's `DataContext` to the hidden `__entity` `u64` field (stashed per
+    /// row by [`crate::list`]) and pushes a row-targeted [`UiClicked`] onto the
+    /// shared click queue. Stored in the scene so it drops with the view; re-run
+    /// only when the list (re-)binds.
+    fn install_row_click_sub(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        element: &FrameworkElement,
+        click_queue: &SharedClickQueue,
+    ) {
+        let queue_handle = click_queue.clone();
+        let list_name = name.to_owned();
+        let Some(sub) = subscribe_event(
+            element,
+            RoutedEvent::MouseLeftButtonUp,
+            // Observe only: never consume the click, so the control's own
+            // selection / currency handling still runs.
+            false,
+            move |args: &EventArgs| {
+                // The row stashed its Entity bits in the hidden `__entity` field;
+                // recover it straight off the clicked element's DataContext.
+                if let Some(bits) = args.source_data_context_u64(crate::list::ENTITY_FIELD)
+                    && let Some(row) = Entity::try_from_bits(bits)
+                {
+                    queue_handle.push(entity, row, list_name.clone());
+                }
+                false
+            },
+        ) else {
+            warn!("UiList: element {name:?} is not a UIElement; per-row clicks disabled");
+            return;
+        };
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.row_click_subs.insert(name.to_owned(), sub);
+        }
     }
 
     /// Number of live entity-keyed list bindings. Mirrors `self.lists.len()`.
@@ -1811,6 +1876,7 @@ impl NoesisRenderState {
                 click_subs: HashMap::new(),
                 keydown_subs: HashMap::new(),
                 event_subs: HashMap::new(),
+                row_click_subs: HashMap::new(),
                 text_snapshots: HashMap::new(),
                 dp_snapshots: HashMap::new(),
                 transform_handles: HashMap::new(),
@@ -1977,7 +2043,7 @@ impl NoesisRenderState {
     pub(crate) fn sync_click_subscriptions_for(
         &mut self,
         entity: Entity,
-        watch: &[String],
+        entries: &[crate::events::ClickWatchEntry],
         queue: &SharedClickQueue,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
@@ -1986,38 +2052,63 @@ impl NoesisRenderState {
 
         // Drop subscriptions that are no longer requested. `retain` runs
         // each entry's drop in place, which fires the C++ unsubscribe.
-        scene.click_subs.retain(|k, _| watch.iter().any(|w| w == k));
+        scene
+            .click_subs
+            .retain(|k, _| entries.iter().any(|e| &e.name == k));
 
-        // Add new subscriptions. Pull the View's content tree once per
-        // frame; `find_name` is cheap but the FFI hop isn't free.
-        let needs_new = watch.iter().any(|n| !scene.click_subs.contains_key(n));
-        if !needs_new {
+        // Re-bind any entry whose target changed (the callback captures the
+        // target by value), and add brand-new ones. The sibling map keyed by
+        // (view, name) records the captured target.
+        let needs_change = entries.iter().any(|e| {
+            let target = e.target.unwrap_or(entity);
+            !scene.click_subs.contains_key(&e.name)
+                || self
+                    .last_click_target
+                    .get(&(entity, e.name.clone()))
+                    .is_none_or(|prev| *prev != target)
+        });
+        if !needs_change {
             return;
         }
         let Some(content) = scene.view.content() else {
             return;
         };
-        for name in watch {
-            if scene.click_subs.contains_key(name) {
+        for entry in entries {
+            let target = entry.target.unwrap_or(entity);
+            if scene.click_subs.contains_key(&entry.name)
+                && self
+                    .last_click_target
+                    .get(&(entity, entry.name.clone()))
+                    .is_some_and(|prev| *prev == target)
+            {
                 continue;
             }
-            let Some(element) = resolve_named(&content, name) else {
+            let Some(element) = resolve_named(&content, &entry.name) else {
                 warn!(
                     "NoesisClickWatch: x:Name {:?} not found in scene {:?}",
-                    name, scene.built_for_uri,
+                    entry.name, scene.built_for_uri,
                 );
                 continue;
             };
             let queue_handle = queue.clone();
-            let captured_name = name.clone();
+            let captured_name = entry.name.clone();
             let Some(sub) = subscribe_click(&element, move || {
-                queue_handle.push(entity, captured_name.clone());
+                queue_handle.push(entity, target, captured_name.clone());
             }) else {
-                warn!("NoesisClickWatch: element {name:?} is not a BaseButton; skipping");
+                warn!(
+                    "NoesisClickWatch: element {:?} is not a BaseButton; skipping",
+                    entry.name
+                );
                 continue;
             };
-            scene.click_subs.insert(name.clone(), sub);
+            scene.click_subs.insert(entry.name.clone(), sub);
+            self.last_click_target
+                .insert((entity, entry.name.clone()), target);
         }
+
+        // Prune this view's target snapshots whose name is no longer watched.
+        self.last_click_target
+            .retain(|(ent, name), _| *ent != entity || entries.iter().any(|e| &e.name == name));
     }
 
     /// Reconcile the active `UIElement::KeyDown` subscription set against
@@ -2046,14 +2137,17 @@ impl NoesisRenderState {
         // Cheap: a single FFI ref-bump + delegate add per entry, only on
         // the frames the watch actually changes.
         for entry in entries {
-            // If the existing subscription's swallow set matches the
-            // requested one, leave it alone. We track this on the Bevy
-            // side via a sibling map keyed by name.
+            let target = entry.target.unwrap_or(entity);
+            // If the existing subscription's swallow set + target match the
+            // requested ones, leave it alone. We track this on the Bevy side via
+            // a sibling map keyed by name (the closure captures both by value).
             if scene.keydown_subs.contains_key(&entry.name)
                 && self
                     .last_keydown_swallow
                     .get(&(entity, entry.name.clone()))
-                    .is_some_and(|prev| prev == &entry.swallow)
+                    .is_some_and(|(swallow, prev_target)| {
+                        swallow == &entry.swallow && *prev_target == target
+                    })
             {
                 continue;
             }
@@ -2073,7 +2167,7 @@ impl NoesisRenderState {
             let captured_name = entry.name.clone();
             let swallow = entry.swallow.clone();
             let Some(sub) = subscribe_keydown(&element, move |key: Key| {
-                queue_handle.push(entity, captured_name.clone(), key);
+                queue_handle.push(entity, target, captured_name.clone(), key);
                 swallow.contains(&key)
             }) else {
                 warn!(
@@ -2083,8 +2177,10 @@ impl NoesisRenderState {
                 continue;
             };
             scene.keydown_subs.insert(entry.name.clone(), sub);
-            self.last_keydown_swallow
-                .insert((entity, entry.name.clone()), entry.swallow.clone());
+            self.last_keydown_swallow.insert(
+                (entity, entry.name.clone()),
+                (entry.swallow.clone(), target),
+            );
         }
 
         // Prune this view's swallow snapshots whose name is no longer watched
@@ -2122,13 +2218,15 @@ impl NoesisRenderState {
             let evname = entry.event.as_str();
             let key = (entry.name.clone(), evname);
 
-            // Leave an existing subscription alone iff its captured flags still
-            // match the requested ones (sibling map keyed by view + name + event).
+            let target = entry.target.unwrap_or(entity);
+            // Leave an existing subscription alone iff its captured flags + target
+            // still match the requested ones (sibling map keyed by view + name +
+            // event; the callback captures all three by value).
             if scene.event_subs.contains_key(&key)
                 && self
                     .last_event_config
                     .get(&(entity, entry.name.clone(), evname))
-                    .is_some_and(|prev| *prev == (entry.mark_handled, entry.handled_too))
+                    .is_some_and(|prev| *prev == (entry.mark_handled, entry.handled_too, target))
             {
                 continue;
             }
@@ -2156,7 +2254,13 @@ impl NoesisRenderState {
                 entry.handled_too,
                 move |args: &EventArgs| {
                     let snapshot = RoutedEventSnapshot::capture(args);
-                    queue_handle.push(entity, captured_name.clone(), captured_event, snapshot);
+                    queue_handle.push(
+                        entity,
+                        target,
+                        captured_name.clone(),
+                        captured_event,
+                        snapshot,
+                    );
                     mark_handled
                 },
             ) else {
@@ -2167,11 +2271,11 @@ impl NoesisRenderState {
                 continue;
             };
 
-            // Replace any stale sub (flag change); drop runs the C++ unsubscribe.
+            // Replace any stale sub (flag/target change); drop runs the C++ unsubscribe.
             scene.event_subs.insert(key, sub);
             self.last_event_config.insert(
                 (entity, entry.name.clone(), evname),
-                (entry.mark_handled, entry.handled_too),
+                (entry.mark_handled, entry.handled_too, target),
             );
         }
 
@@ -3945,6 +4049,7 @@ impl NoesisRenderState {
         // 3. Per-entity scratch / dedupe state: just memory, no Noesis refs.
         self.last_keydown_swallow
             .retain(|(ent, _), _| *ent != entity);
+        self.last_click_target.retain(|(ent, _), _| *ent != entity);
         self.last_event_config
             .retain(|(ent, _, _), _| *ent != entity);
         self.scenes_built_this_frame.remove(&entity);

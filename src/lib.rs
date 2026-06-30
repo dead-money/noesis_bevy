@@ -72,8 +72,8 @@ pub use commands::{
 pub use diagnostics::{NoesisDiagnostics, NoesisDiagnosticsPlugin};
 pub use dp::{DpKind, DpValue, DpWatch, NoesisDp, NoesisDpChanged, NoesisDpPlugin};
 pub use events::{
-    Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin, NoesisKeyDown,
-    NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue,
+    ClickWatchEntry, Key, KeyDownWatchEntry, NoesisClickWatch, NoesisClicked, NoesisEventsPlugin,
+    NoesisKeyDown, NoesisKeyDownWatch, SharedClickQueue, SharedKeyDownQueue, UiClicked, UiKeyDown,
 };
 pub use focus::{NoesisFocus, NoesisFocusPlugin};
 pub use focus_input::{
@@ -120,7 +120,7 @@ pub use resources::{
 };
 pub use routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, NoesisRoutedEventsPlugin,
-    RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue,
+    RoutedEvent, RoutedEventSnapshot, SharedRoutedEventQueue, UiRoutedEvent,
 };
 pub use shapes::{NoesisShapes, NoesisShapesPlugin, ShapeKind, ShapeSpec};
 pub use styles::{

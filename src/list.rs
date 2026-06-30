@@ -73,6 +73,12 @@ use noesis_runtime::ffi::{ClassBase, PropType};
 use crate::plain_vm::{NoesisViewModel, PlainType, PlainValue};
 use crate::render::{NoesisRenderState, NoesisSet};
 
+/// Name of the hidden trailing `u64` row property that stores each row's stable
+/// [`Entity`] bits (via [`Entity::to_bits`]). The per-row click handler recovers
+/// the originating row from a clicked element's `DataContext` through this field
+/// (see [`NoesisRenderState::install_row_click_sub`](crate::render)).
+pub(crate) const ENTITY_FIELD: &str = "__entity";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public components & messages
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,7 +343,7 @@ impl ListBinding {
         // Hidden trailing field: the row's stable Entity bits, so a per-row event
         // can recover the originating Entity (Phase 3).
         self.entity_field_index = schema.len() as u32;
-        builder.add_property("__entity", PropType::UInt64);
+        builder.add_property(ENTITY_FIELD, PropType::UInt64);
         match builder.register() {
             Some(reg) => self.registration = Some(reg),
             None => warn!(
@@ -757,6 +763,7 @@ fn sync_lists(
     views: Query<(Entity, &UiList, &ListDesired)>,
     selected_rows: Query<(Entity, &ListedIn), With<Selected>>,
     state: Option<NonSendMut<NoesisRenderState>>,
+    click_queue: Res<crate::events::SharedClickQueue>,
     mut commands: Commands,
     mut ops_writer: MessageWriter<NoesisListOps>,
     mut sel_writer: MessageWriter<NoesisListSelection>,
@@ -772,6 +779,7 @@ fn sync_lists(
             desired.schema,
             &desired.rows,
             desired.selected,
+            &click_queue,
         );
         if ops.touched() {
             ops_writer.write(NoesisListOps {
