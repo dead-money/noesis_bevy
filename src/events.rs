@@ -126,6 +126,25 @@ impl NoesisClickWatch {
             entries: entries.into_iter().collect(),
         }
     }
+
+    /// Watch one more element by `x:Name`, its [`UiClicked`] targeting the view
+    /// entity. The ergonomic path for incrementally subscribing static named
+    /// buttons; use [`ClickWatchEntry`] directly when you need a per-entry target.
+    pub fn watch(&mut self, name: impl Into<String>) -> &mut Self {
+        self.entries.push(ClickWatchEntry::new(name));
+        self
+    }
+
+    /// Watch several more elements by `x:Name`, each [`UiClicked`] targeting the
+    /// view entity. Companion to [`Self::watch`] for the build-up-a-set pattern.
+    pub fn extend_names(
+        &mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self {
+        self.entries
+            .extend(names.into_iter().map(ClickWatchEntry::new));
+        self
+    }
 }
 
 /// Queue between the (main-thread) click callbacks and the drain system.
