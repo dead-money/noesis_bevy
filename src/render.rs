@@ -596,6 +596,11 @@ pub(crate) struct NoesisRenderState {
     /// scenes (so the host has already released its child refs). See
     /// [`crate::panel`].
     panels: HashMap<Entity, PanelEntry>,
+    /// `(panel entity, fragment uri)` pairs whose XAML failed to load/parse, so the
+    /// `error!` fires once instead of every frame (a failed build leaves the
+    /// `panels` slot vacant, so `sync_panel` retries it each frame). Cleared for a
+    /// pair once it builds, and pruned per entity on teardown.
+    failed_fragments: HashSet<(Entity, String)>,
     /// Rust-owned, entity-keyed list bindings (Primitive 2), keyed by `(view
     /// entity, x:Name)`. Each owns an `ObservableCollection` of row instances
     /// reconciled from the view's row query, bound to a named `ItemsControl`.
@@ -1009,6 +1014,7 @@ impl NoesisRenderState {
             command_hosts: HashMap::new(),
             binding_entries: HashMap::new(),
             panels: HashMap::new(),
+            failed_fragments: HashSet::new(),
             lists: HashMap::new(),
             integration_guards: Vec::new(),
         }
@@ -1536,11 +1542,24 @@ impl NoesisRenderState {
         pushes: &[(u32, PlainValue)],
     ) -> Vec<(u32, PlainValue)> {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.panels.entry(entity) {
-            let Some(built) = PanelEntry::build(uri, host, host_name, props) else {
-                warn!("UiPanel: failed to load {uri:?} or register class for panel {entity:?}",);
-                return Vec::new();
-            };
-            slot.insert(built);
+            match PanelEntry::build(uri, host, host_name, props) {
+                Some(built) => {
+                    slot.insert(built);
+                    self.failed_fragments.remove(&(entity, uri.to_owned()));
+                }
+                None => {
+                    // A failed build leaves the slot vacant, so this path retries
+                    // every frame; dedupe the log to once per (entity, uri).
+                    if self.failed_fragments.insert((entity, uri.to_owned())) {
+                        error!(
+                            "UiPanel {entity:?}: fragment {uri:?} failed to load \
+                             (unregistered/typo'd URI, or XAML Noesis rejected outright). \
+                             The panel will not mount until it resolves.",
+                        );
+                    }
+                    return Vec::new();
+                }
+            }
         }
 
         if let Some(entry) = self.panels.get(&entity)
@@ -1602,6 +1621,7 @@ impl NoesisRenderState {
             entry.unmount(&self.scenes);
             drop(entry);
         }
+        self.failed_fragments.retain(|(ent, _)| *ent != entity);
     }
 
     /// Poll panel `entity`'s watched fragment-scope names, returning `(name,

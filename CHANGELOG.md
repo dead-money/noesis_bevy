@@ -54,6 +54,14 @@ pre-1.0, any `0.x` release may contain breaking changes.
   and `static_context()` (freeze empty) are unchanged; the recommended pattern
   stays "one owning component holds all the fields."
 
+- **Loud fragment load failures.** A `UiPanel` fragment whose URI can't be loaded
+  (`FrameworkElement::load` returns `None` — an unregistered/typo'd URI, or XAML
+  Noesis rejects outright) now logs a Bevy `error!` naming the panel entity and
+  URI, instead of silently rendering an empty slot. Deduped per `(entity, uri)`;
+  the panel degrades gracefully without crashing the app or blocking its siblings.
+  (Noesis tolerates many *malformed* fragments by returning a partial tree with
+  only its own parser warning; those don't reach this error path.)
+
 ## [0.10.0] - 2026-06-29
 
 First public release. A Bevy 0.18 plugin that renders Noesis XAML interfaces into
