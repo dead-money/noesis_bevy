@@ -74,6 +74,9 @@ pub struct UiPanel {
     uri: String,
     host: Entity,
     host_name: String,
+    /// Mount even with an empty `DataContext` (no bound components). See
+    /// [`Self::static_context`].
+    static_data: bool,
 }
 
 impl UiPanel {
@@ -86,6 +89,7 @@ impl UiPanel {
             uri: uri.into(),
             host: Entity::PLACEHOLDER,
             host_name: String::new(),
+            static_data: false,
         }
     }
 
@@ -97,6 +101,17 @@ impl UiPanel {
     pub fn mount_into(mut self, host: Entity, host_name: impl Into<String>) -> Self {
         self.host = host;
         self.host_name = host_name.into();
+        self
+    }
+
+    /// Mount even when the entity carries no bound components — a *static* fragment
+    /// with an empty `DataContext` (e.g. a button-only toolbar or a fixed help
+    /// overlay). Without this, a panel whose `DataContext` never gains a field is
+    /// held back (the machinery otherwise waits for components to arrive before it
+    /// freezes the layout, so it can't tell "no data yet" from "no data ever").
+    #[must_use]
+    pub fn static_context(mut self) -> Self {
+        self.static_data = true;
         self
     }
 
@@ -290,7 +305,10 @@ fn sync_panels(
     };
     for (entity, panel, mut agg) in &mut panels {
         if !agg.built {
-            if agg.present.is_empty() {
+            // Hold back until the first bound component arrives, so the frozen layout
+            // captures the full set — unless the panel declares a static (empty)
+            // DataContext, which has no components to wait for.
+            if agg.present.is_empty() && !panel.static_data {
                 continue;
             }
             agg.freeze();
