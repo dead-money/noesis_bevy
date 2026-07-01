@@ -2,8 +2,8 @@
 //!
 //! A host [`NoesisView`] scene carries a `ListBox` (`x:Name="Inv"`). Rows are
 //! plain entities: each carries a `Row` component (`{Binding label}` /
-//! `{Binding weight}`) and a [`ListedIn`] membership pointing at the view. A
-//! [`UiList`] on the view binds the reconciled `ObservableCollection` to the
+//! `{Binding weight}`) and a [`ListedIn`] membership pointing at the list entity. A
+//! [`UiList`] entity binds the reconciled `ObservableCollection` to the
 //! control, ordered by `weight`.
 //!
 //! Properties under test (all via the minimal [`NoesisListOps`] tally + the
@@ -126,9 +126,11 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                         size: UVec2::new(256, 256),
                         ..default()
                     },
-                    // Order rows by weight, ascending: A(1), B(2), C(3).
-                    UiList::new("Inv").sorted_by(1, false),
                 ))
+                .id();
+            // Order rows by weight, ascending: A(1), B(2), C(3).
+            let list = commands
+                .spawn(UiList::new(view, "Inv").sorted_by(1, false))
                 .id();
 
             let a = commands
@@ -137,7 +139,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                         label: "A".into(),
                         weight: 1,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             let b = commands
@@ -146,7 +148,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                         label: "B".into(),
                         weight: 2,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             let c = commands
@@ -155,7 +157,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                         label: "C".into(),
                         weight: 3,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             *entities_startup.lock().unwrap() = Some((a, b, c));

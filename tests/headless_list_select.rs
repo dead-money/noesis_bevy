@@ -94,8 +94,10 @@ fn control_selection_marks_selected_and_emits_message() {
                         size: UVec2::new(256, 256),
                         ..default()
                     },
-                    UiList::new("Inv").sorted_by(1, false), // A(1), B(2), C(3)
                 ))
+                .id();
+            let list = commands
+                .spawn(UiList::new(view, "Inv").sorted_by(1, false)) // A(1), B(2), C(3)
                 .id();
             let a = commands
                 .spawn((
@@ -103,7 +105,7 @@ fn control_selection_marks_selected_and_emits_message() {
                         label: "A".into(),
                         weight: 1,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             let b = commands
@@ -112,7 +114,7 @@ fn control_selection_marks_selected_and_emits_message() {
                         label: "B".into(),
                         weight: 2,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             let c = commands
@@ -121,7 +123,7 @@ fn control_selection_marks_selected_and_emits_message() {
                         label: "C".into(),
                         weight: 3,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             *entities_startup.lock().unwrap() = Some((a, b, c));
@@ -134,7 +136,7 @@ fn control_selection_marks_selected_and_emits_message() {
         Update,
         move |mut frame: Local<usize>,
               mut commands: Commands,
-              views: Query<Entity, With<UiList>>,
+              lists: Query<&UiList>,
               mut sel: MessageReader<NoesisListSelection>,
               selected_q: Query<Entity, With<Selected>>,
               mut exit: MessageWriter<AppExit>| {
@@ -144,10 +146,11 @@ fn control_selection_marks_selected_and_emits_message() {
             }
 
             // Drive the live ListBox's SelectedIndex to row 2 (C), the faithful
-            // headless proxy for a user picking that row.
+            // headless proxy for a user picking that row. The DP bridge targets the
+            // list's view (where the scene lives), not the list entity.
             if *frame == SELECT_AT {
-                if let Ok(view) = views.single() {
-                    commands.entity(view).insert(
+                if let Ok(list) = lists.single() {
+                    commands.entity(list.view).insert(
                         NoesisDp::new().set_i32("Inv", "SelectedIndex", 2).watch(
                             "Inv",
                             "SelectedIndex",

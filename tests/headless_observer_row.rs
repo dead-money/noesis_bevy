@@ -103,9 +103,11 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
                         size: UVec2::new(256, 256),
                         ..default()
                     },
-                    // Order rows by weight ascending: A(1), B(2), C(3).
-                    UiList::new("Inv").sorted_by(1, false),
                 ))
+                .id();
+            // Order rows by weight ascending: A(1), B(2), C(3).
+            let list = commands
+                .spawn(UiList::new(view, "Inv").sorted_by(1, false))
                 .id();
 
             let a = commands
@@ -114,7 +116,7 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
                         label: "A".into(),
                         weight: 1,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             let b = commands
@@ -123,7 +125,7 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
                         label: "B".into(),
                         weight: 2,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             let c = commands
@@ -132,7 +134,7 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
                         label: "C".into(),
                         weight: 3,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ))
                 .id();
             *entities_startup.lock().unwrap() = Some((view, a, b, c));
