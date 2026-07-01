@@ -6,6 +6,8 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-30
+
 ### Fixed
 
 - **Unset stencil reference on clip clears.** Noesis's Clear stencil mode built a
@@ -82,7 +84,8 @@ in a one-UI app, and a `NoesisView` auto-attaches the bridges so a value set bef
 the scene exists lands once it builds. The version starts at 0.10.0 to move in step
 with `noesis_runtime`.
 
-[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/dead-money/noesis_bevy/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/dead-money/noesis_bevy/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/dead-money/noesis_bevy/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/dead-money/noesis_bevy/releases/tag/v0.10.0
