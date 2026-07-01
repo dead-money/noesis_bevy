@@ -19,9 +19,9 @@
 //! }
 //!
 //! // …with a NoesisView entity `view` whose scene has an `x:Name="Inventory"` ListBox:
-//! // commands.entity(view).insert(UiList::new("Inventory"));
-//! // commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(view)));
-//! // commands.spawn((Item { name: "Sword".into(),  qty: 1 }, ListedIn(view)));
+//! // let list = commands.spawn(UiList::new(view, "Inventory")).id();
+//! // commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(list)));
+//! // commands.spawn((Item { name: "Sword".into(),  qty: 1 }, ListedIn(list)));
 //! ```
 //!
 //! # The contract
@@ -56,9 +56,10 @@
 //! [`NoesisRenderState`](crate::render) (thread-affine to the `View`) and released
 //! before `noesis_runtime::shutdown`.
 //!
-//! One [`UiList`] declares one list per owning [`NoesisView`](crate::NoesisView)
-//! entity, of one registered row type. Several lists = several owner entities (the
-//! same "one instance = one entity" stance as [`crate::panel`]).
+//! Each [`UiList`] is its own entity naming one control in a [`NoesisView`]'s scene,
+//! of one registered row type ("one instance = one entity", the same stance as
+//! [`crate::panel`]). A view can own any number of lists (one list entity per
+//! `ListBox`), since the list identity no longer rides on the view entity.
 
 use std::collections::HashSet;
 use std::os::raw::c_void;
@@ -75,7 +76,7 @@ use noesis_runtime::ffi::{ClassBase, PropType};
 use noesis_runtime::view::FrameworkElement;
 
 use crate::plain_vm::{NoesisViewModel, PlainType, PlainValue};
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, NoesisView};
 
 /// Name of the hidden trailing `u64` row property that stores each row's stable
 /// [`Entity`] bits (via [`Entity::to_bits`]). The per-row click handler recovers
@@ -87,13 +88,13 @@ pub(crate) const ENTITY_FIELD: &str = "__entity";
 // Public components & messages
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Row membership: tags an entity into the list owned by `owner` (the
-/// [`NoesisView`](crate::NoesisView) entity carrying the [`UiList`]). Spawn it
-/// alongside a registered row-data component to make the entity a row; despawn the
-/// entity (or remove this component) and the row leaves the list next frame.
+/// Row membership: tags an entity into the list owned by the [`UiList`] entity it
+/// points at (not the view). Spawn it alongside a registered row-data component to
+/// make the entity a row; despawn the entity (or remove this component) and the row
+/// leaves the list next frame.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ListedIn(
-    /// The list-owning [`NoesisView`](crate::NoesisView) entity.
+    /// The [`UiList`] entity this row belongs to.
     pub Entity,
 );
 
@@ -126,10 +127,12 @@ pub struct ListSort {
 /// name; the name only has to be unique, never meaningful (see [`UiList::with_class`]).
 static LIST_CLASS_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Per-view list declaration: bind the `ObservableCollection` of entity-rows to
-/// the `ItemsControl` / `ListBox` named `name` (`x:Name`). Add it to the
-/// [`NoesisView`](crate::NoesisView) entity whose rows reference it via
-/// [`ListedIn`].
+/// One list declaration: binds the `ObservableCollection` of entity-rows to the
+/// `ItemsControl` / `ListBox` named `name` (`x:Name`) in `view`'s scene. A list is
+/// its own entity, not a component on the view. Spawn one per `ListBox` and point its
+/// rows at that entity via [`ListedIn`], so a single
+/// [`NoesisView`](crate::NoesisView) can own any number of lists, each with its own
+/// row type. The binding is reaped when `view` is torn down.
 ///
 /// Each list auto-generates a unique Noesis `class` for its row objects (so two
 /// lists of the same row type "just work", no hand-picked names); the class is
@@ -141,14 +144,17 @@ static LIST_CLASS_SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// A list binds **one** row component type (the `T` you registered with
 /// [`add_noesis_list`](crate::NoesisListAppExt::add_noesis_list)); having two
-/// different `T`s name the same view via [`ListedIn`] is unsupported (caught with
-/// a debug-assert / warn-once). Selection is reported only on a *genuine* change:
-/// the default current item a fresh list starts with is adopted silently, not
-/// surfaced as a [`NoesisListSelection`].
+/// different `T`s target the same list entity via [`ListedIn`] is unsupported
+/// (caught with a debug-assert / warn-once). Selection is reported only on a
+/// *genuine* change: the default current item a fresh list starts with is adopted
+/// silently, not surfaced as a [`NoesisListSelection`].
 #[derive(Component, Clone, Debug)]
 #[require(ListDesired)]
 pub struct UiList {
-    /// `x:Name` of the list control to bind in the owner view's scene.
+    /// The [`NoesisView`](crate::NoesisView) entity whose scene hosts the bound
+    /// control. Rows still attach to *this list entity* via [`ListedIn`], not `view`.
+    pub view: Entity,
+    /// `x:Name` of the list control to bind in `view`'s scene.
     pub name: String,
     /// Noesis class name the row objects register under. Auto-generated unique by
     /// [`new`](Self::new); override via [`with_class`](Self::with_class).
@@ -158,15 +164,17 @@ pub struct UiList {
 }
 
 impl UiList {
-    /// Declare a list bound to the `x:Name` control `name`. The row-object class is
-    /// auto-generated unique (`DmList.{seq}`), so nothing has to be globally
-    /// hand-named. Rows appear in ECS query order; add
+    /// Declare a list bound to the `x:Name` control `name` in `view`'s scene. Spawn
+    /// this on its own entity and point rows at *that* entity with [`ListedIn`]. The
+    /// row-object class is auto-generated unique (`DmList.{seq}`), so nothing has to
+    /// be globally hand-named. Rows appear in ECS query order; add
     /// [`sorted_by`](Self::sorted_by) for a Rust-side order, or
     /// [`with_class`](Self::with_class) to bind a typed `DataTemplate`.
     #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(view: Entity, name: impl Into<String>) -> Self {
         let seq = LIST_CLASS_SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
+            view,
             name: name.into(),
             class: format!("DmList.{seq}"),
             sort: None,
@@ -766,15 +774,15 @@ fn diff_list<T: NoesisViewModel + Component>(
     rows: Query<(Entity, &T, &ListedIn, Has<Selected>)>,
     mut desired: Query<&mut ListDesired>,
 ) {
-    for (view, list) in &lists {
-        let Ok(mut slot) = desired.get_mut(view) else {
+    for (list_ent, list) in &lists {
+        let Ok(mut slot) = desired.get_mut(list_ent) else {
             continue;
         };
         slot.schema = T::noesis_properties();
 
         let mut gathered: Vec<(Entity, Vec<PlainValue>, bool)> = rows
             .iter()
-            .filter(|(_, _, listed, _)| listed.0 == view)
+            .filter(|(_, _, listed, _)| listed.0 == list_ent)
             .map(|(entity, data, _, selected)| {
                 let mut fields = data.noesis_snapshot();
                 fields.push(PlainValue::U64(entity.to_bits()));
@@ -803,11 +811,11 @@ fn diff_list<T: NoesisViewModel + Component>(
             {
                 debug_assert!(
                     false,
-                    "UiList view {view:?}: two row component types target one list \
+                    "UiList {list_ent:?}: two row component types target one list \
                      (last-writer-wins); use one row type per UiList",
                 );
                 bevy::log::warn_once!(
-                    "UiList: multiple row component types target list view {view:?}; \
+                    "UiList: multiple row component types target list {list_ent:?}; \
                      only one row type per UiList is supported (last-writer-wins)",
                 );
             }
@@ -831,7 +839,8 @@ fn diff_list<T: NoesisViewModel + Component>(
 /// only list system that touches Noesis state.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn sync_lists(
-    views: Query<(Entity, &UiList, &ListDesired)>,
+    lists: Query<(Entity, &UiList, &ListDesired)>,
+    alive_views: Query<(), With<NoesisView>>,
     selected_rows: Query<(Entity, &ListedIn), With<Selected>>,
     state: Option<NonSendMut<NoesisRenderState>>,
     click_queue: Res<crate::events::SharedClickQueue>,
@@ -842,9 +851,16 @@ fn sync_lists(
     let Some(mut state) = state else {
         return;
     };
-    for (view, list, desired) in &views {
+    for (list_ent, list, desired) in &lists {
+        // Skip a list whose view is gone: its binding was already reaped by
+        // teardown, and apply_list_for would recreate it (entry().or_default()).
+        if alive_views.get(list.view).is_err() {
+            continue;
+        }
+        // The render binding + scene are keyed by the view entity; rows and the
+        // Selected marker are keyed by the list entity.
         let (ops, selection) = state.apply_list_for(
-            view,
+            list.view,
             &list.name,
             &list.class,
             desired.schema,
@@ -854,7 +870,7 @@ fn sync_lists(
         );
         if ops.touched() {
             ops_writer.write(NoesisListOps {
-                view,
+                view: list.view,
                 list: list.name.clone(),
                 adds: ops.adds,
                 removes: ops.removes,
@@ -867,7 +883,7 @@ fn sync_lists(
             // one (deferred commands apply in order, so a re-select nets out to
             // the row staying marked).
             for (entity, listed) in &selected_rows {
-                if listed.0 == view {
+                if listed.0 == list_ent {
                     commands.entity(entity).remove::<Selected>();
                 }
             }
@@ -875,10 +891,29 @@ fn sync_lists(
                 commands.entity(entity).insert(Selected);
             }
             sel_writer.write(NoesisListSelection {
-                view,
+                view: list.view,
                 list: list.name.clone(),
                 selected,
             });
+        }
+    }
+}
+
+/// Despawn list entities whose view was removed, so a despawned view takes its
+/// lists (and their reaped bindings) with it instead of leaving orphans that
+/// [`sync_lists`] would keep skipping.
+fn despawn_orphan_lists(
+    mut removed: RemovedComponents<NoesisView>,
+    lists: Query<(Entity, &UiList)>,
+    mut commands: Commands,
+) {
+    let gone: HashSet<Entity> = removed.read().collect();
+    if gone.is_empty() {
+        return;
+    }
+    for (list_ent, list) in &lists {
+        if gone.contains(&list.view) {
+            commands.entity(list_ent).despawn();
         }
     }
 }
@@ -921,6 +956,7 @@ impl Plugin for NoesisListPlugin {
         app.add_message::<NoesisListSelection>();
         app.configure_sets(PostUpdate, NoesisListSet::Diff.before(NoesisSet::Apply));
         app.add_systems(PostUpdate, sync_lists.in_set(NoesisSet::Apply));
+        app.add_systems(PostUpdate, despawn_orphan_lists.in_set(NoesisSet::Ensure));
     }
 }
 
@@ -966,7 +1002,7 @@ mod tests {
 
     #[test]
     fn ui_list_builder_sets_sort() {
-        let list = UiList::new("Inv").sorted_by(1, true);
+        let list = UiList::new(Entity::PLACEHOLDER, "Inv").sorted_by(1, true);
         assert_eq!(list.name, "Inv");
         assert_eq!(
             list.sort,
@@ -981,15 +1017,15 @@ mod tests {
     fn ui_list_auto_class_is_unique() {
         // Two lists of the "same" declaration get distinct auto-generated classes,
         // so two instances "just work" without hand-picked names.
-        let a = UiList::new("Inv");
-        let b = UiList::new("Inv");
+        let a = UiList::new(Entity::PLACEHOLDER, "Inv");
+        let b = UiList::new(Entity::PLACEHOLDER, "Inv");
         assert_ne!(
             a.class, b.class,
             "auto-generated row classes must be unique"
         );
         assert!(a.class.starts_with("DmList."), "got {:?}", a.class);
 
-        let c = UiList::new("Inv").with_class("Game.Row");
+        let c = UiList::new(Entity::PLACEHOLDER, "Inv").with_class("Game.Row");
         assert_eq!(c.class, "Game.Row");
     }
 }

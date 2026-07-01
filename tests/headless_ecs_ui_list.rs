@@ -117,9 +117,11 @@ fn list_reconciles_minimally_and_row_click_selects() {
                         size: UVec2::new(256, 256),
                         ..default()
                     },
-                    // Order rows by qty (property index 1), ascending: A(1),B(2),C(3).
-                    UiList::new("Inventory").sorted_by(1, false),
                 ))
+                .id();
+            // Order rows by qty (property index 1), ascending: A(1),B(2),C(3).
+            let list = commands
+                .spawn(UiList::new(view, "Inventory").sorted_by(1, false))
                 .id();
             let mk = |commands: &mut Commands, name: &str, qty: i32| {
                 commands
@@ -128,7 +130,7 @@ fn list_reconciles_minimally_and_row_click_selects() {
                             name: name.to_string(),
                             qty,
                         },
-                        ListedIn(view),
+                        ListedIn(list),
                     ))
                     .id()
             };

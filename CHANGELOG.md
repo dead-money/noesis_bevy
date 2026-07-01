@@ -6,6 +6,13 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`UiList` is now its own entity (breaking).** Spawn `UiList::new(view, "Name")`
+  and attach rows via `ListedIn(list)`, not the view, so one view can bind any
+  number of `ListBox`es. Migrate from `entity(view).insert(UiList::new("Name"))`
+  + `ListedIn(view)`.
+
 ## [0.11.0] - 2026-06-29
 
 ### Added

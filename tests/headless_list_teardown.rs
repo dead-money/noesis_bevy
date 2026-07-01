@@ -91,8 +91,10 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
                         size: UVec2::new(256, 256),
                         ..default()
                     },
-                    UiList::new("Inv").sorted_by(1, false),
                 ))
+                .id();
+            let list = commands
+                .spawn(UiList::new(view, "Inv").sorted_by(1, false))
                 .id();
             for (label, weight) in [("A", 1), ("B", 2), ("C", 3)] {
                 commands.spawn((
@@ -100,7 +102,7 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
                         label: label.into(),
                         weight,
                     },
-                    ListedIn(view),
+                    ListedIn(list),
                 ));
             }
         },
@@ -120,7 +122,8 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
                 *pre_sys.lock().unwrap() = Some(diag.live_lists);
             }
             if *frame == DESPAWN_AT {
-                // Despawn the list-owning view; teardown must reap its ListBinding.
+                // Despawn the view alone; teardown reaps its ListBinding and
+                // despawn_orphan_lists takes the list entity with it.
                 for e in &views {
                     commands.entity(e).despawn();
                 }
