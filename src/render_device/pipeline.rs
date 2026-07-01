@@ -77,22 +77,46 @@ pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
     use wgpu::{CompareFunction, StencilOperation};
 
-    let (compare, pass_op) = match render_state.stencil_mode_raw() {
+    let (compare, pass_op, fail_op) = match render_state.stencil_mode_raw() {
         // Disabled / Disabled_ZTest: stencil test off (always pass, no write).
-        0 | 5 => (CompareFunction::Always, StencilOperation::Keep),
+        0 | 5 => (
+            CompareFunction::Always,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+        ),
         // Equal_Keep / Equal_Keep_ZTest: pass where stencil == ref; keep.
-        1 | 6 => (CompareFunction::Equal, StencilOperation::Keep),
+        1 | 6 => (
+            CompareFunction::Equal,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+        ),
         // Equal_Incr: pass where == ref; increment (wrap) on pass.
-        2 => (CompareFunction::Equal, StencilOperation::IncrementWrap),
+        2 => (
+            CompareFunction::Equal,
+            StencilOperation::IncrementWrap,
+            StencilOperation::Keep,
+        ),
         // Equal_Decr: pass where == ref; decrement (wrap) on pass.
-        3 => (CompareFunction::Equal, StencilOperation::DecrementWrap),
-        // Clear: always pass; zero the stencil.
-        4 => (CompareFunction::Always, StencilOperation::Zero),
+        3 => (
+            CompareFunction::Equal,
+            StencilOperation::DecrementWrap,
+            StencilOperation::Keep,
+        ),
+        // Clear: always pass; zero the stencil. `pass_op != Keep` makes wgpu enable
+        // VK_DYNAMIC_STATE_STENCIL_REFERENCE, but `compare: Always` keeps
+        // `needs_ref_value()` false, so wgpu drops every `set_stencil_reference` and
+        // the ref goes unset (VUID-vkCmdDrawIndexed-None-07839). `Always` never fails,
+        // so a dead `fail_op: Replace` flips `needs_ref_value()` true to keep it emitted.
+        4 => (
+            CompareFunction::Always,
+            StencilOperation::Zero,
+            StencilOperation::Replace,
+        ),
         other => panic!("unknown StencilMode raw value: {other}"),
     };
     let face = wgpu::StencilFaceState {
         compare,
-        fail_op: StencilOperation::Keep,
+        fail_op,
         depth_fail_op: StencilOperation::Keep,
         pass_op,
     };
