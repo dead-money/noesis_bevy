@@ -164,6 +164,20 @@ pub struct NoesisInputQueue {
     pub events: Vec<NoesisInputEvent>,
 }
 
+/// Whether the mouse pointer is currently over hit-test-visible Noesis UI.
+///
+/// The integration exposes no per-element hit-test, so this one flag is the
+/// pointer-over-UI signal. Read it in the main world to suppress 3D-world
+/// interaction when a click lands on the interface. It mirrors the primary
+/// `View`'s hit-test from the last pointer event and updates only on pointer
+/// events in `PostUpdate`, so it lags by one frame like the rest of the input
+/// bridge.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct NoesisPointerOverUi {
+    /// `true` when the last pointer event hit-tested onto the UI.
+    pub over: bool,
+}
+
 impl NoesisInputQueue {
     /// Append an event to the back of the queue.
     pub fn push(&mut self, ev: NoesisInputEvent) {
@@ -425,6 +439,7 @@ impl Plugin for NoesisInputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NoesisInputQueue>()
             .init_resource::<LastPointer>()
+            .init_resource::<NoesisPointerOverUi>()
             .add_plugins(ExtractResourcePlugin::<NoesisInputQueue>::default())
             .add_systems(
                 PreUpdate,
