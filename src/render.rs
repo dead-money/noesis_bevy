@@ -511,6 +511,11 @@ pub(crate) struct NoesisRenderState {
     /// once the fragment exists (a panel has no scene, so `scenes_built_this_frame`
     /// never covers it). Cleared alongside `scenes_built_this_frame`.
     panels_mounted_this_frame: HashSet<Entity>,
+    /// Whether the last pointer event hit-tested onto UI. [`Self::apply_input`]
+    /// sets it from the `View` mouse return; [`apply_noesis_input`] mirrors it to
+    /// the main-world [`NoesisPointerOverUi`](crate::input::NoesisPointerOverUi).
+    /// Persists between pointer events (a still cursor keeps its status).
+    pointer_over_ui: bool,
     /// One-time flag for `SetFontFallbacks`/`SetFontDefaultProperties`;
     /// must fire AFTER Bevy has loaded at least one font into
     /// `SharedFontMap`, because Noesis's `SetFontFallbacks` eagerly runs
@@ -1005,6 +1010,7 @@ impl NoesisRenderState {
             scenes: HashMap::new(),
             scenes_built_this_frame: HashSet::new(),
             panels_mounted_this_frame: HashSet::new(),
+            pointer_over_ui: false,
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
             loaded_app_resources_chain: None,
@@ -4005,14 +4011,16 @@ impl NoesisRenderState {
     fn apply_input(&mut self, events: &[crate::input::NoesisInputEvent]) {
         // Input routes to the single primary view; multi-view routing (which
         // view owns the pointer) isn't implemented yet.
+        use crate::input::NoesisInputEvent as E;
+        // Last pointer hit-test wins; seed from prior so a still cursor persists.
+        let mut over_ui = self.pointer_over_ui;
         let Some(scene) = self.scenes.values_mut().next() else {
             return;
         };
-        use crate::input::NoesisInputEvent as E;
         for ev in events {
             match *ev {
                 E::MouseMove { x, y } => {
-                    let _ = scene.view.mouse_move(x, y);
+                    over_ui = scene.view.mouse_move(x, y);
                 }
                 E::MouseButton {
                     down: true,
@@ -4020,7 +4028,7 @@ impl NoesisRenderState {
                     y,
                     button,
                 } => {
-                    let _ = scene.view.mouse_button_down(x, y, button);
+                    over_ui = scene.view.mouse_button_down(x, y, button);
                 }
                 E::MouseButton {
                     down: false,
@@ -4028,7 +4036,7 @@ impl NoesisRenderState {
                     y,
                     button,
                 } => {
-                    let _ = scene.view.mouse_button_up(x, y, button);
+                    over_ui = scene.view.mouse_button_up(x, y, button);
                 }
                 E::MouseWheel { x, y, delta } => {
                     let _ = scene.view.mouse_wheel(x, y, delta);
@@ -4071,6 +4079,7 @@ impl NoesisRenderState {
                 E::Focus(false) => scene.view.deactivate(),
             }
         }
+        self.pointer_over_ui = over_ui;
     }
 
     /// Drive one Noesis frame into the intermediate. Call during the
@@ -4745,6 +4754,7 @@ fn apply_live_scene_flags(
 fn apply_noesis_input(
     queue: Option<Res<crate::input::NoesisInputQueue>>,
     state: Option<NonSendMut<NoesisRenderState>>,
+    over_ui: Option<ResMut<crate::input::NoesisPointerOverUi>>,
 ) {
     let (Some(queue), Some(mut state)) = (queue, state) else {
         return;
@@ -4753,6 +4763,12 @@ fn apply_noesis_input(
         return;
     }
     state.apply_input(&queue.events);
+    // Publish on change only, so idle pointer frames don't churn change detection.
+    if let Some(mut over_ui) = over_ui
+        && over_ui.over != state.pointer_over_ui
+    {
+        over_ui.over = state.pointer_over_ui;
+    }
 }
 
 /// Drive Noesis for the frame (layout, update render tree, render into each
