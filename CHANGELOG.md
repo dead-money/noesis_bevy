@@ -6,6 +6,19 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-30
+
+### Fixed
+
+- **Unset stencil reference on clip clears.** Noesis's Clear stencil mode built a
+  pipeline wgpu treats as stencil-enabled (so it enables the dynamic stencil
+  reference) but whose `compare: Always` leaves `needs_ref_value()` false, so wgpu
+  silently dropped every `set_stencil_reference`. Every clip-stencil clear then drew
+  with an unset dynamic reference, tripping `VUID-vkCmdDrawIndexed-None-07839` —
+  undefined behaviour that can escalate to a GPU fault on some drivers. Clear mode
+  now carries a `fail_op: Replace` (dead under `compare: Always`) to keep the
+  reference emitted.
+
 ## [0.11.1] - 2026-06-30
 
 ### Added
@@ -71,7 +84,8 @@ in a one-UI app, and a `NoesisView` auto-attaches the bridges so a value set bef
 the scene exists lands once it builds. The version starts at 0.10.0 to move in step
 with `noesis_runtime`.
 
-[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/dead-money/noesis_bevy/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/dead-money/noesis_bevy/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/dead-money/noesis_bevy/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/dead-money/noesis_bevy/releases/tag/v0.10.0
