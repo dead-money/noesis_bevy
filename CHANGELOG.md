@@ -6,6 +6,14 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-30
+
+### Added
+
+- **`NoesisPointerOverUi` resource.** A main-world flag, refreshed each frame from
+  the view's pointer hit-test, so consumers can gate 3D-world picking on `!over`
+  and stop clicks falling through hit-test-visible panels.
+
 ## [0.11.0] - 2026-06-29
 
 ### Added
@@ -63,5 +71,7 @@ in a one-UI app, and a `NoesisView` auto-attaches the bridges so a value set bef
 the scene exists lands once it builds. The version starts at 0.10.0 to move in step
 with `noesis_runtime`.
 
-[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/dead-money/noesis_bevy/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/dead-money/noesis_bevy/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/dead-money/noesis_bevy/releases/tag/v0.10.0
