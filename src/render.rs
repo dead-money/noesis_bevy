@@ -500,6 +500,12 @@ pub(crate) struct NoesisRenderState {
     /// [`Self::ensure_scene`]; the blit node looks each one up by its view
     /// entity. Empty until the first `NoesisView`'s XAML resolves.
     scenes: HashMap<Entity, SceneInstance>,
+    /// Entities that currently carry a published [`NoesisIntermediate`]. Tracked
+    /// so [`Self::publish_intermediates`] can strip the component off entities
+    /// whose scene has since been torn down (xaml_uri cleared, uri swapped to
+    /// not-yet-loaded bytes, readiness gate re-blocked) but that survive as
+    /// entities — otherwise the last-painted frame keeps compositing forever.
+    published_intermediates: HashSet<Entity>,
     /// Entities whose scene was (re)built during this frame's Ensure pass. The
     /// Apply-set bridges read it so a write applies even when the component last
     /// changed before its scene existed: a freshly-built scene re-runs every
@@ -1008,6 +1014,7 @@ impl NoesisRenderState {
             registered_fonts: Some(registered_fonts),
             registered_textures: Some(registered_textures),
             scenes: HashMap::new(),
+            published_intermediates: HashSet::new(),
             scenes_built_this_frame: HashSet::new(),
             panels_mounted_this_frame: HashSet::new(),
             pointer_over_ui: false,
@@ -4157,7 +4164,22 @@ impl NoesisRenderState {
                 sample_view: published.sample_view.clone(),
             });
             scene.write_index ^= 1;
+            self.published_intermediates.insert(entity);
         }
+        // Strip the intermediate off entities whose scene was torn down but that
+        // survive as entities (xaml_uri cleared, uri swapped to not-yet-loaded
+        // bytes, readiness gate re-blocked). Without this the render world keeps
+        // extracting and blitting the last-painted frame — a frozen UI ghost.
+        // `teardown_for` already drops the component for despawned entities via
+        // Bevy's own reaping, but a *surviving* entity needs it removed here.
+        let scenes = &self.scenes;
+        self.published_intermediates.retain(|&entity| {
+            if scenes.contains_key(&entity) {
+                return true;
+            }
+            commands.entity(entity).remove::<NoesisIntermediate>();
+            false
+        });
     }
 
     /// Render label template `xaml_uri` (with `fields` applied to named
@@ -4365,6 +4387,10 @@ impl NoesisRenderState {
         self.last_event_config
             .retain(|(ent, _, _), _| *ent != entity);
         self.scenes_built_this_frame.remove(&entity);
+        // Drop the publish record so a since-despawned entity is never targeted
+        // by `publish_intermediates`' stale-ghost sweep (Bevy already reaps the
+        // component off the dead entity; a `remove` command on it would panic).
+        self.published_intermediates.remove(&entity);
     }
 }
 
