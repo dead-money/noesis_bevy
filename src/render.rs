@@ -1780,6 +1780,16 @@ impl NoesisRenderState {
             return;
         }
 
+        // A zero-width or -height view (minimized window, transient 0-height
+        // resize) would create a zero-extent wgpu texture and abort the process
+        // on validation. Skip build and resize while degenerate; any existing
+        // scene stays at its last good size (invisible anyway on a 0×0 window)
+        // and the resize-in-place branch below restores it once the window
+        // reports a non-zero size again.
+        if config.size.x == 0 || config.size.y == 0 {
+            return;
+        }
+
         // Current bytes for this URI in the shared map (`None` until the XAML
         // first lands). Cloning the `Arc` is cheap and lets us both detect a
         // hot-reload (by pointer identity) and stamp the rebuilt scene.
