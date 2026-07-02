@@ -77,7 +77,10 @@ pub(crate) fn sync_layout_bridge(
         return;
     };
     for (entity, layout) in &views {
-        if layout.is_changed() || state.scene_rebuilt_this_frame(entity) {
+        if layout.is_changed()
+            || state.scene_rebuilt_this_frame(entity)
+            || state.panel_mounted_this_frame(entity)
+        {
             state.apply_layout_for(entity, &layout.margins);
         }
     }
@@ -88,7 +91,15 @@ pub struct NoesisLayoutPlugin;
 
 impl Plugin for NoesisLayoutPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, sync_layout_bridge.in_set(NoesisSet::Apply));
+        // After `sync_panels` so a panel's `NoesisLayout` re-applies the same frame
+        // its fragment mounts (the bridge reads `panel_mounted_this_frame`, set by
+        // `sync_panels`); mirrors the focus bridge's F6 ordering.
+        app.add_systems(
+            PostUpdate,
+            sync_layout_bridge
+                .in_set(NoesisSet::Apply)
+                .after(crate::panel::sync_panels),
+        );
     }
 }
 

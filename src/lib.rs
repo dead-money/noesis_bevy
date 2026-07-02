@@ -92,7 +92,9 @@ pub use inlines::{
     InlineSpec, InlinesReadback, NoesisInlines, NoesisInlinesChanged, NoesisInlinesPlugin,
     TextDecorations,
 };
-pub use input::{NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue, NoesisPointerOverUi};
+pub use input::{
+    NoesisInputEvent, NoesisInputPlugin, NoesisInputQueue, NoesisPointerOverUi, TargetedInput,
+};
 pub use integration::{
     CursorType, NoesisCursorRequested, NoesisIntegrationPlugin, NoesisOpenUrl, NoesisPlayAudio,
     get_culture, open_url, play_audio, set_culture,

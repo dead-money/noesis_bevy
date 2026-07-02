@@ -155,13 +155,33 @@ pub enum NoesisInputEvent {
     Focus(bool),
 }
 
+/// A [`NoesisInputEvent`] paired with the view it is routed to.
+///
+/// The coordinate forwarders convert a pointer position against a specific
+/// view's pixel space, then stamp that same view here so the render side
+/// hit-tests against the view the coordinates were scaled for. `target: None`
+/// means "the primary view" — the deterministic fallback (lowest-`Entity` live
+/// scene) used for events with no natural view (keyboard, focus) or for
+/// programmatic pushes via [`NoesisInputQueue::push`].
+///
+/// The `target` lays the rails for real per-view routing; today the primary
+/// view is the only one that reliably owns the pointer.
+#[derive(Clone, Copy, Debug)]
+pub struct TargetedInput {
+    /// The view this event is routed to, or `None` for the primary view.
+    pub target: Option<Entity>,
+    /// The translated input event.
+    pub event: NoesisInputEvent,
+}
+
 /// Batched input events waiting to be drained onto the Noesis `View`.
 /// Populated by systems in this module; drained by the render-world
 /// `apply_noesis_input` system every frame.
 #[derive(Resource, ExtractResource, Clone, Default, Debug)]
 pub struct NoesisInputQueue {
-    /// Events queued this frame, in arrival order.
-    pub events: Vec<NoesisInputEvent>,
+    /// Events queued this frame, in arrival order, each tagged with its target
+    /// view (see [`TargetedInput`]).
+    pub events: Vec<TargetedInput>,
 }
 
 /// Whether the mouse pointer is currently over hit-test-visible Noesis UI.
@@ -179,16 +199,27 @@ pub struct NoesisPointerOverUi {
 }
 
 impl NoesisInputQueue {
-    /// Append an event to the back of the queue.
+    /// Append an event bound to the primary view (see [`TargetedInput`]).
     pub fn push(&mut self, ev: NoesisInputEvent) {
-        self.events.push(ev);
+        self.push_to_opt(None, ev);
+    }
+
+    /// Append an event bound to a specific view.
+    pub fn push_to(&mut self, target: Entity, ev: NoesisInputEvent) {
+        self.push_to_opt(Some(target), ev);
+    }
+
+    /// Append an event bound to `target` when `Some`, or to the primary view
+    /// when `None`.
+    pub fn push_to_opt(&mut self, target: Option<Entity>, ev: NoesisInputEvent) {
+        self.events.push(TargetedInput { target, event: ev });
     }
 
     /// Drain every queued event, leaving the queue empty. The render-side
     /// `apply_noesis_input` system uses this to feed events onto the [`View`].
     ///
     /// [`View`]: noesis_runtime::view::View
-    pub fn drain(&mut self) -> std::vec::Drain<'_, NoesisInputEvent> {
+    pub fn drain(&mut self) -> std::vec::Drain<'_, TargetedInput> {
         self.events.drain(..)
     }
 }
@@ -217,6 +248,9 @@ struct LastPointer {
     x: i32,
     y: i32,
     valid: bool,
+    /// The view the last cursor position was converted against. Button and
+    /// wheel events reuse it so they route to the same view as the move.
+    target: Option<Entity>,
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -225,10 +259,13 @@ fn forward_cursor_moved(
     mut queue: ResMut<NoesisInputQueue>,
     mut last: ResMut<LastPointer>,
     window: Single<&Window, With<PrimaryWindow>>,
-    views: Query<&NoesisView>,
+    views: Query<(Entity, &NoesisView)>,
 ) {
-    // First view only; no per-view pointer routing yet.
-    let Some(scene) = views.iter().next() else {
+    // Convert against the deterministic primary view (lowest `Entity`) and stamp
+    // it onto the event, so the render side hit-tests against the same view the
+    // coordinates were scaled for. `iter().next()` is query order and would let
+    // two differently-sized views disagree.
+    let Some((entity, scene)) = views.iter().min_by_key(|(entity, _)| *entity) else {
         reader.read(); // drop events so we don't replay them later
         return;
     };
@@ -237,7 +274,8 @@ fn forward_cursor_moved(
             last.x = x;
             last.y = y;
             last.valid = true;
-            queue.push(NoesisInputEvent::MouseMove { x, y });
+            last.target = Some(entity);
+            queue.push_to(entity, NoesisInputEvent::MouseMove { x, y });
         }
     }
 }
@@ -259,16 +297,20 @@ fn forward_mouse_buttons(
         };
         let (x, y) = if last.valid { (last.x, last.y) } else { (0, 0) };
         // Re-enqueue last pos so the press coord matches the last MouseMove,
-        // regardless of event arrival order.
+        // regardless of event arrival order. Route to the same view the move
+        // was converted against.
         if last.valid {
-            queue.push(NoesisInputEvent::MouseMove { x, y });
+            queue.push_to_opt(last.target, NoesisInputEvent::MouseMove { x, y });
         }
-        queue.push(NoesisInputEvent::MouseButton {
-            down: matches!(ev.state, ButtonState::Pressed),
-            x,
-            y,
-            button,
-        });
+        queue.push_to_opt(
+            last.target,
+            NoesisInputEvent::MouseButton {
+                down: matches!(ev.state, ButtonState::Pressed),
+                x,
+                y,
+                button,
+            },
+        );
     }
 }
 
@@ -295,28 +337,38 @@ fn forward_mouse_wheel(
         };
         // 120 units per line is the Win32 `WHEEL_DELTA` convention Noesis uses.
         let wheel_delta = (lines_y * 120.0) as i32;
+        // Route to the same view the last move was converted against.
         if wheel_delta != 0 {
-            queue.push(NoesisInputEvent::MouseWheel {
-                x,
-                y,
-                delta: wheel_delta,
-            });
+            queue.push_to_opt(
+                last.target,
+                NoesisInputEvent::MouseWheel {
+                    x,
+                    y,
+                    delta: wheel_delta,
+                },
+            );
         }
         if lines_y != 0.0 {
-            queue.push(NoesisInputEvent::Scroll {
-                x,
-                y,
-                value: lines_y,
-                horizontal: false,
-            });
+            queue.push_to_opt(
+                last.target,
+                NoesisInputEvent::Scroll {
+                    x,
+                    y,
+                    value: lines_y,
+                    horizontal: false,
+                },
+            );
         }
         if lines_x != 0.0 {
-            queue.push(NoesisInputEvent::Scroll {
-                x,
-                y,
-                value: lines_x,
-                horizontal: true,
-            });
+            queue.push_to_opt(
+                last.target,
+                NoesisInputEvent::Scroll {
+                    x,
+                    y,
+                    value: lines_x,
+                    horizontal: true,
+                },
+            );
         }
     }
 }
@@ -324,19 +376,11 @@ fn forward_mouse_wheel(
 #[allow(clippy::needless_pass_by_value)]
 fn forward_keyboard(mut reader: MessageReader<KeyboardInput>, mut queue: ResMut<NoesisInputQueue>) {
     for ev in reader.read() {
-        // Skip synthetic repeat events; Noesis runs its own repeat timing
-        // off the logical KeyDown/KeyUp pair.
-        if ev.repeat {
-            // Still emit Char on repeat so TextBox auto-repeat works.
-            if matches!(ev.state, ButtonState::Pressed)
-                && let Some(text) = ev.text.as_deref()
-            {
-                for ch in text.chars() {
-                    queue.push(NoesisInputEvent::Char(ch as u32));
-                }
-            }
-            continue;
-        }
+        // Forward OS auto-repeat as repeated KeyDown: `View::KeyDown` has no
+        // internal repeat timer, so held keys (arrows, Backspace/Delete —
+        // KeyDown-handled, not Char-handled) act once otherwise. Repeat events
+        // are always `Pressed` and carry `text`, so the normal arm below emits
+        // the accompanying Char exactly once.
         let key = key_map::from_bevy(ev.key_code);
         match ev.state {
             ButtonState::Pressed => {
@@ -363,9 +407,10 @@ fn forward_touch(
     mut reader: MessageReader<TouchInput>,
     mut queue: ResMut<NoesisInputQueue>,
     window: Single<&Window, With<PrimaryWindow>>,
-    views: Query<&NoesisView>,
+    views: Query<(Entity, &NoesisView)>,
 ) {
-    let Some(scene) = views.iter().next() else {
+    // Same deterministic primary-view selection as the cursor forwarder.
+    let Some((entity, scene)) = views.iter().min_by_key(|(entity, _)| *entity) else {
         reader.read();
         return;
     };
@@ -375,10 +420,10 @@ fn forward_touch(
         };
         let id = ev.id;
         match ev.phase {
-            TouchPhase::Started => queue.push(NoesisInputEvent::TouchDown { x, y, id }),
-            TouchPhase::Moved => queue.push(NoesisInputEvent::TouchMove { x, y, id }),
+            TouchPhase::Started => queue.push_to(entity, NoesisInputEvent::TouchDown { x, y, id }),
+            TouchPhase::Moved => queue.push_to(entity, NoesisInputEvent::TouchMove { x, y, id }),
             TouchPhase::Ended | TouchPhase::Canceled => {
-                queue.push(NoesisInputEvent::TouchUp { x, y, id });
+                queue.push_to(entity, NoesisInputEvent::TouchUp { x, y, id });
             }
         }
     }

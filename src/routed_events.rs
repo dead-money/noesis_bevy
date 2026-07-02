@@ -46,7 +46,7 @@ use bevy::prelude::*;
 pub use noesis_runtime::events::{EventArgs, RoutedEvent};
 pub use noesis_runtime::view::{Key, MouseButton};
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Event-arg snapshot
@@ -293,6 +293,12 @@ pub(crate) fn sync_event_subscriptions(
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
+impl ReapOnRemove for NoesisEventWatch {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_event_watch_for(entity);
+    }
+}
+
 /// Wires the per-view generic routed-event bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisRoutedEventsPlugin;
@@ -306,6 +312,7 @@ impl Plugin for NoesisRoutedEventsPlugin {
                 PostUpdate,
                 sync_event_subscriptions.in_set(NoesisSet::Apply),
             );
+        add_bridge_reap::<NoesisEventWatch>(app);
     }
 }
 

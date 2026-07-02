@@ -37,6 +37,8 @@ use std::sync::Arc;
 
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 use bevy_render::{
     Render, RenderApp, RenderSystems,
@@ -500,6 +502,12 @@ pub(crate) struct NoesisRenderState {
     /// [`Self::ensure_scene`]; the blit node looks each one up by its view
     /// entity. Empty until the first `NoesisView`'s XAML resolves.
     scenes: HashMap<Entity, SceneInstance>,
+    /// Entities that currently carry a published [`NoesisIntermediate`]. Tracked
+    /// so [`Self::publish_intermediates`] can strip the component off entities
+    /// whose scene has since been torn down (`xaml_uri` cleared, uri swapped to
+    /// not-yet-loaded bytes, readiness gate re-blocked) but that survive as
+    /// entities — otherwise the last-painted frame keeps compositing forever.
+    published_intermediates: HashSet<Entity>,
     /// Entities whose scene was (re)built during this frame's Ensure pass. The
     /// Apply-set bridges read it so a write applies even when the component last
     /// changed before its scene existed: a freshly-built scene re-runs every
@@ -588,6 +596,13 @@ pub(crate) struct NoesisRenderState {
     /// before the registered device. Keyed by view entity. See
     /// [`crate::commands`].
     command_hosts: HashMap<Entity, CommandEntry>,
+    /// `(view, target)` pairs already warned about a `DataContext` collision, so
+    /// each clash is reported once rather than every frame. A `NoesisVm`,
+    /// `NoesisCommands`, and/or plain view models all defaulting to
+    /// [`AttachTarget::Root`] on the same view silently clobber each other's
+    /// `DataContext` (last attach wins); this dedupes the diagnostic. Cleared
+    /// per-entity on teardown so a respawn re-warns. See [`Self::warn_datacontext_collisions`].
+    warned_dc_collisions: HashSet<(Entity, AttachTarget)>,
     /// Rust-owned converted/multi bindings keyed by `(view entity, x:Name,
     /// property)`. Each owns the built `Binding`/`MultiBinding` + its
     /// `Converter`/`MultiConverter`, attached to a named element's DP. Same
@@ -1008,6 +1023,7 @@ impl NoesisRenderState {
             registered_fonts: Some(registered_fonts),
             registered_textures: Some(registered_textures),
             scenes: HashMap::new(),
+            published_intermediates: HashSet::new(),
             scenes_built_this_frame: HashSet::new(),
             panels_mounted_this_frame: HashSet::new(),
             pointer_over_ui: false,
@@ -1023,6 +1039,7 @@ impl NoesisRenderState {
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
+            warned_dc_collisions: HashSet::new(),
             binding_entries: HashMap::new(),
             panels: HashMap::new(),
             failed_fragments: HashSet::new(),
@@ -1054,6 +1071,7 @@ impl NoesisRenderState {
         match VmEntry::build(entity, def, changed) {
             Some(entry) => {
                 self.view_models.insert(entity, entry);
+                self.warn_datacontext_collisions(entity);
             }
             None => warn!(
                 "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
@@ -1129,6 +1147,7 @@ impl NoesisRenderState {
         match CommandEntry::build(entity, def, queue) {
             Some(entry) => {
                 self.command_hosts.insert(entity, entry);
+                self.warn_datacontext_collisions(entity);
             }
             None => warn!(
                 "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
@@ -1182,6 +1201,54 @@ impl NoesisRenderState {
             } else {
                 warn!("NoesisCommands: set_data_context returned false for view {entity:?}");
             }
+        }
+    }
+
+    /// Warn (once per clash) when more than one Rust-owned host on view `entity`
+    /// would attach its instance as the `DataContext` of the same target element.
+    /// A `NoesisVm`, a `NoesisCommands`, and plain view models each call
+    /// `set_data_context` on their target, and the last attach wins — so two of
+    /// them defaulting to [`AttachTarget::Root`] leaves the loser silently inert.
+    /// This surfaces the misconfiguration; merging colliding hosts into one is
+    /// future work. Called after each host is registered on first sight.
+    fn warn_datacontext_collisions(&mut self, entity: Entity) {
+        let mut by_target: HashMap<&AttachTarget, Vec<String>> = HashMap::new();
+        if let Some(entry) = self.view_models.get(&entity) {
+            by_target
+                .entry(entry.target())
+                .or_default()
+                .push("NoesisVm".to_owned());
+        }
+        if let Some(entry) = self.command_hosts.get(&entity) {
+            by_target
+                .entry(entry.target())
+                .or_default()
+                .push("NoesisCommands".to_owned());
+        }
+        for ((ent, _), entry) in &self.plain_vms {
+            if *ent == entity {
+                by_target
+                    .entry(entry.target())
+                    .or_default()
+                    .push(format!("plain view model {:?}", entry.type_name()));
+            }
+        }
+
+        for (target, mut sources) in by_target {
+            if sources.len() < 2 {
+                continue;
+            }
+            if !self.warned_dc_collisions.insert((entity, target.clone())) {
+                continue;
+            }
+            sources.sort();
+            warn!(
+                "DataContext collision on view {entity:?} {}: {} all attach as the same \
+                 element's DataContext, so only the last one applied wins and the rest are \
+                 silently inert — give them distinct attach targets (attach_to(x_name))",
+                target.describe(),
+                sources.join(", "),
+            );
         }
     }
 
@@ -1492,6 +1559,7 @@ impl NoesisRenderState {
                 return Vec::new();
             };
             slot.insert(entry);
+            self.warn_datacontext_collisions(entity);
         }
 
         if let (Some(entry), Some(snapshot)) = (self.plain_vms.get(&key), snapshot) {
@@ -1777,6 +1845,16 @@ impl NoesisRenderState {
     fn ensure_scene(&mut self, entity: Entity, config: &NoesisView) {
         if config.xaml_uri.is_empty() {
             self.teardown_scene(entity);
+            return;
+        }
+
+        // A zero-width or -height view (minimized window, transient 0-height
+        // resize) would create a zero-extent wgpu texture and abort the process
+        // on validation. Skip build and resize while degenerate; any existing
+        // scene stays at its last good size (invisible anyway on a 0×0 window)
+        // and the resize-in-place branch below restores it once the window
+        // reports a non-zero size again.
+        if config.size.x == 0 || config.size.y == 0 {
             return;
         }
 
@@ -4005,20 +4083,35 @@ impl NoesisRenderState {
         }
     }
 
-    /// Apply a batch of queued input events onto the live View. No-op when
-    /// the scene hasn't been built yet; events are lost in that case, which
-    /// is fine: pre-scene input targets nothing.
-    fn apply_input(&mut self, events: &[crate::input::NoesisInputEvent]) {
-        // Input routes to the single primary view; multi-view routing (which
-        // view owns the pointer) isn't implemented yet.
+    /// Apply a batch of queued input events onto their target View. Each event
+    /// carries the view its coordinates were converted against (or `None` for
+    /// the primary view); routing to that same view keeps hit-testing consistent
+    /// when several views coexist. No-op when the target scene hasn't been built
+    /// yet; such events are dropped, which is fine: pre-scene input targets
+    /// nothing.
+    fn apply_input(&mut self, events: &[crate::input::TargetedInput]) {
         use crate::input::NoesisInputEvent as E;
-        // Last pointer hit-test wins; seed from prior so a still cursor persists.
-        let mut over_ui = self.pointer_over_ui;
-        let Some(scene) = self.scenes.values_mut().next() else {
+        // The primary view is the deterministic fallback for untargeted events
+        // (keyboard, focus, programmatic pushes): the lowest-`Entity` live scene.
+        // `values_mut().next()` is HashMap order and unstable across insertions,
+        // so pick by `Entity` — the same rule the coordinate forwarders use.
+        let Some(primary) = self.scenes.keys().min().copied() else {
             return;
         };
-        for ev in events {
-            match *ev {
+        if self.scenes.len() > 1 {
+            bevy::log::warn_once!(
+                "Noesis input routes to the primary view (lowest Entity); per-view \
+                 pointer routing across {} views is not implemented yet",
+                self.scenes.len()
+            );
+        }
+        // Last pointer hit-test wins; seed from prior so a still cursor persists.
+        let mut over_ui = self.pointer_over_ui;
+        for targeted in events {
+            let Some(scene) = self.scenes.get_mut(&targeted.target.unwrap_or(primary)) else {
+                continue;
+            };
+            match targeted.event {
                 E::MouseMove { x, y } => {
                     over_ui = scene.view.mouse_move(x, y);
                 }
@@ -4147,7 +4240,22 @@ impl NoesisRenderState {
                 sample_view: published.sample_view.clone(),
             });
             scene.write_index ^= 1;
+            self.published_intermediates.insert(entity);
         }
+        // Strip the intermediate off entities whose scene was torn down but that
+        // survive as entities (xaml_uri cleared, uri swapped to not-yet-loaded
+        // bytes, readiness gate re-blocked). Without this the render world keeps
+        // extracting and blitting the last-painted frame — a frozen UI ghost.
+        // `teardown_for` already drops the component for despawned entities via
+        // Bevy's own reaping, but a *surviving* entity needs it removed here.
+        let scenes = &self.scenes;
+        self.published_intermediates.retain(|&entity| {
+            if scenes.contains_key(&entity) {
+                return true;
+            }
+            commands.entity(entity).remove::<NoesisIntermediate>();
+            false
+        });
     }
 
     /// Render label template `xaml_uri` (with `fields` applied to named
@@ -4348,6 +4456,7 @@ impl NoesisRenderState {
         self.lists.retain(|(ent, _), _| *ent != entity);
         self.plain_vms.retain(|(ent, _), _| *ent != entity);
         self.command_hosts.remove(&entity);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
         self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
         self.last_keydown_swallow
             .retain(|(ent, _), _| *ent != entity);
@@ -4355,6 +4464,181 @@ impl NoesisRenderState {
         self.last_event_config
             .retain(|(ent, _, _), _| *ent != entity);
         self.scenes_built_this_frame.remove(&entity);
+        // Drop the publish record so a since-despawned entity is never targeted
+        // by `publish_intermediates`' stale-ghost sweep (Bevy already reaps the
+        // component off the dead entity; a `remove` command on it would panic).
+        self.published_intermediates.remove(&entity);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Per-bridge component-removal reaps
+    //
+    // [`Self::teardown_for`] / [`Self::teardown_panel_for`] cover a whole entity
+    // being despawned (or losing its `NoesisView` / `UiPanel`). These cover the
+    // narrower case an audit flagged as leaking everywhere: a *bridge* component
+    // dropped off an entity whose view stays live. Each is invoked from that
+    // bridge's `RemovedComponents<C>` reap system (see [`ReapOnRemove`] /
+    // [`add_bridge_reap`]) and MUST be idempotent with the terminal teardown: on
+    // a full despawn both fire in the same `NoesisSet::Ensure` head, and every
+    // one below is a plain `remove`/`retain`/`clear` that no-ops once the scene
+    // (and its side-table entries) are already gone.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Detach `target`'s live `DataContext` in view `entity`'s scene (set it to
+    /// null), releasing the View's ref to whatever host instance we attached
+    /// there. Shared by the VM / commands / plain-VM removal reaps: unlike a
+    /// despawn (where [`Self::teardown_scene`] drops the whole `View` first, so
+    /// its refs release on their own), a component-removal reap runs while the
+    /// scene is still live — so the host `ClassInstance` must be released off the
+    /// View *before* its owning entry (and thus that entry's `ClassRegistration`)
+    /// drops, or the class unregisters under a live instance (use-after-free, the
+    /// exact hazard [`Self::teardown_for`]'s drop order avoids). No-op when the
+    /// scene or the target element is gone.
+    fn clear_host_data_context(&self, entity: Entity, target: &AttachTarget) {
+        let Some(scene) = self.scenes.get(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let element = match target {
+            AttachTarget::Root => Some(content),
+            AttachTarget::Named(name) => resolve_named(&content, name),
+        };
+        if let Some(mut element) = element {
+            element.clear_data_context();
+        }
+    }
+
+    /// Reap view `entity`'s [`NoesisVm`](crate::viewmodel::NoesisVm): detach its
+    /// `DataContext` off the live scene, then drop the owning entry.
+    pub(crate) fn reap_view_model_for(&mut self, entity: Entity) {
+        if let Some(entry) = self.view_models.get(&entity)
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| !entry.needs_attach(&s.built_for_uri))
+        {
+            self.clear_host_data_context(entity, entry.target());
+        }
+        self.view_models.remove(&entity);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`NoesisCommands`](crate::commands::NoesisCommands):
+    /// detach its `DataContext` off the live scene, then drop the command host.
+    pub(crate) fn reap_commands_for(&mut self, entity: Entity) {
+        if let Some(entry) = self.command_hosts.get(&entity)
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| !entry.needs_attach(&s.built_for_uri))
+        {
+            self.clear_host_data_context(entity, entry.target());
+        }
+        self.command_hosts.remove(&entity);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Reap view `entity`'s plain-struct view model of type `type_id`: detach its
+    /// `DataContext` off the live scene, then drop the entry (whose sink was
+    /// otherwise left accumulating UI writebacks nobody drains).
+    pub(crate) fn reap_plain_vm_for(&mut self, entity: Entity, type_id: std::any::TypeId) {
+        let key = (entity, type_id);
+        if let Some(entry) = self.plain_vms.get(&key)
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| !entry.needs_attach(&s.built_for_uri))
+        {
+            self.clear_host_data_context(entity, entry.target());
+        }
+        self.plain_vms.remove(&key);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Reap view/panel `entity`'s [`NoesisClickWatch`](crate::events::NoesisClickWatch):
+    /// drop its live click subscriptions (each drop fires the C++ unsubscribe, so
+    /// they stop pushing onto the shared queue) and forget its target snapshots.
+    pub(crate) fn reap_click_watch_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.click_subs.clear();
+        }
+        if let Some(panel) = self.panels.get_mut(&entity) {
+            panel.click_subs.clear();
+        }
+        self.last_click_target.retain(|(ent, _), _| *ent != entity);
+    }
+
+    /// Reap view/panel `entity`'s [`NoesisKeyDownWatch`](crate::events::NoesisKeyDownWatch):
+    /// drop its live keydown subscriptions and forget its swallow snapshots.
+    pub(crate) fn reap_keydown_watch_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.keydown_subs.clear();
+        }
+        if let Some(panel) = self.panels.get_mut(&entity) {
+            panel.keydown_subs.clear();
+        }
+        self.last_keydown_swallow
+            .retain(|(ent, _), _| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`NoesisEventWatch`](crate::routed_events::NoesisEventWatch):
+    /// drop its live routed-event subscriptions and forget its config snapshots.
+    pub(crate) fn reap_event_watch_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.event_subs.clear();
+        }
+        self.last_event_config
+            .retain(|(ent, _, _), _| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`NoesisItems`](crate::items::NoesisItems): detach
+    /// each bound `ItemsSource` off its live control before dropping the backing
+    /// collections. Detaching first releases the control's ref to a collection,
+    /// so an object-source binding's rows drop before their `ClassRegistration`
+    /// (same use-after-free rule as [`Self::clear_host_data_context`]).
+    pub(crate) fn reap_items_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get(&entity)
+            && let Some(content) = scene.view.content()
+        {
+            let uri = &scene.built_for_uri;
+            for ((ent, name), binding) in &self.items_sources {
+                if *ent != entity || binding.needs_bind(uri) {
+                    continue;
+                }
+                if let Some(mut element) = resolve_named(&content, name) {
+                    element.clear_items_source();
+                }
+            }
+        }
+        self.items_sources.retain(|(ent, _), _| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`UiList`](crate::list::UiList) bindings: detach each
+    /// list's `ItemsSource` off its cached control (same use-after-free rule as
+    /// [`Self::reap_items_for`]), drop the bindings, and drop the per-row click
+    /// subscriptions parked in the still-live scene.
+    pub(crate) fn reap_list_for(&mut self, entity: Entity) {
+        for ((ent, _), binding) in &mut self.lists {
+            if *ent == entity {
+                binding.detach();
+            }
+        }
+        self.lists.retain(|(ent, _), _| *ent != entity);
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.row_click_subs.clear();
+        }
+    }
+
+    /// Reap view `entity`'s [`NoesisImaging`](crate::imaging::NoesisImaging)
+    /// read-back snapshots. The staged registry buffers are reclaimed separately
+    /// (they live in the `ImageRegistry` resource, not here); see
+    /// `crate::imaging::reap_removed_imaging`.
+    pub(crate) fn reap_imaging_snapshots_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.image_snapshots.clear();
+        }
     }
 }
 
@@ -4679,16 +4963,70 @@ fn ensure_noesis_scene(
     }
 }
 
+/// A bridge component whose per-entity render-side state must be reaped when the
+/// component is removed from a live entity — the case entity-despawn teardown
+/// ([`NoesisRenderState::teardown_for`]) never sees, because a reconcile system
+/// only visits entities that still *have* the component. Implementors name the
+/// [`NoesisRenderState`] method that drops exactly what this bridge owns for the
+/// entity; that method MUST be idempotent with the terminal teardown (see the
+/// per-bridge reaps' shared note). Wire one up with [`add_bridge_reap`].
+pub(crate) trait ReapOnRemove: Component {
+    /// Drop every per-entity render resource this bridge owns for `entity`.
+    fn reap(state: &mut NoesisRenderState, entity: Entity);
+}
+
+/// Generic reap system for any [`ReapOnRemove`] bridge `C`: on the main thread
+/// (the `NonSendMut` pins it there, where Noesis lives), for each entity whose
+/// `C` was removed since last frame. One instance per bridge, scheduled by
+/// [`add_bridge_reap`].
+#[allow(clippy::needless_pass_by_value)]
+fn reap_removed_bridge<C: ReapOnRemove>(
+    mut removed: RemovedComponents<C>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        C::reap(&mut state, entity);
+    }
+}
+
+/// Schedule a component-removal reap `system` at the head of
+/// [`NoesisSet::Ensure`] — before [`ensure_noesis_scene`] (re)builds the
+/// survivors and before the Apply-phase bridges run — so removal teardown is
+/// symmetric with the entity-despawn teardown that already runs there
+/// ([`teardown_removed_views`] / [`teardown_removed_panels`]). The single home
+/// for the reap-ordering contract: [`add_bridge_reap`] routes the trait-driven
+/// bridges through it, and the generic plain-VM reap wires through it directly.
+pub(crate) fn add_reap_system<M>(
+    app: &mut App,
+    system: impl IntoScheduleConfigs<ScheduleSystem, M>,
+) {
+    app.add_systems(
+        PostUpdate,
+        system.in_set(NoesisSet::Ensure).before(ensure_noesis_scene),
+    );
+}
+
+/// Wire the [`ReapOnRemove`] reap for bridge component `C`. Mechanical per
+/// bridge: implement [`ReapOnRemove`] for `C`, then call this from its plugin.
+pub(crate) fn add_bridge_reap<C: ReapOnRemove>(app: &mut App) {
+    add_reap_system(app, reap_removed_bridge::<C>);
+}
+
 /// Reap the Noesis state of any view whose [`NoesisView`] was removed since last
 /// frame, whether the whole entity was despawned or just the component dropped.
-/// This is the crate's only teardown-on-removal hook: without it a despawned view
-/// leaks its (`!Send`) scene + side-table entries for the life of the process.
-/// Runs on the main thread (the `NonSendMut` forces it there, where Noesis lives)
-/// at the head of [`NoesisSet::Ensure`], before [`ensure_noesis_scene`] rebuilds
-/// the survivors.
+/// Without it a despawned view leaks its (`!Send`) scene + side-table entries for
+/// the life of the process. Runs on the main thread (the `NonSendMut` forces it
+/// there, where Noesis lives) at the head of [`NoesisSet::Ensure`], before
+/// [`ensure_noesis_scene`] rebuilds the survivors. Per-bridge component removals
+/// are reaped alongside it by the [`ReapOnRemove`] systems.
 #[allow(clippy::needless_pass_by_value)]
 fn teardown_removed_views(
     mut removed: RemovedComponents<NoesisView>,
+    alive: Query<Entity>,
+    mut commands: Commands,
     state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
@@ -4696,6 +5034,18 @@ fn teardown_removed_views(
     };
     for entity in removed.read() {
         state.teardown_for(entity);
+        // `RemovedComponents<NoesisView>` fires both when the whole entity is
+        // despawned and when only the component is dropped off a surviving
+        // entity (a game toggling its UI off while keeping Camera2d/NoesisCamera).
+        // A despawn reaps every component (NoesisIntermediate included); a
+        // survivor keeps its last-published intermediate, and `teardown_for` has
+        // just pruned it out of `publish_intermediates`' sweep — so unless we
+        // strip it here the render world blits the last-painted frame forever
+        // (the P0.8 ghost). Guard on liveness: a `remove` command on a despawned
+        // entity would panic at flush.
+        if alive.contains(entity) {
+            commands.entity(entity).remove::<NoesisIntermediate>();
+        }
     }
 }
 

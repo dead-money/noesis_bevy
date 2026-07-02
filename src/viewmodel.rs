@@ -43,7 +43,7 @@ use noesis_runtime::classes::{
 };
 use noesis_runtime::ffi::{ClassBase, PropType};
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public value type
@@ -96,12 +96,22 @@ impl VmValue {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where the bridge attaches a view model's instance as `DataContext`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum AttachTarget {
     /// The view's root element (`View::content`).
     Root,
     /// The element resolved by `x:Name` via `FrameworkElement::find_name`.
     Named(String),
+}
+
+impl AttachTarget {
+    /// Human-readable target for diagnostics: `"root"` or `x:Name "Foo"`.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Root => "root".to_owned(),
+            Self::Named(name) => format!("x:Name {name:?}"),
+        }
+    }
 }
 
 /// A declarative recipe for a view model: a Noesis class name, the ordered set
@@ -405,6 +415,12 @@ pub fn drain_vm_changed_queue(
     }
 }
 
+impl ReapOnRemove for NoesisVm {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_view_model_for(entity);
+    }
+}
+
 /// Wires the per-view `ViewModel` / `DataContext` bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisViewModelPlugin;
@@ -415,5 +431,6 @@ impl Plugin for NoesisViewModelPlugin {
             .add_message::<NoesisViewModelChanged>()
             .add_systems(PreUpdate, drain_vm_changed_queue)
             .add_systems(PostUpdate, sync_view_models.in_set(NoesisSet::Apply));
+        add_bridge_reap::<NoesisVm>(app);
     }
 }
