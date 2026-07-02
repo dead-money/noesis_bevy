@@ -14,8 +14,8 @@ use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, FocusNavigationDirection, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisFocus,
-    NoesisFocusControl, NoesisPlugin, NoesisView, XamlRegistry,
+    DpKind, DpValue, FocusNavigationDirection, NoesisCamera, NoesisDp, NoesisDpChanged,
+    NoesisFocus, NoesisFocusControl, NoesisPlugin, NoesisView, XamlRegistry,
 };
 
 const FOCUS_AT_FRAME: usize = 10;

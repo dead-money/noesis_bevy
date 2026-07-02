@@ -504,7 +504,7 @@ pub(crate) struct NoesisRenderState {
     scenes: HashMap<Entity, SceneInstance>,
     /// Entities that currently carry a published [`NoesisIntermediate`]. Tracked
     /// so [`Self::publish_intermediates`] can strip the component off entities
-    /// whose scene has since been torn down (xaml_uri cleared, uri swapped to
+    /// whose scene has since been torn down (`xaml_uri` cleared, uri swapped to
     /// not-yet-loaded bytes, readiness gate re-blocked) but that survive as
     /// entities — otherwise the last-painted frame keeps compositing forever.
     published_intermediates: HashSet<Entity>,
@@ -1214,7 +1214,10 @@ impl NoesisRenderState {
     fn warn_datacontext_collisions(&mut self, entity: Entity) {
         let mut by_target: HashMap<&AttachTarget, Vec<String>> = HashMap::new();
         if let Some(entry) = self.view_models.get(&entity) {
-            by_target.entry(entry.target()).or_default().push("NoesisVm".to_owned());
+            by_target
+                .entry(entry.target())
+                .or_default()
+                .push("NoesisVm".to_owned());
         }
         if let Some(entry) = self.command_hosts.get(&entity) {
             by_target
@@ -4996,7 +4999,10 @@ fn reap_removed_bridge<C: ReapOnRemove>(
 /// ([`teardown_removed_views`] / [`teardown_removed_panels`]). The single home
 /// for the reap-ordering contract: [`add_bridge_reap`] routes the trait-driven
 /// bridges through it, and the generic plain-VM reap wires through it directly.
-pub(crate) fn add_reap_system<M>(app: &mut App, system: impl IntoScheduleConfigs<ScheduleSystem, M>) {
+pub(crate) fn add_reap_system<M>(
+    app: &mut App,
+    system: impl IntoScheduleConfigs<ScheduleSystem, M>,
+) {
     app.add_systems(
         PostUpdate,
         system.in_set(NoesisSet::Ensure).before(ensure_noesis_scene),

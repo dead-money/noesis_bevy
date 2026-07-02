@@ -108,7 +108,9 @@ fn removing_the_view_component_removes_the_published_intermediate() {
         .lock()
         .unwrap()
         .expect("post-removal intermediate presence captured");
-    eprintln!("--- intermediate ghost (component removal) had_before={had_before} has_after={has_after} ---");
+    eprintln!(
+        "--- intermediate ghost (component removal) had_before={had_before} has_after={has_after} ---"
+    );
 
     assert!(
         had_before,

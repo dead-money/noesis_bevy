@@ -126,7 +126,8 @@ async fn run_test() {
     rd.begin_onscreen_render();
 
     // Segment 0: left quad + its draw.
-    rd.map_vertices(left_vb.len() as u32).copy_from_slice(&left_vb);
+    rd.map_vertices(left_vb.len() as u32)
+        .copy_from_slice(&left_vb);
     rd.unmap_vertices();
     rd.map_indices(ib.len() as u32).copy_from_slice(&ib);
     rd.unmap_indices();
