@@ -77,7 +77,7 @@ impl Plugin for NoesisHeadlessPlugin {
     /// [`NoesisRenderPlugin`](crate::NoesisRenderPlugin) defers state creation.
     fn finish(&self, app: &mut App) {
         let (device, queue) = bevy::tasks::block_on(request_device());
-        app.insert_non_send_resource(NoesisRenderState::new(device, queue));
+        app.insert_non_send(NoesisRenderState::new(device, queue));
     }
 }
 
@@ -86,7 +86,8 @@ impl Plugin for NoesisHeadlessPlugin {
 /// GPU; the adapter's own limits are requested so `request_device` can't fail on
 /// a capability the adapter already advertises.
 async fn request_device() -> (wgpu::Device, wgpu::Queue) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
