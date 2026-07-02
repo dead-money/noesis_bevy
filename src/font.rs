@@ -9,11 +9,13 @@
 //!   folder URI (`"Fonts/"`) and a family name (`"Bitter"`). The folder
 //!   URI is what our scan-folder callback sees, and we need to report
 //!   every filename we've loaded for that folder.
-//! - `ExtractResource` mirrors the registry into the render world each
-//!   frame.
 //! - [`BevyFontProvider`] implements
 //!   [`noesis_runtime::font_provider::FontProvider`] against a
-//!   [`SharedFontMap`] that the plugin syncs from the registry.
+//!   [`SharedFontMap`] that the driving pipeline syncs from the registry each
+//!   frame.
+//!
+//! Registry, sync, and provider callbacks all run in the main world, on the
+//! one thread Noesis is pinned to.
 //!
 //! # How Noesis resolves `FontFamily="Fonts/#Bitter"`
 //!
@@ -35,7 +37,6 @@ use std::sync::{Arc, Mutex};
 
 use bevy::asset::{AssetApp, AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
-use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use noesis_runtime::font_provider::FontProvider;
 
@@ -47,7 +48,7 @@ use noesis_runtime::font_provider::FontProvider;
 /// `FreeType`; we never inspect the bytes on the Rust side.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct FontAsset {
-    /// The whole font file, shared so cloning into the render world stays cheap.
+    /// The whole font file, shared so mirroring it into the provider map stays cheap.
     pub bytes: Arc<Vec<u8>>,
 }
 
@@ -84,10 +85,10 @@ impl AssetLoader for FontAssetLoader {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Flat (`folder_uri`, `filename`) → bytes map, populated by
-/// [`update_font_registry`] on `AssetEvent<FontAsset>`. Cloned into the
-/// render world via [`ExtractResource`]; the `Arc<Vec<u8>>` values make
-/// the clone cheap.
-#[derive(Resource, ExtractResource, Default, Clone)]
+/// [`update_font_registry`] on `AssetEvent<FontAsset>`. Synced into the
+/// provider's [`SharedFontMap`] each frame; the `Arc<Vec<u8>>` values make
+/// the sync a cheap handle copy.
+#[derive(Resource, Default, Clone)]
 pub struct FontRegistry {
     /// `(folder_uri, filename)` → bytes. Folder URIs are stored *without* a
     /// trailing slash (`"Fonts"`, not `"Fonts/"`): [`split_folder_filename`]
@@ -209,28 +210,25 @@ pub fn update_font_registry(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BevyFontProvider: the render-world FontProvider impl
+// BevyFontProvider: the FontProvider impl
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Shared `(folder, filename)` → bytes map. Render-world-only; the
-/// provider's boxed impl holds one Arc handle, a [`NoesisRenderState`]
-/// sibling holds another so a sync system can refresh the map from
-/// [`FontRegistry`] each frame.
-///
-/// [`NoesisRenderState`]: crate::render::NoesisRenderState
+/// Shared `(folder, filename)` → bytes map. The provider's boxed impl holds
+/// one Arc handle, `NoesisRenderState` holds another so the sync system can
+/// refresh the map from [`FontRegistry`] each frame.
 type FontMapEntries = HashMap<(String, String), Arc<Vec<u8>>>;
 
 /// Shared, mutable `(folder, filename)` → bytes map behind an `Arc<Mutex<…>>`.
 ///
-/// Lives in the render world. The [`BevyFontProvider`] reads it to answer
-/// Noesis's font scans, and a sync system refreshes it from the extracted
-/// [`FontRegistry`] each frame via [`SharedFontMap::sync_from`]. Cloning the
+/// The [`BevyFontProvider`] reads it to answer Noesis's font scans, and the
+/// sync system refreshes it from the [`FontRegistry`] each frame via
+/// [`SharedFontMap::sync_from`]. Both run on the main thread; cloning the
 /// handle shares the same underlying map.
 #[derive(Clone, Default)]
 pub struct SharedFontMap(pub(crate) Arc<Mutex<FontMapEntries>>);
 
 impl SharedFontMap {
-    /// Replace the map contents from an extracted [`FontRegistry`].
+    /// Replace the map contents from the [`FontRegistry`].
     ///
     /// # Panics
     ///
@@ -338,8 +336,8 @@ impl FontProvider for BevyFontProvider {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Registers [`FontAsset`] + [`FontAssetLoader`], initializes
-/// [`FontRegistry`], and mirrors the registry into the render world.
-/// Noesis-side font provider registration happens in `NoesisRenderPlugin`.
+/// [`FontRegistry`], and keeps it current from asset events. Noesis-side font
+/// provider registration happens in `NoesisRenderPlugin`.
 pub struct FontAssetPlugin;
 
 impl Plugin for FontAssetPlugin {
@@ -347,8 +345,7 @@ impl Plugin for FontAssetPlugin {
         app.init_asset::<FontAsset>()
             .init_asset_loader::<FontAssetLoader>()
             .init_resource::<FontRegistry>()
-            .add_systems(Update, update_font_registry)
-            .add_plugins(ExtractResourcePlugin::<FontRegistry>::default());
+            .add_systems(Update, update_font_registry);
     }
 }
 

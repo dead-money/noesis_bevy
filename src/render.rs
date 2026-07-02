@@ -1,20 +1,25 @@
-//! Render-graph integration: composites each [`NoesisView`] camera's UI into
-//! the Bevy frame.
+//! Render integration: drives each [`NoesisView`] camera's UI and composites
+//! it into the Bevy frame.
 //!
-//! [`NoesisRenderPlugin`] is a sub-plugin on [`RenderApp`] that:
+//! [`NoesisRenderPlugin`] wires two halves:
 //!
-//! - Builds a [`WgpuRenderDevice`] against Bevy's shared `wgpu::Device` and
-//!   registers it with Noesis in [`Plugin::finish`].
-//! - Installs a [`BevyXamlProvider`] whose backing [`SharedXamlMap`] is
-//!   refreshed each frame from the main world's [`XamlRegistry`] via a
-//!   system running in [`ExtractSchedule`].
-//! - Lazily builds a [`noesis_runtime::view::View`] + intermediate `Rgba8Unorm`
-//!   texture the first frame the configured XAML URI resolves.
-//! - Drives Noesis (layout, render-tree snapshot, offscreen + onscreen
-//!   render) from a `Render` schedule system; the graph node itself only
-//!   blits the pre-populated intermediate into the camera's [`ViewTarget`].
-//! - Registers [`NoesisNode`] into [`Core2d`] between
-//!   [`Node2d::MainTransparentPass`] and [`Node2d::EndMainPass`].
+//! - A main-world driving pipeline in `PostUpdate`, ordered by the [`NoesisSet`]
+//!   phases (Sync → Ensure → Apply → Drive). It builds a [`WgpuRenderDevice`]
+//!   against Bevy's shared `wgpu::Device` (registered with Noesis in
+//!   [`Plugin::finish`]) and installs the XAML/font/image providers. Each frame
+//!   it syncs those providers' shared maps from the main-world asset registries,
+//!   lazily builds each view's [`noesis_runtime::view::View`] + intermediate
+//!   `Rgba8Unorm` texture once its XAML URI resolves, applies queued element
+//!   writes and input, then drives Noesis (layout, render-tree snapshot,
+//!   offscreen + onscreen render) into each view's intermediate. Every Noesis
+//!   call happens here: the `View`/`Renderer`/device handles are `!Send` and
+//!   pinned to the main thread (see `NoesisRenderState`).
+//! - Blit nodes in the render sub-app ([`RenderApp`]). The painted intermediate
+//!   is the only Noesis data that crosses worlds: it rides each camera entity
+//!   via [`ExtractComponent`], and the graph node blits it into the camera's
+//!   [`ViewTarget`]. [`NoesisNode`] sits in [`Core2d`] between
+//!   [`Node2d::MainTransparentPass`] and [`Node2d::EndMainPass`];
+//!   [`NoesisOverlayNode`] sits in [`Core3d`] on cameras tagged [`NoesisCamera`].
 //!
 //! The intermediate is `Rgba8Unorm` because [`WgpuRenderDevice`]'s pipeline
 //! cache compiles every shader variant against that one color format.
@@ -329,8 +334,7 @@ fn build_noesis_style(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Per-view scene configuration. Add as a [`Component`] to the camera entity
-/// you also tag with [`NoesisCamera`]; the render app receives a copy on that
-/// entity via [`ExtractComponent`]. One [`NoesisView`] == one live Noesis
+/// you also tag with [`NoesisCamera`]. One [`NoesisView`] == one live Noesis
 /// `View` + intermediate, composited onto that camera. Multiple tagged
 /// cameras drive multiple independent views.
 ///
@@ -345,7 +349,7 @@ fn build_noesis_style(
 /// [`NoesisVm`](crate::NoesisVm) and [`NoesisCommands`](crate::commands::NoesisCommands)
 /// are not auto-attached: they require an explicit class or command-host name, so
 /// you add them yourself, and they keep their own state across scene rebuilds.
-#[derive(Component, ExtractComponent, Clone, Debug)]
+#[derive(Component, Clone, Debug)]
 #[require(
     crate::animation::NoesisAnimation,
     crate::binding::NoesisBinding,
@@ -495,15 +499,15 @@ struct AppResourcesSnapshot {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render-world resource: owns Noesis handles + the per-scene instance
+// Main-world resource: owns Noesis handles + the per-scene instance
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **Non-send** render-world resource: the runtime's `View`/`Renderer`/device
+/// **Non-send** main-world resource: the runtime's `View`/`Renderer`/device
 /// handles are `!Send`/`!Sync` (`NonNull`-based), so this cannot be a regular
 /// Bevy `Resource`. Inserted via `World::insert_non_send_resource` and accessed
-/// through `NonSend`/`NonSendMut`; it stays pinned to the render thread, which
-/// is where every Noesis call must happen. See the lifecycle invariants in
-/// `CLAUDE.md`.
+/// through `NonSend`/`NonSendMut`, which pin it to the main thread. Every Noesis
+/// call runs against it there, in the [`NoesisSet`] pipeline. See the lifecycle
+/// invariants in `CLAUDE.md`.
 pub(crate) struct NoesisRenderState {
     device: wgpu::Device,
     shared_map: SharedXamlMap,
@@ -5104,7 +5108,7 @@ impl BlitPipelineCache {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Systems (render app)
+// Systems (main-world driving pipeline)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Copy the [`XamlRegistry`] into the [`SharedXamlMap`] backing
@@ -5121,7 +5125,7 @@ pub(crate) fn sync_xaml_provider_map(
     state.shared_map().sync_from(&registry);
 }
 
-/// Copy the extracted [`FontRegistry`] into the [`SharedFontMap`] backing
+/// Copy the [`FontRegistry`] into the [`SharedFontMap`] backing
 /// [`BevyFontProvider`], then eagerly register any newly-arrived fonts
 /// with the C++ `CachedFontProvider` cache. Mirrors
 /// [`sync_xaml_provider_map`] for fonts but with the extra eager-register
@@ -5140,7 +5144,7 @@ fn sync_font_provider_map(
     state.register_pending_fonts();
 }
 
-/// Copy the extracted [`ImageRegistry`] into the [`SharedImageMap`]
+/// Copy the [`ImageRegistry`] into the [`SharedImageMap`]
 /// backing [`BevyTextureProvider`]. Mirrors the XAML / font sync
 /// systems.
 #[allow(clippy::needless_pass_by_value)]
@@ -5155,8 +5159,8 @@ fn sync_texture_provider_map(
 }
 
 /// Ensure a live [`SceneInstance`] exists for each [`NoesisView`] entity once
-/// its XAML bytes land in the shared map. Iterates the extracted view entities;
-/// each drives its own scene keyed by entity.
+/// its XAML bytes land in the shared map. Iterates the view entities; each
+/// drives its own scene keyed by entity.
 #[allow(clippy::needless_pass_by_value)]
 fn ensure_noesis_scene(
     views: Query<(Entity, &NoesisView)>,
@@ -5310,18 +5314,20 @@ fn apply_live_scene_flags(
 /// Drain [`NoesisInputQueue`] onto the live View. Runs after
 /// [`ensure_noesis_scene`] (so the scene exists) and before
 /// [`drive_noesis_frame`] (so `View::Update` picks up the state these
-/// events produced: hover highlights, button presses, etc.).
+/// events produced: hover highlights, button presses, etc.). Draining in
+/// place empties the queue for the next frame's pushes.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_noesis_input(
-    queue: Option<Res<crate::input::NoesisInputQueue>>,
+    queue: Option<ResMut<crate::input::NoesisInputQueue>>,
     state: Option<NonSendMut<NoesisRenderState>>,
     over_ui: Option<ResMut<crate::input::NoesisPointerOverUi>>,
 ) {
-    let (Some(queue), Some(mut state)) = (queue, state) else {
+    let (Some(mut queue), Some(mut state)) = (queue, state) else {
         return;
     };
     if !queue.events.is_empty() {
-        state.apply_input(&queue.events);
+        let events: Vec<_> = queue.drain().collect();
+        state.apply_input(&events);
     } else if state.scenes.is_empty() {
         // No events and no scenes: a view despawned while the pointer was over
         // it would otherwise leave `pointer_over_ui` stuck true forever, wrongly

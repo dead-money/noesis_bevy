@@ -8,12 +8,10 @@
 //!   `<Image Source="Images/BgTile.png"/>` and
 //!   `<ImageBrush ImageSource="Images/BgTile.png"/>` both resolve by the
 //!   same key Noesis hands us.
-//! - `ExtractResource` mirrors the registry into the render world every
-//!   frame.
 //! - [`BevyTextureProvider`] implements
 //!   [`noesis_runtime::texture_provider::TextureProvider`] against a
 //!   [`SharedImageMap`] kept fresh by a sync system in
-//!   [`crate::render::NoesisRenderPlugin`].
+//!   [`crate::render::NoesisRenderPlugin`]'s main-world driving pipeline.
 //!
 //! Noesis decides whether to ask us via `GetTextureInfo` (layout-size
 //! only) or `LoadTexture` (decoded pixels); we answer both from the same
@@ -42,7 +40,6 @@ use std::sync::{Arc, Mutex};
 
 use bevy::asset::{AssetApp, AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
-use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use noesis_runtime::texture_provider::{ImageData, TextureInfo, TextureProvider};
 
@@ -53,8 +50,8 @@ use noesis_runtime::texture_provider::{ImageData, TextureInfo, TextureProvider};
 /// Decoded image as tightly-packed RGBA8 bytes.
 ///
 /// `bytes.len() == width * height * 4`. `Arc<Vec<u8>>` so the registry
-/// and the render-world shared map can share allocations without
-/// copying on every `ExtractResource` clone.
+/// and the provider's shared map can share allocations without
+/// copying on every sync.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct ImageAsset {
     /// Image width in pixels.
@@ -158,13 +155,13 @@ fn premultiply_alpha(bytes: &mut [u8]) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Flat `uri` → decoded image map. Populated by
-/// [`update_image_registry`] on `AssetEvent<ImageAsset>`. Cloned into
-/// the render world via [`ExtractResource`]; the `Arc` values make
-/// the clone cheap.
+/// [`update_image_registry`] on `AssetEvent<ImageAsset>`. Synced into the
+/// provider's [`SharedImageMap`] each frame; the `Arc` values make the sync
+/// a cheap handle copy.
 ///
 /// Keys are asset paths as strings (e.g. `"Images/BgTile.png"`),
 /// matching the `ImageSource` attribute Noesis hands us verbatim.
-#[derive(Resource, ExtractResource, Default, Clone)]
+#[derive(Resource, Default, Clone)]
 pub struct ImageRegistry {
     pub(crate) entries: HashMap<String, RegisteredImage>,
 }
@@ -271,25 +268,25 @@ pub fn update_image_registry(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BevyTextureProvider: the render-world TextureProvider impl
+// BevyTextureProvider: the TextureProvider impl
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Shared `uri` → image map. Render-world-only; the provider's boxed
-/// impl holds one Arc handle, the render plugin holds another so its
-/// sync system can refresh the map from [`ImageRegistry`] each frame.
+/// Shared `uri` → image map. The provider's boxed impl holds one Arc handle,
+/// `NoesisRenderState` holds another so the sync system can refresh the map
+/// from [`ImageRegistry`] each frame.
 type ImageMapEntries = HashMap<String, RegisteredImage>;
 
-/// Render-world-shared `uri` → image map behind an `Arc<Mutex<…>>`.
+/// Shared `uri` → image map behind an `Arc<Mutex<…>>`.
 ///
 /// One handle lives inside the boxed [`BevyTextureProvider`], another in
-/// [`crate::render::NoesisRenderPlugin`], whose sync system calls
-/// [`SharedImageMap::sync_from`] each frame to push the latest
-/// [`ImageRegistry`] across the main → render boundary.
+/// `NoesisRenderState`, whose sync system calls [`SharedImageMap::sync_from`]
+/// each frame to push the latest [`ImageRegistry`] into the map. Both run on
+/// the main thread.
 #[derive(Clone, Default)]
 pub struct SharedImageMap(pub(crate) Arc<Mutex<ImageMapEntries>>);
 
 impl SharedImageMap {
-    /// Replace the map contents from an extracted [`ImageRegistry`].
+    /// Replace the map contents from the [`ImageRegistry`].
     ///
     /// # Panics
     ///
@@ -357,7 +354,7 @@ impl TextureProvider for BevyTextureProvider {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Registers [`ImageAsset`] + [`ImageAssetLoader`], initializes
-/// [`ImageRegistry`], and mirrors it into the render world. Noesis-side
+/// [`ImageRegistry`], and keeps it current from asset events. Noesis-side
 /// texture-provider registration happens in
 /// [`crate::render::NoesisRenderPlugin`].
 pub struct ImageAssetPlugin;
@@ -367,8 +364,7 @@ impl Plugin for ImageAssetPlugin {
         app.init_asset::<ImageAsset>()
             .init_asset_loader::<ImageAssetLoader>()
             .init_resource::<ImageRegistry>()
-            .add_systems(Update, update_image_registry)
-            .add_plugins(ExtractResourcePlugin::<ImageRegistry>::default());
+            .add_systems(Update, update_image_registry);
     }
 }
 
