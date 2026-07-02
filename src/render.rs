@@ -1322,6 +1322,16 @@ impl NoesisRenderState {
                 *ent != entity || sources.contains_key(name) || objects.contains_key(name)
             });
             for (name, items) in sources {
+                // Object items take precedence over a primitive source for the
+                // same name (see `NoesisItems::objects`); skip the source so the
+                // control is not applied twice, non-deterministically.
+                if objects.contains_key(name) {
+                    warn!(
+                        "NoesisItems: x:Name {name:?} is in both sources and objects; \
+                         using the object items and ignoring the primitive source",
+                    );
+                    continue;
+                }
                 let binding = self
                     .items_sources
                     .entry((entity, name.clone()))
