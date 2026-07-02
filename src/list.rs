@@ -770,7 +770,6 @@ fn diff_list<T: NoesisViewModel + Component>(
         let Ok(mut slot) = desired.get_mut(view) else {
             continue;
         };
-        slot.schema = T::noesis_properties();
 
         let mut gathered: Vec<(Entity, Vec<PlainValue>, bool)> = rows
             .iter()
@@ -781,6 +780,18 @@ fn diff_list<T: NoesisViewModel + Component>(
                 (entity, fields, selected)
             })
             .collect();
+
+        // One row type per list. Only the owning type may write the slot: a type
+        // that contributed no rows here and does not already own this list must
+        // leave `schema` / `rows` / `selected` / `row_type` untouched, or its empty
+        // result would clobber the owning type's live list (these per-type systems
+        // run in nondeterministic order against the same slot) and its schema could
+        // freeze the row class with the wrong field layout. A type that already
+        // owns the slot keeps writing even when it drains to empty.
+        let this = core::any::TypeId::of::<T>();
+        if gathered.is_empty() && slot.row_type != Some(this) {
+            continue;
+        }
 
         if let Some(sort) = list.sort {
             let field = sort.field as usize;
@@ -793,26 +804,28 @@ fn diff_list<T: NoesisViewModel + Component>(
             });
         }
 
-        // One row type per list; a second T targeting this view would clobber here.
-        // Only checked when T actually contributed rows, so a registered-but-unused
-        // type never false-positives.
-        if !gathered.is_empty() {
-            let this = core::any::TypeId::of::<T>();
-            if let Some(prev) = slot.row_type
-                && prev != this
-            {
-                debug_assert!(
-                    false,
-                    "UiList view {view:?}: two row component types target one list \
-                     (last-writer-wins); use one row type per UiList",
-                );
-                bevy::log::warn_once!(
-                    "UiList: multiple row component types target list view {view:?}; \
-                     only one row type per UiList is supported (last-writer-wins)",
-                );
-            }
-            slot.row_type = Some(this);
+        // Reaching here means T owns the slot; a *different* recorded type means two
+        // types both hold rows for this view (genuine misconfiguration, last-writer-
+        // wins), not the benign registered-but-unused case the bail above absorbs.
+        if let Some(prev) = slot.row_type
+            && prev != this
+        {
+            debug_assert!(
+                false,
+                "UiList view {view:?}: two row component types target one list \
+                 (last-writer-wins); use one row type per UiList",
+            );
+            bevy::log::warn_once!(
+                "UiList: multiple row component types target list view {view:?}; \
+                 only one row type per UiList is supported (last-writer-wins)",
+            );
         }
+
+        // Stamp schema + row_type together so the class is registered from the
+        // owning type's layout (ensure_class in sync_lists is gated on
+        // `row_type.is_some()`).
+        slot.schema = T::noesis_properties();
+        slot.row_type = Some(this);
 
         slot.selected = gathered
             .iter()
@@ -843,6 +856,12 @@ fn sync_lists(
         return;
     };
     for (view, list, desired) in &views {
+        // No row type has claimed this list yet (no rows have ever appeared), so
+        // `schema` is still the default empty slice. Skip until a type owns it,
+        // else `ensure_class` would freeze the row class with an empty layout.
+        if desired.row_type.is_none() {
+            continue;
+        }
         let (ops, selection) = state.apply_list_for(
             view,
             &list.name,
