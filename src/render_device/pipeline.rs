@@ -134,8 +134,8 @@ fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
     };
     wgpu::DepthStencilState {
         format: STENCIL_FORMAT,
-        depth_write_enabled: false,
-        depth_compare: CompareFunction::Always,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(CompareFunction::Always),
         stencil: wgpu::StencilState {
             front: face,
             back: face,
@@ -344,7 +344,7 @@ fn build_pipeline(
                 write_mask,
             })],
         }),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }
