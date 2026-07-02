@@ -1,0 +1,584 @@
+================================================================================
+noesis_bevy — full-crate audit
+Date: 2026-07-01
+Method: seven parallel review passes (render core, wgpu render device, data
+bridges, list/items/ECS-UI, input/focus/plugin architecture, assets/XAML/theme,
+visual/transform bridges), findings verified against render.rs state methods,
+lib.rs wiring, and bevy_ecs 0.18 sources where claims depended on Bevy
+internals. ~15k lines of src audited.
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+
+The crate is unusually disciplined for its size and problem domain. The hard
+invariants — Noesis thread affinity, FFI handle drop order, the deferred-submit
+uniform rings, the rotating provider borrows, phantom-change suppression in
+read-backs — are correct and argued in place. View-entity despawn teardown is
+centralized and leak-free. The bridge pattern is applied consistently across
+~30 modules and the NoesisSet (Sync → Ensure → Apply → Drive) phase design is
+idiomatic Bevy.
+
+The problems cluster into five systemic themes rather than scattered defects:
+
+  1. LIFECYCLE ASYMMETRY. Entity despawn is handled; component REMOVAL is
+     handled nowhere. Removing any bridge component from a live view freezes
+     or leaks its render-side state (one case grows unboundedly). Re-inserting
+     a changed def (NoesisVm, NoesisCommands, NoesisBinding, panel props) is
+     silently ignored — "first sight wins" with no warning.
+
+  2. COPY-PASTE DRIFT. The same sub-patterns are hand-copied 3–10 times
+     (sync-system gate ×10, shared queue + drain ×5, attach lifecycle ×4,
+     asset registry/provider ×3, view-vs-panel resolution fork ×8, builder/
+     mutator pairs ×36). The drift has already produced at least four real
+     bugs (missing rebuild gate in animation, missing panel gate in layout and
+     focus_input, missing dedupe in dp::observe). Every duplicated site is a
+     future bug.
+
+  3. ARCHITECTURAL RESIDUE from the render-world → main-world migration.
+     Module docs in render.rs, input.rs, xaml.rs, markup.rs, classes.rs still
+     describe an ExtractSchedule/render-thread architecture that no longer
+     exists; four ExtractResourcePlugins and one ExtractComponent derive do
+     dead per-frame work for consumers that aren't there. For a crate whose
+     single most safety-critical fact is "which thread the FFI runs on",
+     wrong threading docs are how the next bug gets written.
+
+  4. MULTI-VIEW / MULTI-WINDOW "FIRST ONE WINS" — chosen inconsistently.
+     Input coordinates are converted against the first view in query order but
+     delivered to the first scene in HashMap order; with two views these can
+     be different views. Window events ignore their window entity. All
+     silent.
+
+  5. SILENT NO-OPS. Bridges are inconsistent about panel-entity support (some
+     resolve into the fragment's namescope, most silently do nothing), about
+     conflicting writers to process-global state (DataContext collisions,
+     application_resources vs NoesisResources vs default theme), and about
+     unknown names in the newer maps. None of these warn.
+
+Below: priority-ordered bug list, then per-area detail, then design/
+simplification recommendations, then the noesis_runtime note.
+
+
+================================================================================
+P0 — FIX FIRST (crashes, corruption, data loss, wrong input)
+================================================================================
+
+P0.1  Vertex/index streams clobbered across map/unmap cycles within a phase
+      render_device/wgpu_device.rs:1480-1505, 1582-1586, 1693-1700 — bug/high
+      unmap_vertices/unmap_indices always queue.write_buffer(buf, 0, ...), but
+      draws referencing earlier data are still queued in the phase encoder,
+      submitted only at end_*_render. All write_buffers enqueued before a
+      submit execute first, so the LAST map's bytes are what EVERY recorded
+      draw reads. The device trait's own protocol docs show map/unmap once per
+      offscreen tile inside a single encoder — multi-tile/multi-RT frames will
+      render garbage geometry. The uniform rings were built to solve exactly
+      this; vertex/index streams were missed.
+      Fix: mirror UniformRing — per-phase byte cursor, write at cursor, offset
+      batch.vertex_offset/start_index by the segment base in draw_batch.
+
+P0.2  Zero-size view → zero-extent wgpu texture → validation abort
+      render.rs:1808-1820, 1930-1933, 156-188 — bug/high
+      NoesisView::size is documented to be driven from the window; a minimized
+      window (0×0) or transient 0-height resize panics process-wide.
+      Fix: size.max(UVec2::ONE), or skip build/resize on a zero dimension.
+
+P0.3  diff_list::<T> clobbers every list when a second row type is registered
+      list.rs:764-825 — bug/high
+      Each registered row type gets its own diff_list::<T> system, running in
+      nondeterministic order against the same ListDesired. A type with no rows
+      in a given list still overwrites slot.schema / slot.rows / slot.selected,
+      emptying other types' lists by scheduler order and potentially freezing
+      the Noesis class registration with the WRONG type's field layout
+      (ensure_class registers on first sight — misplaced __entity field,
+      wrong-typed DP indices thereafter).
+      Fix: only the owning type may write: bail when gathered.is_empty() &&
+      slot.row_type != Some(TypeId::of::<T>()); stamp schema/row_type together
+      only when owned; gate ensure_class on row_type.is_some().
+
+P0.4  Key auto-repeat suppressed — held keys act once in Noesis controls
+      input.rs:327-339 — bug/high
+      Repeat KeyboardInput presses are dropped on the theory that Noesis does
+      its own repeat off the KeyDown/KeyUp pair. View::KeyDown injection has
+      no internal auto-repeat; official hosts forward OS repeats as repeated
+      KeyDown. Held arrow in TextBox/ListBox moves once; held Backspace
+      deletes one char (Back/Delete are KeyDown-handled, not Char-handled).
+      Fix: forward repeat presses as KeyDown; keep Char emission as-is.
+
+P0.5  NoesisFocusControl one-shot actions accumulate and replay the history
+      focus_input.rs:151-161, 246-267, 385-398; render.rs:2985-3083 — bug/high
+      moves/engages are push-only; every request_move replays ALL accumulated
+      moves (N D-pad presses → frame N applies moves 1..N), and every scene
+      rebuild replays the full history.
+      Fix: drain the vecs after apply; drop the rebuilt-replay for one-shots.
+
+P0.6  Animations inserted before async scene build are silently lost, forever
+      animation.rs:139 — bug/high
+      The only bridge in its family gating purely on is_changed() with no
+      || state.scene_rebuilt_this_frame(entity). Insert-at-spawn (the
+      documented pattern) fires into a scene that doesn't exist yet;
+      begin_animations_for silently returns; the change flag is gone by the
+      frame the scene exists. Also loses everything on hot-reload rebuild.
+      Fix: add the gate like the other nine bridges (better: see D1).
+
+P0.7  Input routed to an arbitrary scene when multiple views exist — and a
+      DIFFERENT arbitrary view than coordinates were converted against
+      render.rs:4011-4019; input.rs:230-236, 368-371 — bug/high
+      apply_input sends events to scenes.values_mut().next() (HashMap order,
+      unstable across insertions); the coordinate forwarders scale against
+      views.iter().next() (query order). Two views of different sizes:
+      pointer converted by one, hit-tested by the other. Silent.
+      Fix: one deterministic choice (lowest entity or a marker component) on
+      both sides; carry the target Entity in NoesisInputEvent to lay rails
+      for real per-view routing. warn_once when >1 scene exists.
+
+P0.8  Stale NoesisIntermediate composites a frozen UI ghost after teardown
+      render.rs:4139-4151, 4257-4303, 4344-4358 — bug/high
+      Nothing removes NoesisIntermediate when a scene is torn down but the
+      entity survives (xaml_uri = "", uri changed to not-yet-loaded bytes,
+      re-blocked readiness gate). The last-painted frame keeps extracting and
+      blitting indefinitely. Compounds with P1.1.
+      Fix: in drive_noesis_frame, remove NoesisIntermediate from published
+      entities whose scene no longer exists.
+
+P0.9  Bridge component removal never tears down render-side state
+      all bridge modules; root cause render.rs:4690 — bug/high (systemic)
+      Reconcile systems only visit entities that still HAVE the component.
+      Removing NoesisClickWatch/KeyDownWatch/EventWatch leaves Noesis
+      subscriptions live and firing into the shared queues forever. Removing
+      NoesisVm/NoesisCommands leaves the entry attached as DataContext.
+      Removing a plain-VM component T is worst: the set_sink keeps
+      accumulating UI writebacks that are never drained — unbounded growth
+      while the user interacts. Removing UiList/NoesisItems leaves the
+      binding, class registration, and last rows rendering forever. Removing
+      NoesisImaging strands full-size RGBA buffers in the registry.
+      Fix: per-bridge RemovedComponents<C> reap systems at the head of
+      NoesisSet::Ensure (or component lifecycle hooks); one shared helper
+      makes this mechanical.
+
+P0.10 NoesisVm + NoesisCommands on one view: nondeterministic silent
+      DataContext clobber
+      viewmodel.rs:142 / commands.rs:118 / plain_vm.rs:274; attach passes
+      render.rs:1085, 1157, 1504 — bug/high
+      Both default to AttachTarget::Root and set_data_context on the same
+      root; each marks attached_for_uri and never retries; whichever Apply
+      system runs last wins, and the loser is silently dead. This is the
+      natural combination (bindings + button commands).
+      Fix: minimum — warn on two entries targeting the same (entity, target).
+      Better — one host object merging value DPs and command DPs per target.
+
+
+================================================================================
+P1 — REAL BUGS, LOWER BLAST RADIUS
+================================================================================
+
+P1.1  Hot-reload tears the scene down before readiness gates re-pass
+      render.rs:1831-1883 — bug/medium. teardown_scene runs before the
+      bytes/fonts/images/app-resources gates are evaluated; an unmet gate at
+      reload time destroys the live scene and blanks (or, with P0.8, ghosts)
+      the view. Evaluate gates first; eager teardown only for xaml_uri = "".
+
+P1.2  Default theme applied once via Local<bool> — late-spawned views miss it
+      theme.rs:175-214 — bug/high (asset slice's top finding). Views spawned
+      after the first batch (or via Commands in Update the same frame) parse
+      without the theme dictionary and render unthemed/magenta forever, since
+      scene parse is one-shot. Fix: patch per-view with Added<NoesisView> in
+      PostUpdate before NoesisSet::Ensure; drop the Local.
+
+P1.3  Default theme force-disables the NoesisResources bridge
+      resources.rs:41-47 + theme.rs:192-197 — bug/medium. The theme plugin
+      writes application_resources, and the URI chain always clobbers the
+      code-built dictionary in Ensure (after the bridge's Sync install).
+      Opting into the default theme silently kills every .solid()/.value()
+      entry — after NoesisResourcesInstalled reported them present. Related:
+      render.rs:3723-3790 vs 3971-4006 — the two installers for the same
+      process-global fight, and two views with different chains flip the
+      global theme every rebuild, contradicting the field's own docs.
+      Fix: merge the code-built dictionary into the chain (merged-dictionary
+      semantics), warn on mixed configuration, emit the read-back after
+      Ensure.
+
+P1.4  poll_selection phantom "UI selected" event after a failed drive
+      list.rs:608-637 — bug/medium. last_currency is recorded even when
+      set_selected_index returned false or the row isn't in rows; next frame
+      the mismatch is misread as a user selection, emitting NoesisListSelection
+      and rewriting the app's Selected marker with no user interaction.
+      Fix: re-read current_entity() after driving and record THAT.
+
+P1.5  First-sight-frozen defs: changed/re-inserted components silently inert
+      render.rs:1051, 1126, 1418 — bug/medium. ensure_view_model /
+      ensure_commands / has_binding never rebuild on a changed def; a new
+      converter for the same (element, property) is swallowed; targets
+      dropped from a new NoesisBinding are never unbound. NoesisBinding has
+      no post-insert mutation API at all, so combined there is NO way to
+      change a binding after insert. Fix: fingerprint entries (class + props
+      + target), rebuild on mismatch, prune absent keys; warn_once meanwhile.
+
+P1.6  Plain VM: one view per type, with per-frame warn spam on the second
+      plain_vm.rs:139; render.rs:1487-1494 — bug/medium. Entries are keyed
+      (Entity, TypeId) but register a global Noesis type name; a second view
+      with the same T re-registers, fails, retries, and warns every frame.
+      Fix: register the class once per TypeId; one instance/sink per entity.
+      Apply the panels' failed_fragments dedupe pattern to ensure_view_model /
+      ensure_commands failures too (render.rs:1058, 1133).
+
+P1.7  take_pending dirties change detection every frame on every view
+      viewmodel.rs:389, commands.rs:440 — ecs/medium. Unconditional &mut-
+      through-Mut sets the changed tick every frame; Changed<NoesisVm> is
+      permanently true downstream. plain_vm.rs:249-266 documents and avoids
+      exactly this trap — inconsistent within the crate.
+      Fix: check has_pending() via Deref first (or bypass_change_detection).
+
+P1.8  NoesisLayout / focus_input on panel entities: missing mount gate
+      layout.rs:80 (+render.rs:2019-2030), focus_input.rs:392-397 vs
+      focus.rs:70-77 — bug/medium. Both apply paths support panel fragments,
+      but the sync gates lack || panel_mounted_this_frame(entity) (and
+      focus_input lacks .after(sync_panels)); a component inserted before the
+      fragment mounts is silently dropped. focus.rs is the correct template.
+
+P1.9  Teardown gap: panel click/keydown snapshots leak
+      render.rs:1660-1666 vs 2267-2270, 2406-2410 — bug/medium. The panel
+      branches insert into last_click_target/last_keydown_swallow keyed by
+      panel entity, but teardown_panel_for doesn't prune those two maps
+      (teardown_for only runs for views). Every despawned panel with a watch
+      leaks its entries. Fix: add the two retains — or see D2 (move these
+      maps into the owning entry structs so this class of leak is impossible).
+
+P1.10 Asset removal handling is dead code — get_path after drop returns None
+      xaml.rs:157-162, font.rs:190-196, image.rs:248-253 — bug/medium.
+      Removed/Unused arms look up the path of an already-dropped asset;
+      registry entries are never removed (byte buffers leak, stale entries
+      persist). Fix: record AssetId → key in the Added arm and use that map.
+
+P1.11 NoesisItems: any mutation resets every list in the component
+      items.rs:754-782 + render.rs:1204-1227 — bug/medium. changed=true
+      re-runs clear+repush for ALL names; updating list A destroys list B's
+      selection and scroll — the exact "Reset is the enemy" failure the list
+      bridge exists to avoid. Fix: cache last-applied values per name, skip
+      equal. Also: a name in both sources and objects is applied twice with
+      undocumented precedence (render.rs:1209-1226).
+
+P1.12 Wheel events double-dispatched as MouseWheel AND Scroll
+      input.rs:276-322; render.rs:4041-4058 — bug/medium (probable). A
+      ScrollViewer reachable by both paths scrolls at ~double rate; and
+      horizontal gets only hscroll, never an HWheel. Verify against a
+      ScrollViewer; if it reproduces, send the wheel path only and reserve
+      Scroll for an explicit gamepad bridge.
+
+P1.13 NoesisPointerOverUi never resets when scenes disappear or cursor leaves
+      input.rs:167-179; render.rs:4762-4771, 4017-4019 — bug/low-medium.
+      Pointer over UI + view despawned ⇒ over stays true indefinitely —
+      exactly the state that wrongly suppresses 3D clicks. Also wheel/touch
+      don't update the hit-test bool (render.rs:4041-4068) and touch-only
+      apps never get a meaningful value.
+      Fix: clear when no scenes; update from touch returns; handle CursorLeft.
+
+P1.14 Multi-window events conflated onto the primary window
+      input.rs:223-243, 362-385, 388-392, 404-421 — bug/low (medium if
+      secondary windows exist). CursorMoved/TouchInput/WindowFocused/
+      WindowResized all ignore ev.window; secondary-window events are
+      converted with primary dimensions, alt-tab between own windows fires
+      spurious activate/deactivate. Fix: two-line guard per system filtering
+      on the primary window entity.
+
+P1.15 Contained panics leave the render device wedged in a half-mutated phase
+      wgpu_device.rs:919-922 vs 1060; pipeline.rs:115, 251 — bug/low.
+      noesis_runtime's trampolines catch_unwind every callback, so a panic in
+      draw_batch/begin_*_render returns () to Noesis with phase advanced /
+      encoder open; the next callback trips the phase assert_eq every frame
+      thereafter. Also the panic policy is inconsistent (wgpu_format_for
+      defaults; wrap/stencil/blend raws panic) and the "never panic here —
+      unwinding into C++ is UB" comment overstates (the guards contain it).
+      Fix: one policy — FFI-safe defaults everywhere, or self-healing phase
+      resets instead of asserts.
+
+P1.16 Smaller confirmed bugs
+      - dp.rs:288 — NoesisDp::observe lacks the contains-dedupe that
+        text.rs:88 has; idempotent-looking per-frame observe grows watch
+        unbounded and re-applies the whole set map every frame.
+      - render.rs:2320-2322, 2460-2462 — early return inside the keydown/
+        event sync loops skips the trailing prune (click variant hoists the
+        lookup; do the same).
+      - render.rs:2937 — short-circuit `!set_width(..) || !set_height(..)`
+        never attempts Height when Width fails.
+      - items.rs:642-657 — failed selection drive retries FFI every frame
+        forever, and moves ICollectionView currency before checking ok.
+      - bake.rs:203-217 — pending_count() transiently reads 0 while bakes are
+        in flight (loading screens flash ready). Track in_flight.
+      - font.rs:92-94 — doc says folder keys keep the trailing slash; code
+        stores them without. FontRegistry::insert("Fonts/", ...) is
+        unreachable via get("Fonts", ...). Fix doc + normalize in insert.
+      - font.rs:261-286 — basename-only folder matching: "ui/Fonts" and
+        "hud/Fonts" collide; duplicated filename resolves by HashMap order.
+        Exact-match first, basename fallback, warn on ambiguity.
+      - font.rs:278, image.rs:320,327 — .ok()? on a poisoned mutex silently
+        reports "missing" while sibling paths expect/panic. Pick one policy.
+      - list.rs:817-820 — multiple Selected rows resolve by query order,
+        unstable frame to frame; warn + deterministic pick.
+      - inlines.rs:504-507 — watching() doesn't dedupe (observe() does);
+        duplicate names double the poll work and can double-emit changes.
+      - diagnostics.rs:107-116 — install_error_routing stacks a leaked
+        handler per App built in-process; guard with std::sync::Once.
+      - transforms3d.rs:411-418 — whole matrices map cloned per apply; and
+        the "later-applied kind wins" doc implies nondeterminism that doesn't
+        exist (matrix deterministically wins).
+
+
+================================================================================
+P2 — PERFORMANCE
+================================================================================
+
+P2.1  One wgpu render pass per batch (wgpu_device.rs:1667-1701). N batches =
+      N Load/Store pass round-trips; brutal on tiler GPUs. Target/stencil only
+      change on set_render_target — batch draws into one pass per target.
+      Pairs naturally with the P0.1 fix.
+
+P2.2  Shader modules recompiled per pipeline KEY, not per shader
+      (pipeline.rs:261-267). Same WGSL re-parsed/validated for every blend/
+      stencil/mask variant — mid-frame hitches. Cache modules by key.shader.
+
+P2.3  Per-frame FFI FindName walks for every watched name in every poll path
+      (render.rs:955-976 + all poll_*_for). Elements are stable for a scene's
+      life; cache resolved handles in SceneInstance keyed by path, invalidated
+      on rebuild. This is the dominant steady-state FFI traffic (the code even
+      instruments it via FFI_HOPS).
+
+P2.4  Three tiny write_buffers per batch for uniforms (wgpu_device.rs:785-806,
+      888-905). Accumulate CPU-side, flush once per ring at end_*_render.
+
+P2.5  Registry deep-clones every frame: sync_from does guard.clone_from(...)
+      unconditionally ×3 registries (xaml.rs:197-200, font.rs:230-234,
+      image.rs:283-287); gate on registry.is_changed().
+
+P2.6  Dead extract work every frame: ExtractResourcePlugin for
+      NoesisInputQueue (input.rs:443) and all three asset registries
+      (xaml.rs:274, font.rs:304, image.rs:357) clone into a render world
+      that has no reader. Delete (see D3).
+
+P2.7  diff_list re-snapshots every row every frame with no Changed<T> gate,
+      and the actual diff runs in serial Apply, contradicting reconcile.rs's
+      own "no diffing in Apply" claim; NoesisDelta scaffolding is dead code
+      (list.rs:424-537, reconcile.rs:70-114). Early-out on equal key order;
+      longer term move op computation behind Changed<T> or delete the
+      scaffolding and fix the docs. Also: ListedIn scan is O(lists × all
+      rows) — see D5; current_entity is an O(n) pointer scan per list per
+      frame (list.rs:591-597).
+
+P2.8  Pre-build views run the full teardown_scene sweep every frame while
+      waiting for assets (render.rs:1827-1831); skip when no scene exists.
+      prepare_noesis_blit builds pipelines for camera formats that never
+      composite (render.rs:4789-4797); gate on With<NoesisIntermediate>.
+      set_onscreen_target stencil realloc thrash when label bakes interleave
+      with frames (wgpu_device.rs:722-756); cache stencils by size.
+      Subscription syncs re-diff every view every frame (events.rs:197, 358,
+      routed_events.rs:279); gate on is_changed || rebuilt like text/dp.
+
+P2.9  bake.rs label cache pins textures forever (bake.rs:65-66, 103-108) —
+      strong handles per content_key with no eviction; dynamic label text
+      leaks steadily. Weak handles or an evict/clear API, or document.
+
+
+================================================================================
+DESIGN / SIMPLIFICATION (D)
+================================================================================
+
+D1  Generic bridge abstraction — the single highest-leverage refactor.
+    Ten visual/write bridges repeat the identical sync system + plugin
+    (~260 lines), and the gating drift inside those copies IS bugs P0.6 and
+    P1.8. A small trait:
+        trait NoesisBridge: Component {
+            fn apply(&self, state: &mut NoesisRenderState, view: Entity);
+            // optional: type Changed: Message + fn poll(...)
+        }
+    with one generic sync_bridge<B> system and BridgePlugin<B> removes
+    ~200+ lines and — the real payoff — puts the is_changed || rebuilt ||
+    panel_mounted condition in ONE place so it can never drift again.
+    Similarly: 36 builder/mutator method pairs duplicate bodies across the
+    same modules (~350-400 lines); have builders delegate to mutators.
+
+D2  Consolidate per-entity side tables. NoesisRenderState is a god object
+    with ~9 independent HashMap<Entity, …> that three teardown paths must
+    each remember (P1.9 is the leak that already slipped). The !Send Noesis
+    handles genuinely cannot be components — the maps are forced — but the
+    plain-data dedupe maps (last_click_target, last_keydown_swallow,
+    last_event_config) belong inside SceneInstance/PanelEntry where they
+    drop with their owner. Grouping the rest into one PerViewState makes
+    terminal teardown a single remove.
+
+D3  Purge the render-world residue, then fix the docs. Delete the four dead
+    ExtractResourcePlugins and the dead ExtractComponent derive on
+    NoesisView; have apply_noesis_input take ResMut and drain(), deleting
+    clear_queue_before_push and the stale lifecycle diagram. Rewrite the
+    module headers of render.rs (1-33, 482-487), input.rs (1-47), xaml.rs
+    (1-23), markup.rs:17-19, classes.rs:16-19 — all currently claim
+    render-thread/ExtractSchedule execution; everything runs in main-world
+    PostUpdate. Wrong threading docs on an FFI-affinity crate are dangerous.
+
+D4  One resolver for the view-scene vs panel-fragment fork. Eight render.rs
+    methods hand-roll "no scene? try panels[entity].fragment" with near-
+    duplicate arms (~130 duplicated lines each for click/keydown). A single
+    fn resolve_root(&self, entity) -> Option<(RootKind, FrameworkElement, label)>
+    written once makes the missing panel branches (P1.8 and the silent
+    no-ops below) fall out for free and shrinks render.rs substantially.
+    Until then: warn_once when a bridge component sits on an entity with
+    neither scene nor panel — today NoesisVisibility/Brushes/Transform/
+    Typography/EventWatch/etc. on a UiPanel silently no-op while their
+    siblings work (render.rs:2423-2429 vs 2141-2148).
+
+D5  ECS-UI modeling: list = its own entity; ListedIn = relationship.
+    UiList as a component on the view entity caps a scene at ONE list, even
+    though the render-side store is already keyed (view, name)
+    (list.rs:148-158). Make UiList its own entity naming its view (mirroring
+    UiPanel::mount_into); declare ListedIn (list.rs:94-98) and UiPanel.host
+    as #[relationship] components — direct per-list iteration (kills the
+    O(lists × all rows) scan), automatic membership cleanup on despawn, and
+    an unambiguous "which list" for ListedIn. Also surface selection as an
+    entity-targeted event on the row (matching "events = observers") in
+    addition to the buffered Message (list.rs:201-209).
+
+D6  Deduplicate the parallel machinery families:
+    - Five byte-identical Arc<Mutex<Vec<T>>> queue newtypes + drains
+      (viewmodel/commands/events×2/routed_events) → generic SharedQueue<T> +
+      drain_into_messages helper (~200 lines).
+    - Four copies of the attach lifecycle (attached_for_uri / needs_attach /
+      mark_attached) + three copies of the attach loop in render.rs →
+      one AttachState + one generic attach pass; makes P0.10's collision
+      detection a one-place fix.
+    - Three near-verbatim asset registry/provider stacks (xaml/font/image) →
+      generic AssetRegistry<K, V> + shared sync; every lifecycle fix (P1.10,
+      P2.5, poisoning policy) currently must land three times.
+    - ItemsBinding object items duplicate ListBinding wholesale
+      (items.rs:425-720 vs list.rs:321-639): same collection + class + bind
+      tracking + drop dance. Extract a shared BoundCollection; consider
+      deprecating NoesisItems::with_objects in favor of UiList.
+    - text.rs is exactly NoesisDp restricted to ("Text", Str) with a fully
+      parallel render.rs read/write path; keep the nice API, implement as an
+      adapter over the DP machinery.
+    - Three hand-synced shader classification lists (wgpu_device.rs:941-974,
+      979-1020, shader_defines.rs) → one paint_slot(shader) classifier + a
+      test asserting agreement with defines_for_shader.
+
+D7  Plugin architecture. Convert NoesisPlugin to a PluginGroup (keeping a
+    thin core plugin for license/init) — gives disable::<X>() for free,
+    removes the 15-element tuple workaround, and lets apps opt out of e.g.
+    input forwarding or the cursor auto-apply that fights host CursorIcon
+    writes. Move set_license/init() from build() to finish(). Add a prelude
+    module (the crate root currently flat-re-exports ~130 symbols). Fix
+    NoesisInputPlugin's doc ("add alongside NoesisPlugin" → duplicate-plugin
+    panic if followed, input.rs:433-436). Document that within-Apply bridge
+    order is unspecified, and consider a PanelsMounted anchor set instead of
+    ad-hoc .after(sync_panels) (focus.rs remembered it; focus_input forgot).
+
+D8  UI clock: drive View::Update from Time<Real> (available in the main
+    world where the pipeline now runs) instead of a raw Instant
+    (render.rs:539-542, 4088-4089), and consider a per-view clock source so
+    UIs can follow virtual time / pause. Today storyboards run through pause.
+
+D9  Semantics worth one doc sentence each: retained maps are write-through —
+    removing an entry does not reset the element (all write bridges);
+    Core2d composites without the NoesisCamera tag while Core3d requires it
+    (render.rs:4927-4939 vs 4953-4973 — or make them symmetric); Rust-
+    initiated VM writes echo back as NoesisViewModelChanged (viewmodel.rs:
+    247-255 — consider suppress-echo); global observers can receive UiClicked
+    for despawned targets one frame late (use query.get defensively);
+    visibility bridge can't express Hidden (visibility.rs:56-111); one-shot
+    verbs modeled as retained maps (animation/visual_state) restart every
+    entry on any change — message/observer shape fits better; UiPanel::new
+    without mount_into silently never mounts (panel.rs:114-122); panel
+    freeze() doesn't reject duplicate property names across field types
+    (panel.rs:245-260); "minimal Move set" claim is not met when adds and
+    reorders combine (list.rs:485-499).
+
+
+================================================================================
+NOESIS_RUNTIME NOTE
+================================================================================
+
+This crate currently builds against crates.io noesis_runtime 0.11.0. The
+sibling checkout's main is one commit ahead: 4170c50 "Memory-safety,
+correctness, and SDK-gap sweep from full-crate review (#67)" — its own
+Fable-driven audit pass. Recommendation: re-add the [patch.crates-io]
+override to ../noesis_runtime (the Cargo.toml comment at line 40 documents
+the mechanism) while validating this audit's fixes, then cut noesis_runtime
+0.11.1 and bump. Two findings here interact with runtime behavior and should
+be re-checked against that sweep: the panic-containment/wedged-device policy
+(P1.15 — the trampolines' catch_unwind behavior) and the FFI surface used by
+the ECS-UI bridges (#66 added Move/row-identity/SelectionChanged FFI that
+P0.3/P1.4/D5 touch).
+
+
+================================================================================
+SUGGESTED ORDER OF WORK
+================================================================================
+
+1. P0.2, P0.6, P1.8, P1.16(dp-observe) — one-to-three-line fixes, ship now.
+2. P0.3 + P1.4 (list correctness) and P0.4/P0.5 (input feel) — small,
+   user-visible, self-contained.
+3. P0.1 (vertex ring) with P2.1 (single pass per target) as one render-device
+   PR; P2.2 alongside.
+4. P0.9 + P1.5 (component-removal teardown + def fingerprints) — introduce
+   the shared reap helper, apply per bridge.
+5. D1 + D4 (generic bridge + root resolver) — the refactor that retires the
+   whole drift class; fold P0.10's collision warning and D6's queue/attach
+   dedupe in behind it.
+6. D3 (purge extract residue, rewrite threading docs) — low risk, high
+   maintainer value; good standalone PR.
+7. P1.2/P1.3 (theme/resources unification), then P0.7/P0.8 (multi-view
+   determinism + intermediate teardown).
+8. D5 (list-as-entity + relationships) — the one deliberate API break; do it
+   while ECS-UI adoption is young.
+
+Testing gap worth closing alongside 1-5: bridge tests only exercise builders;
+none exercise the reconcile gate (where P0.6/P1.8 lived) — a headless App
+test that flips scene_rebuilt/panel_mounted flags would have caught both.
+
+================================================================================
+END OF REPORT
+================================================================================
+
+================================================================================
+ADDENDUM — TEST-SUITE EFFICIENCY (2026-07-01)
+================================================================================
+
+Observed cost structure (81 tests across 69 files):
+
+  T1. Pure sleep. 48 headless tests use ScheduleRunnerPlugin::run_loop(4ms)
+      and run to a fixed EXIT_AT_FRAME (40-120, mostly 60): >=240ms wall-clock
+      sleep per test even when the asserted condition was met frames earlier.
+      ~12-15s of the suite is sleep().
+  T2. Full engine boot per test. Headless bridge tests boot DefaultPlugins
+      (real wgpu instance/adapter/device via RenderPlugin) + Noesis init,
+      solely so NoesisRenderPlugin::finish (render.rs:5082) can clone the
+      device into NoesisRenderState. They assert messages, not pixels.
+  T3. 69 separate test binaries — one #[test] per file on average — each
+      paying its own bevy+noesis link at build time and process spawn +
+      engine boot at run time. Link time dominates cargo test end-to-end.
+      Boilerplate is copy-pasted (noesis_license_from_env in 44 files).
+
+Recommendations, by leverage:
+
+  R1. Step frames directly. Shared run_until(&mut app, max, pred) calling
+      app.update() in a loop — no ScheduleRunnerPlugin, no sleep, early exit
+      on predicate. Retires the drifting SET_AT_FRAME/EXIT_AT_FRAME padding
+      constants and makes tests event-driven instead of timing-padded.
+  R2. Consolidate into 2-3 binaries (tests/headless/main.rs + mod per file;
+      same for wgpu/) and run under cargo-nextest. One bevy link instead of
+      69; nextest's process-per-test preserves today's Noesis isolation
+      exactly (state is process-global + thread-affine — in-process parallel
+      threads are unsafe, in-process serial bets on init/shutdown cycling)
+      while parallelizing test processes across cores. Land the shared
+      helpers (license env, headless_app(), run_until) in common.rs here.
+  R3. Headless state constructor. Let NoesisRenderState be built from a
+      directly-requested wgpu device/queue (the wgpu_* tests already do the
+      ~15-line request), exposed as a NoesisHeadlessPlugin. Bridge tests then
+      use MinimalPlugins + AssetPlugin — no RenderApp, no render graph, no
+      pipeline compilation. Also provides the cheap harness the reconcile-
+      gate testing gap (see SUGGESTED ORDER OF WORK) needs.
+  R4. Once consolidated: the 12 wgpu_* device tests share one
+      OnceLock<(Device, Queue)> per binary (no Noesis global state touched,
+      so in-process sharing is safe there); split multi-scenario files into
+      per-#[test] fns for free nextest parallelism.
+
+Caveat: do not pursue in-process sharing for anything touching Noesis —
+process-global class/resource registration is exactly what several findings
+above trip over. Process-per-test keeps that isolation; R1-R3 remove the
+redundant cost around it.
