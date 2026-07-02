@@ -15,7 +15,7 @@
 //! Skips (passes) when `$NOESIS_SDK_DIR` is unset: the bake gates on an installed
 //! font, and the font is read from the SDK at runtime, never vendored.
 //!
-//!   `cargo test -p noesis_bevy --test headless_bake_label -- --nocapture`
+//!   `cargo nextest run -p noesis_bevy -E 'test(headless_bake_label)' --no-capture`
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -12,7 +12,7 @@ cargo nextest run -E 'binary(headless_suite)'   # one suite
 Noesis' class and resource registration is **process-global and thread-affine**.
 Two Noesis-initializing tests in the same process is undefined behavior — the
 nondeterministic teardown SIGSEGV documented in
-[`headless_suite/headless_bake_label.rs`](./headless_suite/headless_bake_label.rs).
+[`render_suite/headless_bake_label.rs`](./render_suite/headless_bake_label.rs).
 
 nextest runs every `#[test]` in its **own process**, which is exactly the
 isolation these tests need. It is nextest's only execution model, so there is

@@ -9,7 +9,7 @@
 //!     Noesis bridges + [`NoesisHeadlessPlugin`]. No `RenderPlugin`, no render
 //!     graph, no pipeline compilation: bridge tests that assert messages (not
 //!     pixels) run here, and never risk the teardown SIGSEGV that a
-//!     mid-compile process exit causes (see `tests/headless_bake_label.rs`).
+//!     mid-compile process exit causes (see `tests/render_suite/headless_bake_label.rs`).
 //!   * [`render_app`] — the real `DefaultPlugins` engine, for the few tests that
 //!     need the actual render graph. Drive it with [`run_until`] then [`settle`].
 //!

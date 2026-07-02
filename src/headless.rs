@@ -4,7 +4,7 @@
 //! [`NoesisSet`](crate::NoesisSet) Sync/Ensure/Apply/Drive phases every bridge
 //! feeds) against a directly-requested wgpu device, **without** `bevy_render`'s
 //! `RenderPlugin`/`RenderApp`. It is the cure for the nondeterministic teardown
-//! SIGSEGV documented in `tests/headless_bake_label.rs`: a `DefaultPlugins`
+//! SIGSEGV documented in `tests/render_suite/headless_bake_label.rs`: a `DefaultPlugins`
 //! bridge test boots the real render graph and compiles pipelines it never
 //! draws with, and can exit while a driver-thread pipeline compile is still in
 //! flight. Bridge tests assert messages, not pixels, so they don't need any of
