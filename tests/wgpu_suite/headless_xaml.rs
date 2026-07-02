@@ -31,11 +31,11 @@ impl XamlProvider for InMemoryXamlProvider {
 
 #[test]
 fn noesis_drives_wgpu_render_device_to_solid_red() {
+    crate::common::claim_noesis_process();
     if let (Ok(name), Ok(key)) = (
         std::env::var("NOESIS_LICENSE_NAME"),
         std::env::var("NOESIS_LICENSE_KEY"),
     ) {
-        crate::common::claim_noesis_process();
         noesis_runtime::set_license(&name, &key);
     }
     noesis_runtime::init();
