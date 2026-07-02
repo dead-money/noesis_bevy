@@ -36,10 +36,10 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # The derive crate ships in this repo and releases in lockstep (path for local
 # dev, version for the published crate).
 noesis_bevy_derive = { path = "./derive", version = "0.11" }
-# The public crate from crates.io. This branch needs 0.11 (the ECS-UI FFI). Until
-# 0.11 is published, the `[patch.crates-io]` override below builds against the
-# sibling checkout; remove it once 0.11 is on crates.io (see RELEASING.md).
-noesis_runtime = "0.11"
+# The public crate from crates.io. This branch needs 0.12 (set_source and
+# clear_binding). Until 0.12 is published, a local `[patch.crates-io]` override
+# can build against the sibling checkout (see RELEASING.md).
+noesis_runtime = "0.12"
 # Image decoding for the ImageBrush loader. Add formats here as scenes demand.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Insertion-ordered map: the entity-keyed list reconciler (Primitive 2) keeps its
