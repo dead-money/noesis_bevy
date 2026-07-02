@@ -6,6 +6,45 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- The ten P0 findings from the full-crate audit (#62, landed in #63): per-phase
+  vertex/index geometry streaming in the wgpu render device (multi-tile frames
+  no longer read the last segment's bytes), zero-size views no longer abort on
+  a zero-extent texture, list row types no longer clobber sibling lists, key
+  auto-repeat reaches Noesis controls, focus one-shots no longer replay their
+  history, animations inserted before the scene build apply, multi-view input
+  routes deterministically with the target entity carried on the event, stale
+  intermediates no longer ghost after teardown, bridge component removal reaps
+  render-side state, and DataContext attach collisions warn.
+- The sixteen P1 findings (#62, landed in #64): hot-reload keeps the last good
+  scene until readiness gates re-pass, the default theme applies to
+  late-spawned views, theme chains merge with code-built resources instead of
+  clobbering them, list selection no longer emits phantom events, re-inserted
+  bridge defs rebuild instead of freezing on first sight, plain view-models
+  work on multiple views, idle frames no longer dirty change detection,
+  panel-mount gates cover all panel bridges, panel teardown prunes its dedupe
+  maps, dropped assets leave the registries, per-name items application stops
+  cross-list resets, wheel events dispatch once, pointer-over-UI resets on
+  teardown and cursor-leave, multi-window events filter to the primary window,
+  the render device warns-and-defaults instead of panicking mid-frame, and a
+  dozen smaller confirmed bugs.
+- Cross-leaf `{StaticResource}` references in `application_resources` chains
+  now resolve in dependency order in every configuration, including alongside
+  code-built `NoesisResources` entries (#66, via `noesis_runtime` 0.12's
+  `ResourceDictionary::set_source`).
+- Removing `NoesisBinding` from a live view now unbinds its targets
+  (`noesis_runtime` 0.12's `clear_binding`); `NoesisDiagnostics` gains
+  `live_binding_count` (#66).
+
+### Changed
+
+- Requires `noesis_runtime` 0.12 (#66).
+- The dead render-world extract plumbing is gone and the module docs describe
+  the real threading model: the driving pipeline runs in main-world
+  `PostUpdate` on the one thread the Noesis FFI is pinned to, and the painted
+  intermediate is the only data that crosses to the render sub-app (#65).
+
 ## [0.11.2] - 2026-06-30
 
 ### Fixed
