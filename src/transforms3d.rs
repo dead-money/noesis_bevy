@@ -195,8 +195,10 @@ pub struct NoesisTransform3D {
     pub transforms: HashMap<String, Transform3DSpec>,
     /// Desired [`Matrix3DSpec`] (raw `MatrixTransform3D`) per element `x:Name`.
     /// Both maps drive the single `UIElement::Transform3D` DP, so a name should
-    /// appear in *one* of them. If it appears in both, the later-applied kind
-    /// wins on the element and the other's read-back stays silent.
+    /// appear in *one* of them. If it appears in both, the reconcile applies
+    /// [`transforms`](Self::transforms) first and [`matrices`](Self::matrices)
+    /// second, so the matrix deterministically wins and the composite's read-back
+    /// stays silent.
     pub matrices: HashMap<String, Matrix3DSpec>,
 }
 
