@@ -642,7 +642,12 @@ impl ListBinding {
                 // Best-effort: a false return (bad index / read-only) is non-fatal.
                 let _ = control.set_selected_index(index);
             }
-            self.last_currency = desired_selected;
+            // Record what the control *actually* holds now, not what we asked for:
+            // a rejected drive (bad index / read-only) or a desired row absent from
+            // the collection leaves the control unchanged, and recording
+            // `desired_selected` here would make next frame's poll misread the
+            // mismatch as a phantom UI selection.
+            self.last_currency = self.current_entity();
         }
         SelectionOutcome::Unchanged
     }
@@ -837,10 +842,22 @@ fn diff_list<T: NoesisViewModel + Component>(
         slot.schema = T::noesis_properties();
         slot.row_type = Some(this);
 
-        slot.selected = gathered
+        // Selection is single-row. If the app marked several rows Selected, picking
+        // the first in query order would let the winner flip frame to frame; choose
+        // deterministically (lowest entity) and warn on the misconfiguration.
+        let selected: Vec<Entity> = gathered
             .iter()
-            .find(|(_, _, selected)| *selected)
-            .map(|(e, _, _)| *e);
+            .filter(|(_, _, selected)| *selected)
+            .map(|(e, _, _)| *e)
+            .collect();
+        if selected.len() > 1 {
+            bevy::log::warn_once!(
+                "UiList view {view:?}: {} rows carry Selected; a list has one \
+                 selection — driving the lowest entity",
+                selected.len(),
+            );
+        }
+        slot.selected = selected.into_iter().min();
         slot.rows = gathered
             .into_iter()
             .map(|(entity, fields, _)| DesiredRow { entity, fields })
