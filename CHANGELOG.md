@@ -6,6 +6,22 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-02
+
+### Added
+
+- `NoesisHeadlessPlugin`: the full main-world bridge pipeline against a
+  directly-requested wgpu device, with no render graph. Built as the test/CI
+  harness, useful anywhere UI logic should run without Bevy's renderer.
+
+### Changed
+
+- The integration suite consolidates 82 one-test binaries into three suite
+  binaries run under cargo-nextest (process-per-test; Noesis state is
+  process-global and thread-affine — see `tests/README.md`), stepping frames
+  event-driven via `run_until` instead of timer loops. Deterministic on real
+  GPU runners: no more teardown segfaults/aborts after passing tests.
+
 ### Fixed
 
 - The ten P0 findings from the full-crate audit (#62, landed in #63): per-phase
