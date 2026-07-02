@@ -75,7 +75,7 @@ use noesis_runtime::ffi::{ClassBase, PropType};
 use noesis_runtime::view::FrameworkElement;
 
 use crate::plain_vm::{NoesisViewModel, PlainType, PlainValue};
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 /// Name of the hidden trailing `u64` row property that stores each row's stable
 /// [`Entity`] bits (via [`Entity::to_bits`]). The per-row click handler recovers
@@ -576,6 +576,16 @@ impl ListBinding {
         self.selection_primed = false;
     }
 
+    /// Clear the bound control's `ItemsSource` so it stops rendering our rows,
+    /// releasing its ref to the backing collection before this binding (and its
+    /// row `ClassRegistration`) drop on a component-removal reap. No-op until the
+    /// control is resolved.
+    pub(crate) fn detach(&mut self) {
+        if let Some(control) = self.control.as_mut() {
+            control.clear_items_source();
+        }
+    }
+
     /// Stash a `+1` handle on the bound control so selection is read and driven on
     /// it directly. Called when the `ItemsSource` binds (and on each rebind). Probes
     /// whether the control is a `Selector`: `selected_index()` is `Some` iff it
@@ -927,6 +937,12 @@ impl NoesisListAppExt for App {
     }
 }
 
+impl ReapOnRemove for UiList {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_list_for(entity);
+    }
+}
+
 /// Installs the entity-keyed list reconcile pipeline: orders the parallel
 /// [`NoesisListSet::Diff`] before [`NoesisSet::Apply`] and adds the serial
 /// `sync_lists` push. Added by [`crate::NoesisPlugin`]; register row types with
@@ -940,6 +956,7 @@ impl Plugin for NoesisListPlugin {
         app.add_message::<NoesisListSelection>();
         app.configure_sets(PostUpdate, NoesisListSet::Diff.before(NoesisSet::Apply));
         app.add_systems(PostUpdate, sync_lists.in_set(NoesisSet::Apply));
+        add_bridge_reap::<UiList>(app);
     }
 }
 

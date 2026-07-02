@@ -67,7 +67,7 @@ use noesis_runtime::collection_view::{CollectionView, CollectionViewSource, Curr
 use noesis_runtime::ffi::{ClassBase, PropType};
 use noesis_runtime::view::FrameworkElement;
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Typed item value
@@ -781,6 +781,12 @@ pub(crate) fn sync_items_bridge(
     }
 }
 
+impl ReapOnRemove for NoesisItems {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_items_for(entity);
+    }
+}
+
 /// Wires the per-view `ItemsSource` bridge. Added transitively by [`crate::NoesisPlugin`].
 pub struct NoesisItemsPlugin;
 
@@ -788,6 +794,7 @@ impl Plugin for NoesisItemsPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<NoesisItemsCurrent>()
             .add_systems(PostUpdate, sync_items_bridge.in_set(NoesisSet::Apply));
+        add_bridge_reap::<NoesisItems>(app);
     }
 }
 

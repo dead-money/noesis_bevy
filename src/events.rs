@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use bevy::prelude::*;
 pub use noesis_runtime::view::Key;
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Click bridge
@@ -372,6 +372,18 @@ pub(crate) fn sync_keydown_subscriptions(
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
+impl ReapOnRemove for NoesisClickWatch {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_click_watch_for(entity);
+    }
+}
+
+impl ReapOnRemove for NoesisKeyDownWatch {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_keydown_watch_for(entity);
+    }
+}
+
 /// Wires the per-view click + keydown bridges. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisEventsPlugin;
@@ -387,6 +399,8 @@ impl Plugin for NoesisEventsPlugin {
                 PostUpdate,
                 (sync_click_subscriptions, sync_keydown_subscriptions).in_set(NoesisSet::Apply),
             );
+        add_bridge_reap::<NoesisClickWatch>(app);
+        add_bridge_reap::<NoesisKeyDownWatch>(app);
     }
 }
 

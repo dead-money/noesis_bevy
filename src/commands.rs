@@ -69,7 +69,7 @@ use noesis_runtime::classes::{
 use noesis_runtime::commands::{Command, CommandHandler, CommandParameterValue};
 use noesis_runtime::ffi::{ClassBase, PropType};
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 use crate::viewmodel::AttachTarget;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -460,6 +460,12 @@ pub fn drain_command_queue(
     }
 }
 
+impl ReapOnRemove for NoesisCommands {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_commands_for(entity);
+    }
+}
+
 /// Wires the per-view `ICommand` bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisCommandsPlugin;
@@ -470,5 +476,6 @@ impl Plugin for NoesisCommandsPlugin {
             .add_message::<NoesisCommandInvoked>()
             .add_systems(PreUpdate, drain_command_queue)
             .add_systems(PostUpdate, sync_commands.in_set(NoesisSet::Apply));
+        add_bridge_reap::<NoesisCommands>(app);
     }
 }

@@ -43,7 +43,7 @@ use noesis_runtime::classes::{
 };
 use noesis_runtime::ffi::{ClassBase, PropType};
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public value type
@@ -415,6 +415,12 @@ pub fn drain_vm_changed_queue(
     }
 }
 
+impl ReapOnRemove for NoesisVm {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_view_model_for(entity);
+    }
+}
+
 /// Wires the per-view `ViewModel` / `DataContext` bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisViewModelPlugin;
@@ -425,5 +431,6 @@ impl Plugin for NoesisViewModelPlugin {
             .add_message::<NoesisViewModelChanged>()
             .add_systems(PreUpdate, drain_vm_changed_queue)
             .add_systems(PostUpdate, sync_view_models.in_set(NoesisSet::Apply));
+        add_bridge_reap::<NoesisVm>(app);
     }
 }

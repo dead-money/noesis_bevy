@@ -37,6 +37,8 @@ use std::sync::Arc;
 
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 use bevy_render::{
     Render, RenderApp, RenderSystems,
@@ -4464,6 +4466,177 @@ impl NoesisRenderState {
         // component off the dead entity; a `remove` command on it would panic).
         self.published_intermediates.remove(&entity);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Per-bridge component-removal reaps
+    //
+    // [`Self::teardown_for`] / [`Self::teardown_panel_for`] cover a whole entity
+    // being despawned (or losing its `NoesisView` / `UiPanel`). These cover the
+    // narrower case an audit flagged as leaking everywhere: a *bridge* component
+    // dropped off an entity whose view stays live. Each is invoked from that
+    // bridge's `RemovedComponents<C>` reap system (see [`ReapOnRemove`] /
+    // [`add_bridge_reap`]) and MUST be idempotent with the terminal teardown: on
+    // a full despawn both fire in the same `NoesisSet::Ensure` head, and every
+    // one below is a plain `remove`/`retain`/`clear` that no-ops once the scene
+    // (and its side-table entries) are already gone.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Detach `target`'s live `DataContext` in view `entity`'s scene (set it to
+    /// null), releasing the View's ref to whatever host instance we attached
+    /// there. Shared by the VM / commands / plain-VM removal reaps: unlike a
+    /// despawn (where [`Self::teardown_scene`] drops the whole `View` first, so
+    /// its refs release on their own), a component-removal reap runs while the
+    /// scene is still live — so the host `ClassInstance` must be released off the
+    /// View *before* its owning entry (and thus that entry's `ClassRegistration`)
+    /// drops, or the class unregisters under a live instance (use-after-free, the
+    /// exact hazard [`Self::teardown_for`]'s drop order avoids). No-op when the
+    /// scene or the target element is gone.
+    fn clear_host_data_context(&self, entity: Entity, target: &AttachTarget) {
+        let Some(scene) = self.scenes.get(&entity) else {
+            return;
+        };
+        let Some(content) = scene.view.content() else {
+            return;
+        };
+        let element = match target {
+            AttachTarget::Root => Some(content),
+            AttachTarget::Named(name) => resolve_named(&content, name),
+        };
+        if let Some(mut element) = element {
+            element.clear_data_context();
+        }
+    }
+
+    /// Reap view `entity`'s [`NoesisVm`](crate::viewmodel::NoesisVm): detach its
+    /// `DataContext` off the live scene, then drop the owning entry.
+    pub(crate) fn reap_view_model_for(&mut self, entity: Entity) {
+        if let Some(entry) = self.view_models.get(&entity)
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| !entry.needs_attach(&s.built_for_uri))
+        {
+            self.clear_host_data_context(entity, entry.target());
+        }
+        self.view_models.remove(&entity);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`NoesisCommands`](crate::commands::NoesisCommands):
+    /// detach its `DataContext` off the live scene, then drop the command host.
+    pub(crate) fn reap_commands_for(&mut self, entity: Entity) {
+        if let Some(entry) = self.command_hosts.get(&entity)
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| !entry.needs_attach(&s.built_for_uri))
+        {
+            self.clear_host_data_context(entity, entry.target());
+        }
+        self.command_hosts.remove(&entity);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Reap view `entity`'s plain-struct view model of type `type_id`: detach its
+    /// `DataContext` off the live scene, then drop the entry (whose sink was
+    /// otherwise left accumulating UI writebacks nobody drains).
+    pub(crate) fn reap_plain_vm_for(&mut self, entity: Entity, type_id: std::any::TypeId) {
+        let key = (entity, type_id);
+        if let Some(entry) = self.plain_vms.get(&key)
+            && self
+                .scenes
+                .get(&entity)
+                .is_some_and(|s| !entry.needs_attach(&s.built_for_uri))
+        {
+            self.clear_host_data_context(entity, entry.target());
+        }
+        self.plain_vms.remove(&key);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
+    }
+
+    /// Reap view/panel `entity`'s [`NoesisClickWatch`](crate::events::NoesisClickWatch):
+    /// drop its live click subscriptions (each drop fires the C++ unsubscribe, so
+    /// they stop pushing onto the shared queue) and forget its target snapshots.
+    pub(crate) fn reap_click_watch_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.click_subs.clear();
+        }
+        if let Some(panel) = self.panels.get_mut(&entity) {
+            panel.click_subs.clear();
+        }
+        self.last_click_target.retain(|(ent, _), _| *ent != entity);
+    }
+
+    /// Reap view/panel `entity`'s [`NoesisKeyDownWatch`](crate::events::NoesisKeyDownWatch):
+    /// drop its live keydown subscriptions and forget its swallow snapshots.
+    pub(crate) fn reap_keydown_watch_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.keydown_subs.clear();
+        }
+        if let Some(panel) = self.panels.get_mut(&entity) {
+            panel.keydown_subs.clear();
+        }
+        self.last_keydown_swallow
+            .retain(|(ent, _), _| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`NoesisEventWatch`](crate::routed_events::NoesisEventWatch):
+    /// drop its live routed-event subscriptions and forget its config snapshots.
+    pub(crate) fn reap_event_watch_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.event_subs.clear();
+        }
+        self.last_event_config
+            .retain(|(ent, _, _), _| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`NoesisItems`](crate::items::NoesisItems): detach
+    /// each bound `ItemsSource` off its live control before dropping the backing
+    /// collections. Detaching first releases the control's ref to a collection,
+    /// so an object-source binding's rows drop before their `ClassRegistration`
+    /// (same use-after-free rule as [`Self::clear_host_data_context`]).
+    pub(crate) fn reap_items_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get(&entity)
+            && let Some(content) = scene.view.content()
+        {
+            let uri = &scene.built_for_uri;
+            for ((ent, name), binding) in &self.items_sources {
+                if *ent != entity || binding.needs_bind(uri) {
+                    continue;
+                }
+                if let Some(mut element) = resolve_named(&content, name) {
+                    element.clear_items_source();
+                }
+            }
+        }
+        self.items_sources.retain(|(ent, _), _| *ent != entity);
+    }
+
+    /// Reap view `entity`'s [`UiList`](crate::list::UiList) bindings: detach each
+    /// list's `ItemsSource` off its cached control (same use-after-free rule as
+    /// [`Self::reap_items_for`]), drop the bindings, and drop the per-row click
+    /// subscriptions parked in the still-live scene.
+    pub(crate) fn reap_list_for(&mut self, entity: Entity) {
+        for ((ent, _), binding) in &mut self.lists {
+            if *ent == entity {
+                binding.detach();
+            }
+        }
+        self.lists.retain(|(ent, _), _| *ent != entity);
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.row_click_subs.clear();
+        }
+    }
+
+    /// Reap view `entity`'s [`NoesisImaging`](crate::imaging::NoesisImaging)
+    /// read-back snapshots. The staged registry buffers are reclaimed separately
+    /// (they live in the `ImageRegistry` resource, not here); see
+    /// `crate::imaging::reap_removed_imaging`.
+    pub(crate) fn reap_imaging_snapshots_for(&mut self, entity: Entity) {
+        if let Some(scene) = self.scenes.get_mut(&entity) {
+            scene.image_snapshots.clear();
+        }
+    }
 }
 
 impl Drop for NoesisRenderState {
@@ -4787,13 +4960,62 @@ fn ensure_noesis_scene(
     }
 }
 
+/// A bridge component whose per-entity render-side state must be reaped when the
+/// component is removed from a live entity — the case entity-despawn teardown
+/// ([`NoesisRenderState::teardown_for`]) never sees, because a reconcile system
+/// only visits entities that still *have* the component. Implementors name the
+/// [`NoesisRenderState`] method that drops exactly what this bridge owns for the
+/// entity; that method MUST be idempotent with the terminal teardown (see the
+/// per-bridge reaps' shared note). Wire one up with [`add_bridge_reap`].
+pub(crate) trait ReapOnRemove: Component {
+    /// Drop every per-entity render resource this bridge owns for `entity`.
+    fn reap(state: &mut NoesisRenderState, entity: Entity);
+}
+
+/// Generic reap system for any [`ReapOnRemove`] bridge `C`: on the main thread
+/// (the `NonSendMut` pins it there, where Noesis lives), for each entity whose
+/// `C` was removed since last frame. One instance per bridge, scheduled by
+/// [`add_bridge_reap`].
+#[allow(clippy::needless_pass_by_value)]
+fn reap_removed_bridge<C: ReapOnRemove>(
+    mut removed: RemovedComponents<C>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        C::reap(&mut state, entity);
+    }
+}
+
+/// Schedule a component-removal reap `system` at the head of
+/// [`NoesisSet::Ensure`] — before [`ensure_noesis_scene`] (re)builds the
+/// survivors and before the Apply-phase bridges run — so removal teardown is
+/// symmetric with the entity-despawn teardown that already runs there
+/// ([`teardown_removed_views`] / [`teardown_removed_panels`]). The single home
+/// for the reap-ordering contract: [`add_bridge_reap`] routes the trait-driven
+/// bridges through it, and the generic plain-VM reap wires through it directly.
+pub(crate) fn add_reap_system<M>(app: &mut App, system: impl IntoScheduleConfigs<ScheduleSystem, M>) {
+    app.add_systems(
+        PostUpdate,
+        system.in_set(NoesisSet::Ensure).before(ensure_noesis_scene),
+    );
+}
+
+/// Wire the [`ReapOnRemove`] reap for bridge component `C`. Mechanical per
+/// bridge: implement [`ReapOnRemove`] for `C`, then call this from its plugin.
+pub(crate) fn add_bridge_reap<C: ReapOnRemove>(app: &mut App) {
+    add_reap_system(app, reap_removed_bridge::<C>);
+}
+
 /// Reap the Noesis state of any view whose [`NoesisView`] was removed since last
 /// frame, whether the whole entity was despawned or just the component dropped.
-/// This is the crate's only teardown-on-removal hook: without it a despawned view
-/// leaks its (`!Send`) scene + side-table entries for the life of the process.
-/// Runs on the main thread (the `NonSendMut` forces it there, where Noesis lives)
-/// at the head of [`NoesisSet::Ensure`], before [`ensure_noesis_scene`] rebuilds
-/// the survivors.
+/// Without it a despawned view leaks its (`!Send`) scene + side-table entries for
+/// the life of the process. Runs on the main thread (the `NonSendMut` forces it
+/// there, where Noesis lives) at the head of [`NoesisSet::Ensure`], before
+/// [`ensure_noesis_scene`] rebuilds the survivors. Per-bridge component removals
+/// are reaped alongside it by the [`ReapOnRemove`] systems.
 #[allow(clippy::needless_pass_by_value)]
 fn teardown_removed_views(
     mut removed: RemovedComponents<NoesisView>,
