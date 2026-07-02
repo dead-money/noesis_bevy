@@ -14,12 +14,12 @@
 //!   offscreen + onscreen render) into each view's intermediate. Every Noesis
 //!   call happens here: the `View`/`Renderer`/device handles are `!Send` and
 //!   pinned to the main thread (see `NoesisRenderState`).
-//! - Blit nodes in the render sub-app ([`RenderApp`]). The painted intermediate
+//! - Blit systems in the render sub-app ([`RenderApp`]). The painted intermediate
 //!   is the only Noesis data that crosses worlds: it rides each camera entity
-//!   via [`ExtractComponent`], and the graph node blits it into the camera's
-//!   [`ViewTarget`]. `NoesisNode` sits in `Core2d` between
-//!   `Node2d::MainTransparentPass` and `Node2d::EndMainPass`;
-//!   `NoesisOverlayNode` sits in `Core3d` on cameras tagged [`NoesisCamera`].
+//!   via [`ExtractComponent`], and the blit system composites it into the camera's
+//!   [`ViewTarget`]. `noesis_blit_2d` runs in [`Core2d`] between
+//!   [`Core2dSystems::MainPass`] and [`Core2dSystems::PostProcess`];
+//!   `noesis_blit_3d` runs in [`Core3d`] on cameras tagged [`NoesisCamera`].
 //!
 //! The intermediate is `Rgba8Unorm` because [`WgpuRenderDevice`]'s pipeline
 //! cache compiles every shader variant against that one color format.
@@ -40,18 +40,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-// PR-1(bevy-0.19): render-graph-as-systems rewrite. The Core2d/Core3d graph
-// labels (Node2d/Node3d) and the whole `render_graph` module (ViewNode,
-// ViewNodeRunner, RenderGraphExt, RenderLabel, NodeRunError, RenderContext) are
-// removed in 0.19; the blit nodes become plain systems in the Core2d/Core3d
-// schedules. Their imports are dropped here until that rewrite lands.
+use bevy::core_pipeline::upscaling::upscaling;
+use bevy::core_pipeline::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 use bevy_render::{
     Render, RenderApp, RenderSystems,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
     view::ViewTarget,
 };
 use noesis_runtime::animation::{Animation, DoubleAnimation, Timeline};
@@ -134,17 +131,13 @@ fn flags_from(config: &NoesisView) -> u32 {
 
 /// `Rgba8UnormSrgb` alias of the intermediate, used for sampling during the
 /// blit when `ViewTarget` is itself sRGB-encoded. See `create_intermediate`
-/// and `NoesisNode::run` for the gamma-roundtrip rationale.
+/// and [`blit_noesis_ui`] for the gamma-roundtrip rationale.
 const INTERMEDIATE_SAMPLE_FORMAT_SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Whether a `ViewTarget` colour format stores *linear* values that are
 /// gamma-encoded downstream (i.e. an HDR camera's float target). These need the
-/// same sRGB→linear decode on blit as a true sRGB target (see `NoesisNode::run`).
+/// same sRGB→linear decode on blit as a true sRGB target (see [`blit_noesis_ui`]).
 /// A plain `Rgba8Unorm` target is excluded: it is written and displayed raw.
-// PR-1(bevy-0.19): only consumer in non-test builds is the commented-out
-// `blit_noesis_ui` body; the unit tests still exercise it. Drop this allow when
-// the blit systems land.
-#[allow(dead_code)]
 fn is_linear_float(format: wgpu::TextureFormat) -> bool {
     matches!(
         format,
@@ -4386,8 +4379,8 @@ impl NoesisRenderState {
     }
 
     /// Drive one Noesis frame into the intermediate. Call during the
-    /// `Render` schedule (before `NoesisNode::run`) so the intermediate
-    /// is populated when the node blits.
+    /// `Render` schedule (before [`blit_noesis_ui`]) so the intermediate
+    /// is populated when the blit systems run.
     fn drive_frame(&mut self) {
         let time_secs = self.clock_origin.elapsed().as_secs_f64();
         // Split the borrow so each scene can use the shared registered device
@@ -5098,8 +5091,6 @@ pub(crate) struct BlitPipelineCache {
 }
 
 impl BlitPipelineCache {
-    // PR-1(bevy-0.19): sole caller is the commented-out `blit_noesis_ui` body.
-    #[allow(dead_code)]
     fn get(&self, format: wgpu::TextureFormat) -> Option<&BlitPipeline> {
         self.over.get(&format)
     }
@@ -5375,34 +5366,23 @@ fn prepare_noesis_blit(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NoesisNode: blits the intermediate into ViewTarget
+// Blit systems: composite the intermediate into ViewTarget
 // ─────────────────────────────────────────────────────────────────────────────
-
-// PR-1(bevy-0.19): render-graph-as-systems rewrite. `ViewNode`/`ViewNodeRunner`,
-// `RenderLabel` and the render-graph node model are removed in 0.19. The blit
-// labels, the shared `blit_noesis_ui` body and the `NoesisNode`/`NoesisOverlayNode`
-// nodes must be re-expressed as plain systems in the Core2d/Core3d schedules.
-// They are block-commented until that rewrite lands so PR-0 stays shippable-green;
-// the `blit_noesis_ui` body is kept verbatim to reuse. `NoesisCamera`,
-// `NoesisIntermediate` and `NoesisSet` are NOT render-graph-specific and stay live.
-/*
-/// Render-graph label for the Core2d compositing node ([`NoesisNode`]). Used to
-/// position the node between [`Node2d::MainTransparentPass`] and
-/// [`Node2d::EndMainPass`] in [`Core2d`].
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct NoesisNodeLabel;
-*/
 
 /// Marks the camera Noesis composites its UI onto. Add this to the camera
 /// (`Camera2d` or `Camera3d`) whose final image the UI should overlay.
 ///
-/// The blit runs *inside that camera's* render graph (Core2d or Core3d), after
+/// The blit runs *inside that camera's* render schedule (Core2d or Core3d), after
 /// its post-processing, so it composes cleanly with whatever the camera does
 /// (HDR, image-based lighting, bloom, DOF, …). It does **not** rely on
 /// a second window-targeting camera sharing the 3D camera's `ViewTarget`, which
 /// breaks the moment the host adds standard 3D features. Tag exactly the
 /// camera(s) you want the UI on; untagged cameras (e.g. offscreen effect passes)
 /// are skipped.
+///
+/// On the Core3d path this tag is *required* for compositing (`noesis_blit_3d`
+/// gates on it); on the Core2d path (`noesis_blit_2d`) the blit runs on any view
+/// that has published a [`NoesisIntermediate`], `NoesisCamera` or not.
 #[derive(Component, ExtractComponent, Clone, Copy, Default, Debug)]
 pub struct NoesisCamera;
 
@@ -5414,15 +5394,10 @@ pub struct NoesisCamera;
 /// cross-world hand-off is a cheap clone.
 #[derive(Component, ExtractComponent, Clone)]
 pub struct NoesisIntermediate {
-    // PR-1(bevy-0.19): both fields are written by `create_intermediate` and
-    // extracted to the render world, but only read by the commented-out
-    // `blit_noesis_ui` body. Drop these allows when the blit systems land.
     /// `Rgba8Unorm` raw view, sampled when the target is plain `Rgba8Unorm`.
-    #[allow(dead_code)]
     view: wgpu::TextureView,
     /// `Rgba8UnormSrgb` alias, sampled when the target is sRGB/HDR so the
     /// stored bytes round-trip through an sRGB→linear→sRGB decode/encode.
-    #[allow(dead_code)]
     sample_view: wgpu::TextureView,
 }
 
@@ -5441,28 +5416,23 @@ pub enum NoesisSet {
     Drive,
 }
 
-// PR-1(bevy-0.19): render-graph-as-systems rewrite (continued). Blit body + nodes.
-/*
-/// Shared blit body for both nodes. Premultiplied-alpha composites the UI over
-/// whatever the camera left in its `ViewTarget` (`LoadOp::Load`): the Core2d
-/// node runs on every 2D view, the Core3d node only on views tagged
-/// [`NoesisCamera`]. Both use the same [`PREMULTIPLIED_OVER`] blend so PPAA's
-/// fractional-alpha edges composite correctly instead of overwriting the clear
-/// colour (see [`PREMULTIPLIED_OVER`]).
+/// Shared blit body for both compositing systems. Premultiplied-alpha composites
+/// the UI over whatever the camera left in its `ViewTarget` (`LoadOp::Load`): the
+/// Core2d system runs on every 2D view that published an intermediate, the Core3d
+/// system only on views tagged [`NoesisCamera`]. Both use the same
+/// [`PREMULTIPLIED_OVER`] blend so PPAA's fractional-alpha edges composite
+/// correctly instead of overwriting the clear colour (see [`PREMULTIPLIED_OVER`]).
 fn blit_noesis_ui(
-    render_context: &mut RenderContext<'_>,
+    ctx: &mut RenderContext,
     intermediate: &NoesisIntermediate,
     view_target: &ViewTarget,
-    world: &World,
-) -> Result<(), NodeRunError> {
-    let Some(cache) = world.get_resource::<BlitPipelineCache>() else {
-        return Ok(());
-    };
+    cache: &BlitPipelineCache,
+) {
     let target_format = view_target.main_texture_format();
     let Some(blit) = cache.get(target_format) else {
         // prepare_noesis_blit should have created it; if it hasn't by
         // now we'd draw garbage so skip cleanly.
-        return Ok(());
+        return;
     };
 
     // Choose how to sample Noesis's sRGB-encoded intermediate bytes so the
@@ -5484,11 +5454,11 @@ fn blit_noesis_ui(
     } else {
         &intermediate.view
     };
-    let bg = blit.bind_group(render_context.render_device().wgpu_device(), sample_view);
+    let bg = blit.bind_group(ctx.render_device().wgpu_device(), sample_view);
 
-    let encoder = render_context.command_encoder();
+    let encoder = ctx.command_encoder();
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("NoesisNode blit"),
+        label: Some("noesis blit"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: view_target.main_texture_view(),
             resolve_target: None,
@@ -5507,67 +5477,39 @@ fn blit_noesis_ui(
     pass.set_bind_group(0, &bg, &[]);
     pass.draw(0..3, 0..1);
     drop(pass);
-
-    Ok(())
 }
 
-/// Core2d compositing node: runs on **every** Core2d view. Premultiplied-alpha
-/// composites the UI over the view's `ViewTarget`; when that target was cleared
-/// transparent (a UI camera layered over a lower camera) the result is identical
-/// to a 1:1 overwrite, and Bevy's multi-camera step folds it over the
-/// lower camera.
-#[derive(Default)]
-pub struct NoesisNode;
-
-impl ViewNode for NoesisNode {
-    type ViewQuery = (&'static ViewTarget, &'static NoesisIntermediate);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (view_target, intermediate): (&'w ViewTarget, &'w NoesisIntermediate),
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, intermediate, view_target, world)
-    }
+/// Core2d compositing system: runs on **every** Core2d view that has published a
+/// [`NoesisIntermediate`] (the [`ViewQuery`] gates on it, skipping views without
+/// one). Premultiplied-alpha composites the UI over the view's `ViewTarget`; when
+/// that target was cleared transparent (a UI camera layered over a lower camera)
+/// the result is identical to a 1:1 overwrite, and Bevy's multi-camera step folds
+/// it over the lower camera. Scheduled in [`Core2d`] between
+/// [`Core2dSystems::MainPass`] and [`Core2dSystems::PostProcess`], reproducing the
+/// old `MainTransparentPass` → blit → `EndMainPass` position.
+fn noesis_blit_2d(
+    view: ViewQuery<(&ViewTarget, &NoesisIntermediate)>,
+    cache: Res<BlitPipelineCache>,
+    mut ctx: RenderContext,
+) {
+    let (view_target, intermediate) = view.into_inner();
+    blit_noesis_ui(&mut ctx, intermediate, view_target, &cache);
 }
 
-/// Render-graph label for the Core3d overlay node ([`NoesisOverlayNode`]). Used
-/// to position the node late in [`Core3d`] so the UI composites over the
-/// camera's finished scene.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct NoesisOverlayNodeLabel;
-
-/// Core3d overlay node: runs only on views tagged [`NoesisCamera`], compositing
-/// the UI premultiplied-alpha over the camera's finished scene. This is the
-/// single-camera path that keeps working when the host adds IBL/bloom/DOF.
-#[derive(Default)]
-pub struct NoesisOverlayNode;
-
-impl ViewNode for NoesisOverlayNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static NoesisCamera,
-        &'static NoesisIntermediate,
-    );
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (view_target, _marker, intermediate): (
-            &'w ViewTarget,
-            &'w NoesisCamera,
-            &'w NoesisIntermediate,
-        ),
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        blit_noesis_ui(render_context, intermediate, view_target, world)
-    }
+/// Core3d overlay system: runs only on views tagged [`NoesisCamera`] that have
+/// published a [`NoesisIntermediate`], compositing the UI premultiplied-alpha over
+/// the camera's finished scene. This is the single-camera path that keeps working
+/// when the host adds IBL/bloom/DOF. Scheduled in [`Core3d`] after
+/// [`Core3dSystems::PostProcess`] and before [`upscaling`], reproducing the old
+/// `EndMainPassPostProcessing` → overlay → `Upscaling` position.
+fn noesis_blit_3d(
+    view: ViewQuery<(&ViewTarget, &NoesisIntermediate), With<NoesisCamera>>,
+    cache: Res<BlitPipelineCache>,
+    mut ctx: RenderContext,
+) {
+    let (view_target, intermediate) = view.into_inner();
+    blit_noesis_ui(&mut ctx, intermediate, view_target, &cache);
 }
-*/
-// PR-1(bevy-0.19): end render-graph-as-systems stub region.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin
@@ -5575,9 +5517,9 @@ impl ViewNode for NoesisOverlayNode {
 
 /// Sub-plugin that wires Noesis into [`RenderApp`]: it registers the wgpu-backed
 /// `RenderDevice`, installs the XAML/font/image providers, runs the main-world
-/// driving pipeline ([`NoesisSet`]), and adds the blit nodes to `Core2d` and
-/// `Core3d`. Added for you by the top-level `NoesisPlugin`; you don't add this
-/// one directly.
+/// driving pipeline ([`NoesisSet`]), and adds the blit systems to the `Core2d` and
+/// `Core3d` schedules. Added for you by the top-level `NoesisPlugin`; you don't add
+/// this one directly.
 pub struct NoesisRenderPlugin;
 
 /// Register the main-world half of the Noesis driving pipeline: the [`NoesisSet`]
@@ -5651,45 +5593,32 @@ impl Plugin for NoesisRenderPlugin {
 
         render_app
             .init_resource::<BlitPipelineCache>()
-            .add_systems(Render, prepare_noesis_blit.in_set(RenderSystems::Prepare));
-
-        // PR-1(bevy-0.19): render-graph-as-systems rewrite. The Core2d/Core3d
-        // blit wiring below used `add_render_graph_node`/`add_render_graph_edges`
-        // with `ViewNodeRunner`, all removed in 0.19. The rewrite re-adds the
-        // composite as plain systems: Core2d after `Core2dSystems::MainPass` /
-        // Node2d::EndMainPass, Core3d after post-processing and before upscaling.
-        // Until then the compositing blit does not run (render_suite compositing
-        // tests are #[ignore]d with this same marker).
-        /*
-        render_app
-            // Core2d: premultiplied composite on any 2D view that has published
-            // an intermediate (the `ViewQuery` gates on `NoesisIntermediate`).
-            .add_render_graph_node::<ViewNodeRunner<NoesisNode>>(Core2d, NoesisNodeLabel)
-            .add_render_graph_edges(
+            .add_systems(Render, prepare_noesis_blit.in_set(RenderSystems::Prepare))
+            // Core2d: premultiplied composite on any 2D view that has published an
+            // intermediate (the `ViewQuery` gates on `NoesisIntermediate`), between
+            // the main pass and post-processing — the old MainTransparentPass →
+            // blit → EndMainPass position, so the UI composites over transparents
+            // but before tonemapping.
+            .add_systems(
                 Core2d,
-                (
-                    Node2d::MainTransparentPass,
-                    NoesisNodeLabel,
-                    Node2d::EndMainPass,
-                ),
+                noesis_blit_2d
+                    .after(Core2dSystems::MainPass)
+                    .before(Core2dSystems::PostProcess),
             )
             // Core3d: opt-in overlay on views tagged `NoesisCamera`, composited
             // after all 3D post-processing (tonemapping, bloom, the host's own
-            // passes) and before upscaling, so it survives IBL/bloom/DOF and
-            // needs no second window-targeting camera.
-            .add_render_graph_node::<ViewNodeRunner<NoesisOverlayNode>>(
+            // passes) and before upscaling, so it survives IBL/bloom/DOF and needs
+            // no second window-targeting camera. Both this and the built-in
+            // `upscaling` system are ordered `.after(Core3dSystems::PostProcess)`,
+            // so the explicit `.before(upscaling)` is required to disambiguate
+            // them (reproducing the old EndMainPassPostProcessing → overlay →
+            // Upscaling edge).
+            .add_systems(
                 Core3d,
-                NoesisOverlayNodeLabel,
-            )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::EndMainPassPostProcessing,
-                    NoesisOverlayNodeLabel,
-                    Node3d::Upscaling,
-                ),
+                noesis_blit_3d
+                    .after(Core3dSystems::PostProcess)
+                    .before(upscaling),
             );
-        */
     }
 
     /// Create `NoesisRenderState` as a **main-world non-send resource**. Runs
