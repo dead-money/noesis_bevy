@@ -122,6 +122,8 @@ pub trait NoesisViewModel: Send + Sync + 'static {
 pub(crate) struct PlainVmEntry {
     instance: PlainInstance,
     _class: PlainVmClass,
+    /// Registered Noesis type name, kept for `DataContext`-collision diagnostics.
+    type_name: String,
     /// Property names in index order, for `set_and_notify`.
     prop_names: Vec<String>,
     target: AttachTarget,
@@ -166,6 +168,7 @@ impl PlainVmEntry {
         Some(Self {
             instance,
             _class: class,
+            type_name: type_name.to_owned(),
             prop_names,
             target,
             attached_for_uri: None,
@@ -202,6 +205,11 @@ impl PlainVmEntry {
     /// Borrow the attach target for the render-side bind pass.
     pub(crate) fn target(&self) -> &AttachTarget {
         &self.target
+    }
+
+    /// The registered Noesis type name, for `DataContext`-collision diagnostics.
+    pub(crate) fn type_name(&self) -> &str {
+        &self.type_name
     }
 
     pub(crate) fn needs_attach(&self, uri: &str) -> bool {

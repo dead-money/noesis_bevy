@@ -594,6 +594,13 @@ pub(crate) struct NoesisRenderState {
     /// before the registered device. Keyed by view entity. See
     /// [`crate::commands`].
     command_hosts: HashMap<Entity, CommandEntry>,
+    /// `(view, target)` pairs already warned about a `DataContext` collision, so
+    /// each clash is reported once rather than every frame. A `NoesisVm`,
+    /// `NoesisCommands`, and/or plain view models all defaulting to
+    /// [`AttachTarget::Root`] on the same view silently clobber each other's
+    /// `DataContext` (last attach wins); this dedupes the diagnostic. Cleared
+    /// per-entity on teardown so a respawn re-warns. See [`Self::warn_datacontext_collisions`].
+    warned_dc_collisions: HashSet<(Entity, AttachTarget)>,
     /// Rust-owned converted/multi bindings keyed by `(view entity, x:Name,
     /// property)`. Each owns the built `Binding`/`MultiBinding` + its
     /// `Converter`/`MultiConverter`, attached to a named element's DP. Same
@@ -1030,6 +1037,7 @@ impl NoesisRenderState {
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
+            warned_dc_collisions: HashSet::new(),
             binding_entries: HashMap::new(),
             panels: HashMap::new(),
             failed_fragments: HashSet::new(),
@@ -1061,6 +1069,7 @@ impl NoesisRenderState {
         match VmEntry::build(entity, def, changed) {
             Some(entry) => {
                 self.view_models.insert(entity, entry);
+                self.warn_datacontext_collisions(entity);
             }
             None => warn!(
                 "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
@@ -1136,6 +1145,7 @@ impl NoesisRenderState {
         match CommandEntry::build(entity, def, queue) {
             Some(entry) => {
                 self.command_hosts.insert(entity, entry);
+                self.warn_datacontext_collisions(entity);
             }
             None => warn!(
                 "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
@@ -1189,6 +1199,51 @@ impl NoesisRenderState {
             } else {
                 warn!("NoesisCommands: set_data_context returned false for view {entity:?}");
             }
+        }
+    }
+
+    /// Warn (once per clash) when more than one Rust-owned host on view `entity`
+    /// would attach its instance as the `DataContext` of the same target element.
+    /// A `NoesisVm`, a `NoesisCommands`, and plain view models each call
+    /// `set_data_context` on their target, and the last attach wins — so two of
+    /// them defaulting to [`AttachTarget::Root`] leaves the loser silently inert.
+    /// This surfaces the misconfiguration; merging colliding hosts into one is
+    /// future work. Called after each host is registered on first sight.
+    fn warn_datacontext_collisions(&mut self, entity: Entity) {
+        let mut by_target: HashMap<&AttachTarget, Vec<String>> = HashMap::new();
+        if let Some(entry) = self.view_models.get(&entity) {
+            by_target.entry(entry.target()).or_default().push("NoesisVm".to_owned());
+        }
+        if let Some(entry) = self.command_hosts.get(&entity) {
+            by_target
+                .entry(entry.target())
+                .or_default()
+                .push("NoesisCommands".to_owned());
+        }
+        for ((ent, _), entry) in &self.plain_vms {
+            if *ent == entity {
+                by_target
+                    .entry(entry.target())
+                    .or_default()
+                    .push(format!("plain view model {:?}", entry.type_name()));
+            }
+        }
+
+        for (target, mut sources) in by_target {
+            if sources.len() < 2 {
+                continue;
+            }
+            if !self.warned_dc_collisions.insert((entity, target.clone())) {
+                continue;
+            }
+            sources.sort();
+            warn!(
+                "DataContext collision on view {entity:?} {}: {} all attach as the same \
+                 element's DataContext, so only the last one applied wins and the rest are \
+                 silently inert — give them distinct attach targets (attach_to(x_name))",
+                target.describe(),
+                sources.join(", "),
+            );
         }
     }
 
@@ -1499,6 +1554,7 @@ impl NoesisRenderState {
                 return Vec::new();
             };
             slot.insert(entry);
+            self.warn_datacontext_collisions(entity);
         }
 
         if let (Some(entry), Some(snapshot)) = (self.plain_vms.get(&key), snapshot) {
@@ -4395,6 +4451,7 @@ impl NoesisRenderState {
         self.lists.retain(|(ent, _), _| *ent != entity);
         self.plain_vms.retain(|(ent, _), _| *ent != entity);
         self.command_hosts.remove(&entity);
+        self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
         self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
         self.last_keydown_swallow
             .retain(|(ent, _), _| *ent != entity);

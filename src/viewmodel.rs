@@ -96,12 +96,22 @@ impl VmValue {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where the bridge attaches a view model's instance as `DataContext`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum AttachTarget {
     /// The view's root element (`View::content`).
     Root,
     /// The element resolved by `x:Name` via `FrameworkElement::find_name`.
     Named(String),
+}
+
+impl AttachTarget {
+    /// Human-readable target for diagnostics: `"root"` or `x:Name "Foo"`.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Root => "root".to_owned(),
+            Self::Named(name) => format!("x:Name {name:?}"),
+        }
+    }
 }
 
 /// A declarative recipe for a view model: a Noesis class name, the ordered set
