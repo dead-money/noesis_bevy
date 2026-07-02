@@ -143,10 +143,12 @@ impl FocusPredict {
 /// [`NoesisView`](crate::NoesisView) entity. Additive to
 /// [`NoesisFocus`](crate::focus::NoesisFocus); both may live on one entity.
 ///
-/// `moves` and `engages` are **one-shot actions** applied once whenever the
-/// component changes (Bevy change detection). As with [`crate::NoesisFocus`], fill them
-/// in *after* the scene exists or the apply is lost. `bindings` is **reconciled
-/// every frame** (installs once the scene appears, persists thereafter).
+/// `moves` and `engages` are **one-shot actions**: applied once when the
+/// component changes (Bevy change detection), then drained, so they neither
+/// accumulate nor replay on a later change or a scene rebuild. As with
+/// [`crate::NoesisFocus`], fill them in *after* the scene exists or the apply is
+/// lost. `bindings` is **reconciled every frame** (installs once the scene
+/// appears, persists thereafter): retained config that survives a rebuild.
 /// `predicts` is **polled every frame** and surfaces changes as messages.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisFocusControl {
@@ -380,20 +382,29 @@ impl SharedFocusBindingQueue {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply the one-shot actions ([`FocusMove`] / [`FocusEngage`]) when the
-/// component changed. Write-only: fires once per change, like [`NoesisFocus`].
+/// component changed, then drain them. Write-only: each queued action fires
+/// exactly once. Unlike the retained bridges these are *not* reapplied on a
+/// scene rebuild — they are transient requests, not config to replay.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_focus_control(
-    views: Query<(Entity, Ref<NoesisFocusControl>)>,
+    mut views: Query<(Entity, Mut<NoesisFocusControl>)>,
     state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
         return;
     };
-    for (entity, ctl) in &views {
-        if ctl.is_changed() || state.scene_rebuilt_this_frame(entity) {
-            state.apply_focus_moves_for(entity, &ctl.moves);
-            state.apply_focus_engages_for(entity, &ctl.engages);
+    for (entity, mut ctl) in &mut views {
+        if !ctl.is_changed() || (ctl.moves.is_empty() && ctl.engages.is_empty()) {
+            continue;
         }
+        state.apply_focus_moves_for(entity, &ctl.moves);
+        state.apply_focus_engages_for(entity, &ctl.engages);
+        // Drain so accumulated one-shots don't replay on the next change or a
+        // rebuild. Bypass change detection so the clear doesn't re-trigger this
+        // system next frame (only this system reads the change flag).
+        let ctl = ctl.bypass_change_detection();
+        ctl.moves.clear();
+        ctl.engages.clear();
     }
 }
 
