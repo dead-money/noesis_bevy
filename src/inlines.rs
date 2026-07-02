@@ -499,10 +499,13 @@ impl NoesisInlines {
         self
     }
 
-    /// Builder: observe these elements' inline structure.
+    /// Builder: observe these elements' inline structure. Names already watched
+    /// are skipped, matching [`observe`](Self::observe).
     #[must_use]
     pub fn watching(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.watch.extend(names.into_iter().map(Into::into));
+        for name in names {
+            self.observe(name);
+        }
         self
     }
 
