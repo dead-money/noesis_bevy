@@ -199,6 +199,18 @@ Mutating the resource updates the bound controls (Bevy change detection drives `
 
 For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view model built one property at a time), `NoesisItems` (fill a list or dropdown from a Rust collection), and `NoesisDp` (get, set, or watch any property on a named element directly, no binding required).
 
+## Version compatibility
+
+| Bevy | noesis_bevy |
+|------|-------------|
+| 0.19 | 0.13        |
+| 0.18 | 0.10 – 0.12 |
+
+`noesis_bevy` tracks Bevy: each Bevy minor gets a fresh `noesis_bevy` minor, and
+patch releases stay on the row's Bevy version. Pin `wgpu` to the same version
+Bevy's renderer uses (the crate does this for you) so render-device types stay
+interchangeable.
+
 ## Setup
 
 ```sh
