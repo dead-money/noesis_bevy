@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use bevy::log::warn_once;
 use noesis_runtime::render_device::types::{
     Batch, FORMAT_FOR_VERTEX, RenderState, VERTEX_FOR_SHADER,
 };
@@ -112,7 +113,18 @@ fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
             StencilOperation::Zero,
             StencilOperation::Replace,
         ),
-        other => panic!("unknown StencilMode raw value: {other}"),
+        // Stencil mode is an SDK-controlled raw; a value added later warns and
+        // degrades to the disabled mode (always pass, no write) rather than
+        // panicking on the pipeline-build path — a benign default keeps the
+        // device rendering. Matches the raw-conversion policy in `wgpu_device`.
+        other => {
+            warn_once!("unknown StencilMode raw value {other}; disabling stencil test");
+            (
+                CompareFunction::Always,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+            )
+        }
     };
     let face = wgpu::StencilFaceState {
         compare,
@@ -248,7 +260,15 @@ fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
             color: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc1),
             alpha: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc1Alpha),
         }),
-        other => panic!("unknown BlendMode raw value: {other}"),
+        // Unknown SDK blend raw: warn and fall back to premultiplied SrcOver,
+        // the common case, rather than panic on the pipeline-build path.
+        other => {
+            warn_once!("unknown BlendMode raw value {other}; using SrcOver");
+            Some(wgpu::BlendState {
+                color: src_over_alpha,
+                alpha: src_over_alpha,
+            })
+        }
     }
 }
 
