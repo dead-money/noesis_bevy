@@ -394,7 +394,13 @@ pub(crate) fn sync_focus_control(
         return;
     };
     for (entity, mut ctl) in &mut views {
-        if !ctl.is_changed() || (ctl.moves.is_empty() && ctl.engages.is_empty()) {
+        // Fire on change or on the frame a panel fragment mounts (so actions
+        // queued before the named element existed still land, once), but never
+        // with an empty queue. Applied actions are drained below, so the mount
+        // trigger stays one-shot too.
+        if (!ctl.is_changed() && !state.panel_mounted_this_frame(entity))
+            || (ctl.moves.is_empty() && ctl.engages.is_empty())
+        {
             continue;
         }
         state.apply_focus_moves_for(entity, &ctl.moves);
@@ -481,6 +487,10 @@ impl Plugin for NoesisFocusControlPlugin {
             // Drain last frame's fires before user systems read them (mirrors
             // the click/keydown drains).
             .add_systems(PreUpdate, drain_focus_binding_queue)
+            // After `sync_panels` so a panel's `NoesisFocusControl` acts the same
+            // frame its fragment mounts (the reconcile reads
+            // `panel_mounted_this_frame`, set by `sync_panels`); mirrors the focus
+            // bridge's ordering.
             .add_systems(
                 PostUpdate,
                 (
@@ -488,7 +498,8 @@ impl Plugin for NoesisFocusControlPlugin {
                     sync_focus_bindings,
                     poll_focus_predictions,
                 )
-                    .in_set(NoesisSet::Apply),
+                    .in_set(NoesisSet::Apply)
+                    .after(crate::panel::sync_panels),
             );
     }
 }
