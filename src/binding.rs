@@ -390,8 +390,9 @@ impl BindingEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Reconcile every view's [`NoesisBinding`]: build any not-yet-built target's
-/// runtime binding (taking its converter), then (re-)attach unbound bindings to
-/// their elements each frame.
+/// runtime binding (taking its converter), rebuild targets a re-inserted
+/// component changed, prune targets it dropped, then (re-)attach unbound bindings
+/// to their elements each frame.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_binding_bridge(
     mut views: Query<(Entity, &mut NoesisBinding)>,
@@ -405,12 +406,18 @@ pub(crate) fn sync_binding_bridge(
         // change the component, so don't trip change detection.
         let comp = comp.bypass_change_detection();
         for target in &mut comp.targets {
-            if state.has_binding(entity, &target.element, &target.property) {
-                continue;
-            }
+            // A consumed converter (steady state) leaves no fresh recipe: an
+            // already-built target stays bound as-is. A present converter is
+            // either first sight or a re-inserted component's new recipe.
             let Some(built) = target.spec.take_built() else {
                 continue;
             };
+            // If an entry already exists, the component was re-inserted with a
+            // changed target (its only mutation path): unbind the stale binding
+            // off its element before installing the rebuilt one.
+            if state.has_binding(entity, &target.element, &target.property) {
+                state.reap_binding_for(entity, &target.element, &target.property);
+            }
             state.insert_binding(
                 entity,
                 target.element.clone(),
@@ -418,6 +425,13 @@ pub(crate) fn sync_binding_bridge(
                 built,
             );
         }
+        // Unbind any target dropped from a re-inserted component.
+        let keep: Vec<(String, String)> = comp
+            .targets
+            .iter()
+            .map(|t| (t.element.clone(), t.property.clone()))
+            .collect();
+        state.prune_bindings_for(entity, &keep);
         state.bind_pending_for(entity);
     }
 }

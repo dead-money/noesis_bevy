@@ -120,7 +120,7 @@ impl AttachTarget {
 /// Build with the chained setters, then hand to [`NoesisVm::new`]. Each
 /// property name must be unique within the def and match the `{Binding <name>}`
 /// paths authored in the XAML.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewModelDef {
     class_name: String,
     props: Vec<(String, PropType)>,
@@ -316,9 +316,11 @@ impl PropertyChangeHandler for ViewModelChangeForwarder {
 pub(crate) struct VmEntry {
     instance: ClassInstance,
     _registration: ClassRegistration,
-    /// Property index → name (addition order), for name→index write lookups.
-    prop_names: Vec<String>,
-    target: AttachTarget,
+    /// The def this entry was built from. Retained as the rebuild fingerprint
+    /// (class + props + target) *and* as the name→index map for writes: a
+    /// re-inserted [`NoesisVm`] with a changed def rebuilds (see
+    /// [`Self::matches`]).
+    def: ViewModelDef,
     /// URI of the scene this VM is currently attached to, or `None` when not
     /// yet attached / detached by a scene rebuild.
     attached_for_uri: Option<String>,
@@ -334,8 +336,7 @@ impl VmEntry {
         changed: &SharedVmChangedQueue,
     ) -> Option<Self> {
         let prop_names: Vec<String> = def.props.iter().map(|(n, _)| n.clone()).collect();
-        let forwarder =
-            ViewModelChangeForwarder::new(view, Arc::new(prop_names.clone()), changed.clone());
+        let forwarder = ViewModelChangeForwarder::new(view, Arc::new(prop_names), changed.clone());
         let mut builder = ClassBuilder::new(&def.class_name, ClassBase::ContentControl, forwarder);
         for (name, kind) in &def.props {
             builder.add_property(name, *kind);
@@ -345,14 +346,20 @@ impl VmEntry {
         Some(Self {
             instance,
             _registration: registration,
-            prop_names,
-            target: def.target.clone(),
+            def: def.clone(),
             attached_for_uri: None,
         })
     }
 
+    /// Whether this entry was built from an equivalent def. `false` means a
+    /// re-inserted [`NoesisVm`] changed the class, props, or target and the
+    /// entry must be rebuilt.
+    pub(crate) fn matches(&self, def: &ViewModelDef) -> bool {
+        &self.def == def
+    }
+
     pub(crate) fn target(&self) -> &AttachTarget {
-        &self.target
+        &self.def.target
     }
 
     /// Borrow the instance for `set_data_context`. Lives as long as the entry.
@@ -362,7 +369,7 @@ impl VmEntry {
 
     /// Apply a write by property name. `false` when the VM has no such property.
     pub(crate) fn write(&self, prop: &str, value: &VmValue) -> bool {
-        let Some(index) = self.prop_names.iter().position(|n| n == prop) else {
+        let Some(index) = self.def.props.iter().position(|(n, _)| n == prop) else {
             return false;
         };
         value.apply_to(self.instance.handle(), index as u32);

@@ -1067,16 +1067,23 @@ impl NoesisRenderState {
     }
 
     /// Build view `entity`'s [`VmEntry`] on first sight (register the Noesis
-    /// class, instantiate, wire the entity-tagged change forwarder). No-op if it
-    /// already exists. Main-thread only.
+    /// class, instantiate, wire the entity-tagged change forwarder). When a
+    /// re-inserted [`NoesisVm`](crate::viewmodel::NoesisVm) carries a changed def
+    /// (class, props, or target), the stale entry is reaped — detached off the
+    /// live scene, then dropped so its class unregisters — before rebuilding, or
+    /// the fresh registration would collide with the old one under the same name.
+    /// No-op when the def is unchanged. Main-thread only.
     pub(crate) fn ensure_view_model(
         &mut self,
         entity: Entity,
         def: &ViewModelDef,
         changed: &SharedVmChangedQueue,
     ) {
-        if self.view_models.contains_key(&entity) {
-            return;
+        if let Some(existing) = self.view_models.get(&entity) {
+            if existing.matches(def) {
+                return;
+            }
+            self.reap_view_model_for(entity);
         }
         match VmEntry::build(entity, def, changed) {
             Some(entry) => {
@@ -1143,16 +1150,23 @@ impl NoesisRenderState {
 
     /// Build view `entity`'s [`CommandEntry`] on first sight (register the Noesis
     /// command-host class, instantiate, build a `Command` per declared name tagged
-    /// with `entity` and pushing to `queue`). No-op if it already exists.
-    /// Main-thread only.
+    /// with `entity` and pushing to `queue`). When a re-inserted
+    /// [`NoesisCommands`](crate::commands::NoesisCommands) carries a changed def
+    /// (class, commands, or target), the stale host is reaped — detached off the
+    /// live scene, then dropped so its class unregisters — before rebuilding, or
+    /// the fresh registration would collide with the old one under the same name.
+    /// No-op when the def is unchanged. Main-thread only.
     pub(crate) fn ensure_commands(
         &mut self,
         entity: Entity,
         def: &CommandsDef,
         queue: &SharedCommandQueue,
     ) {
-        if self.command_hosts.contains_key(&entity) {
-            return;
+        if let Some(existing) = self.command_hosts.get(&entity) {
+            if existing.matches(def) {
+                return;
+            }
+            self.reap_commands_for(entity);
         }
         match CommandEntry::build(entity, def, queue) {
             Some(entry) => {
@@ -1498,7 +1512,8 @@ impl NoesisRenderState {
     }
 
     /// Store a freshly built binding for view `entity`'s `(element, property)`
-    /// target. Bound to its element by the next [`Self::bind_pending_for`] pass.
+    /// target, replacing any prior entry for that key. Bound to its element by
+    /// the next [`Self::bind_pending_for`] pass.
     pub(crate) fn insert_binding(
         &mut self,
         entity: Entity,
@@ -1508,6 +1523,43 @@ impl NoesisRenderState {
     ) {
         self.binding_entries
             .insert((entity, element, property), BindingEntry::new(built));
+    }
+
+    /// Reap view `entity`'s single [`NoesisBinding`](crate::binding::NoesisBinding)
+    /// target `(element, property)`: clear the live binding off the element's DP
+    /// (`ClearValue`, so it stops driving the property) before dropping the owning
+    /// entry. Mirrors [`Self::reap_items_for`]'s detach-then-drop order; the clear
+    /// is a no-op when the scene or element is gone or the binding never attached.
+    pub(crate) fn reap_binding_for(&mut self, entity: Entity, element: &str, property: &str) {
+        let key = (entity, element.to_owned(), property.to_owned());
+        if let Some(entry) = self.binding_entries.get(&key)
+            && let Some(scene) = self.scenes.get(&entity)
+            && !entry.needs_bind(&scene.built_for_uri)
+            && let Some(content) = scene.view.content()
+            && let Some(mut target) = resolve_named(&content, element)
+        {
+            target.clear_value(property);
+        }
+        self.binding_entries.remove(&key);
+    }
+
+    /// Drop (and unbind) any of view `entity`'s binding targets no longer named
+    /// by its [`NoesisBinding`]'s current `keep` set. A target removed from a
+    /// re-inserted component is unbound off its element via
+    /// [`Self::reap_binding_for`] and released here; without this a dropped
+    /// binding keeps driving its property forever.
+    pub(crate) fn prune_bindings_for(&mut self, entity: Entity, keep: &[(String, String)]) {
+        let stale: Vec<(String, String)> = self
+            .binding_entries
+            .keys()
+            .filter(|(ent, element, property)| {
+                *ent == entity && !keep.iter().any(|(ke, kp)| ke == element && kp == property)
+            })
+            .map(|(_, element, property)| (element.clone(), property.clone()))
+            .collect();
+        for (element, property) in stale {
+            self.reap_binding_for(entity, &element, &property);
+        }
     }
 
     /// Attach any of view `entity`'s not-yet-bound bindings onto their named
