@@ -1906,7 +1906,13 @@ impl NoesisRenderState {
             return;
         }
 
-        self.teardown_scene(entity);
+        // Evaluate every readiness gate BEFORE tearing down the live scene. A
+        // hot-reload (`bytes_changed`) or a resize that also needs a rebuild
+        // must not destroy the current scene only to bail on an unmet gate and
+        // leave the view blank — P0.8 strips the ghost intermediate, so an early
+        // teardown blanks rather than freezing on the last frame. Teardown is
+        // deferred until all gates pass, just before the rebuild below. (The
+        // explicit `xaml_uri = ""` case above still tears down eagerly.)
 
         // Confirm the XAML is currently present; skip if not.
         let Some(current_bytes) = current_bytes else {
@@ -1959,6 +1965,10 @@ impl NoesisRenderState {
                 }
             }
         }
+
+        // All readiness gates passed: this is the first point at which the
+        // rebuild is guaranteed to proceed, so tear down the stale scene now.
+        self.teardown_scene(entity);
 
         // Eagerly register every font currently in `SharedFontMap` with
         // the C++ `CachedFontProvider` before XAML parsing runs. Noesis's
