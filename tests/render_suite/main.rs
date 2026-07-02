@@ -9,6 +9,7 @@
 mod common;
 
 mod headless_bake_label;
+mod headless_compositing;
 mod headless_intermediate_ghost;
 mod headless_intermediate_ghost_removed;
 mod headless_teardown;
