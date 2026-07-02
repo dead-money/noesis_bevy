@@ -606,6 +606,14 @@ pub(crate) struct NoesisRenderState {
     /// before the registered device. Keyed by view entity. See
     /// [`crate::commands`].
     command_hosts: HashMap<Entity, CommandEntry>,
+    /// View entities whose `NoesisVm` / `NoesisCommands` host failed to
+    /// register+instantiate, tagged by host kind (`"NoesisVm"` /
+    /// `"NoesisCommands"`), so the `warn!` fires once instead of every frame: a
+    /// failed build leaves the `view_models` / `command_hosts` slot vacant, so
+    /// [`Self::ensure_view_model`] / [`Self::ensure_commands`] retry it each
+    /// frame. Cleared on success and on teardown so a fixed/respawned host
+    /// re-warns. Mirrors [`Self::failed_fragments`].
+    warned_host_build_failures: HashSet<(Entity, &'static str)>,
     /// `(view, target)` pairs already warned about a `DataContext` collision, so
     /// each clash is reported once rather than every frame. A `NoesisVm`,
     /// `NoesisCommands`, and/or plain view models all defaulting to
@@ -1049,6 +1057,7 @@ impl NoesisRenderState {
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
+            warned_host_build_failures: HashSet::new(),
             warned_dc_collisions: HashSet::new(),
             binding_entries: HashMap::new(),
             panels: HashMap::new(),
@@ -1088,12 +1097,18 @@ impl NoesisRenderState {
         match VmEntry::build(entity, def, changed) {
             Some(entry) => {
                 self.view_models.insert(entity, entry);
+                self.warned_host_build_failures
+                    .remove(&(entity, "NoesisVm"));
                 self.warn_datacontext_collisions(entity);
             }
-            None => warn!(
-                "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
-                def.class_name(),
-            ),
+            None => {
+                if self.warned_host_build_failures.insert((entity, "NoesisVm")) {
+                    warn!(
+                        "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
+                        def.class_name(),
+                    );
+                }
+            }
         }
     }
 
@@ -1171,12 +1186,21 @@ impl NoesisRenderState {
         match CommandEntry::build(entity, def, queue) {
             Some(entry) => {
                 self.command_hosts.insert(entity, entry);
+                self.warned_host_build_failures
+                    .remove(&(entity, "NoesisCommands"));
                 self.warn_datacontext_collisions(entity);
             }
-            None => warn!(
-                "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
-                def.class_name(),
-            ),
+            None => {
+                if self
+                    .warned_host_build_failures
+                    .insert((entity, "NoesisCommands"))
+                {
+                    warn!(
+                        "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
+                        def.class_name(),
+                    );
+                }
+            }
         }
     }
 
@@ -1614,10 +1638,8 @@ impl NoesisRenderState {
     ) -> Vec<(u32, crate::plain_vm::PlainValue)> {
         let key = (entity, type_id);
         if let std::collections::hash_map::Entry::Vacant(slot) = self.plain_vms.entry(key) {
-            let Some(entry) = PlainVmEntry::build(type_name, props, target.clone()) else {
-                warn!(
-                    "NoesisViewModel: failed to register plain VM {type_name:?} (duplicate name?)",
-                );
+            let Some(entry) = PlainVmEntry::build(type_name, entity, props, target.clone()) else {
+                warn!("NoesisViewModel: failed to register plain VM {type_name:?}");
                 return Vec::new();
             };
             slot.insert(entry);
@@ -4551,6 +4573,8 @@ impl NoesisRenderState {
         self.lists.retain(|(ent, _), _| *ent != entity);
         self.plain_vms.retain(|(ent, _), _| *ent != entity);
         self.command_hosts.remove(&entity);
+        self.warned_host_build_failures
+            .retain(|(ent, _)| *ent != entity);
         self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
         self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
         self.last_keydown_swallow
@@ -4617,6 +4641,8 @@ impl NoesisRenderState {
             self.clear_host_data_context(entity, entry.target());
         }
         self.view_models.remove(&entity);
+        self.warned_host_build_failures
+            .remove(&(entity, "NoesisVm"));
         self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
     }
 
@@ -4632,6 +4658,8 @@ impl NoesisRenderState {
             self.clear_host_data_context(entity, entry.target());
         }
         self.command_hosts.remove(&entity);
+        self.warned_host_build_failures
+            .remove(&(entity, "NoesisCommands"));
         self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
     }
 
