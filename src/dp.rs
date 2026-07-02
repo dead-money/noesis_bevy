@@ -284,9 +284,13 @@ impl NoesisDp {
     }
 
     /// Observe `name`'s `property`, read as `kind`, from a system holding
-    /// `&mut NoesisDp`. The runtime counterpart of [`watch`](Self::watch).
+    /// `&mut NoesisDp`. No-op if that exact subscription is already watched. The
+    /// runtime counterpart of [`watch`](Self::watch).
     pub fn observe(&mut self, name: impl Into<String>, property: impl Into<String>, kind: DpKind) {
-        self.watch.push(DpWatch::new(name, property, kind));
+        let watch = DpWatch::new(name, property, kind);
+        if !self.watch.contains(&watch) {
+            self.watch.push(watch);
+        }
     }
 
     fn insert(
