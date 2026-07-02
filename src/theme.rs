@@ -27,7 +27,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 
 use crate::font::FontRegistry;
-use crate::render::NoesisView;
+use crate::render::{NoesisSet, NoesisView};
 use crate::xaml::XamlRegistry;
 
 /// The theme's default font family. Every Noesis color variant shares it
@@ -63,7 +63,10 @@ impl Plugin for NoesisDefaultThemePlugin {
         }
         app.insert_resource(staged)
             .add_systems(Startup, inject_theme_registries)
-            .add_systems(Update, apply_theme_to_scene);
+            // Patch each view before the Noesis pipeline reads it: the resources
+            // bridge (Sync) unions the view's `application_resources` chain and
+            // the scene build (Ensure) reads its font gates.
+            .add_systems(PostUpdate, apply_theme_to_scene.before(NoesisSet::Sync));
     }
 }
 
@@ -168,24 +171,21 @@ fn inject_theme_registries(
     }
 }
 
-/// Patch every consumer [`NoesisView`] to load the theme: install it as an
-/// application resource and gate view creation on the theme fonts. Runs each
-/// frame until at least one view exists, then patches all of them once.
+/// Patch each newly-added [`NoesisView`] to load the theme: merge it into the
+/// view's application resources and gate the view's build on the theme fonts.
+///
+/// Keyed on `Added<NoesisView>` (not a one-shot `Local`), so a view spawned
+/// after the first batch — including one spawned via `Commands` earlier the same
+/// frame — is patched before its scene ever parses. A view's XAML is parsed once
+/// (scene build is one-shot), so a view that misses this patch would render
+/// unthemed forever.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_theme_to_scene(
     staged: Res<StagedTheme>,
-    mut views: Query<&mut NoesisView>,
-    mut applied: Local<bool>,
+    mut views: Query<&mut NoesisView, Added<NoesisView>>,
 ) {
-    if *applied {
-        return;
-    }
-    // Nothing staged → nothing to apply; stop retrying.
+    // Nothing staged → nothing to apply.
     if staged.xamls.is_empty() {
-        *applied = true;
-        return;
-    }
-    if views.is_empty() {
         return;
     }
 
@@ -209,6 +209,4 @@ fn apply_theme_to_scene(
             scene.font_fallbacks.push(fallback);
         }
     }
-
-    *applied = true;
 }
