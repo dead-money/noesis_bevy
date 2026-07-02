@@ -215,6 +215,12 @@ impl NoesisVm {
         &self.def
     }
 
+    /// Whether any writes are queued. Read via `&self` so the reconcile system
+    /// can gate its mutable access and avoid tripping change detection.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Take the queued writes (called by the reconcile system).
     pub(crate) fn take_pending(&mut self) -> Vec<(String, VmValue)> {
         std::mem::take(&mut self.pending)
@@ -396,8 +402,10 @@ pub(crate) fn sync_view_models(
     };
     for (entity, mut vm) in &mut views {
         state.ensure_view_model(entity, vm.def(), &changed);
-        let writes = vm.take_pending();
-        if !writes.is_empty() {
+        // Only touch the component mutably when there are queued writes, so an
+        // idle frame doesn't falsely mark `NoesisVm` changed downstream.
+        if vm.has_pending() {
+            let writes = vm.take_pending();
             state.apply_view_model_writes_for(entity, &writes);
         }
     }

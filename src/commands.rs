@@ -185,6 +185,13 @@ impl NoesisCommands {
         &self.def
     }
 
+    /// Whether any enabled-state edits are queued. Read via `&self` so the
+    /// reconcile system can gate its mutable access and avoid tripping change
+    /// detection.
+    pub(crate) fn has_pending_enables(&self) -> bool {
+        !self.pending_enables.is_empty()
+    }
+
     /// Take the queued enabled-state edits (called by the reconcile system).
     pub(crate) fn take_pending_enables(&mut self) -> Vec<(String, bool)> {
         std::mem::take(&mut self.pending_enables)
@@ -437,8 +444,10 @@ pub(crate) fn sync_commands(
     };
     for (entity, mut cmds) in &mut views {
         state.ensure_commands(entity, cmds.def(), &queue);
-        let enables = cmds.take_pending_enables();
-        if !enables.is_empty() {
+        // Only touch the component mutably when there are queued edits, so an
+        // idle frame doesn't falsely mark `NoesisCommands` changed downstream.
+        if cmds.has_pending_enables() {
+            let enables = cmds.take_pending_enables();
             state.apply_command_enables_for(entity, &enables);
         }
     }
