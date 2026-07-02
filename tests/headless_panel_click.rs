@@ -11,17 +11,17 @@
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::routed_events::MouseButton;
 use noesis_bevy::{
-    ClickWatchEntry, NoesisCamera, NoesisClickWatch, NoesisPanelAppExt, NoesisPlugin, NoesisView,
-    UiClicked, UiPanel, XamlRegistry,
+    ClickWatchEntry, NoesisCamera, NoesisClickWatch, NoesisPanelAppExt, NoesisView, UiClicked,
+    UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -45,33 +45,19 @@ const FRAG_XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/20
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="PanelBtn" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Content="X"/>"##;
 
+// Panels mount + seal over the first frames; press once they are live, release
+// two frames later. These are stimulus timings, not the exit condition.
 const PRESS_AT: usize = 25;
 const RELEASE_AT: usize = 27;
-const EXIT_AT: usize = 60;
 
 #[test]
 fn click_watch_on_panel_entity_resolves_fragment_internal_name() {
-    noesis_license_from_env();
-
     // (event_target, view, name) for every observed UiClicked.
     let observed: Arc<Mutex<Vec<(Entity, Entity, String)>>> = Arc::new(Mutex::new(Vec::new()));
     // (view, p1, p2)
     let ids: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     // A registered bound field so each UiPanel actually builds + mounts; the
     // fragment button doesn't bind it, it just needs to be hit-testable.
     app.add_noesis_panel_field::<Health>();
@@ -128,9 +114,7 @@ fn click_watch_on_panel_entity_resolves_fragment_internal_name() {
 
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut input: ResMut<NoesisInputQueue>,
-              mut exit: MessageWriter<AppExit>| {
+        move |mut frame: Local<usize>, mut input: ResMut<NoesisInputQueue>| {
             *frame += 1;
             // Click the LEFT slot's button (center of the left half: x=16, y=16).
             if *frame == PRESS_AT {
@@ -150,13 +134,22 @@ fn click_watch_on_panel_entity_resolves_fragment_internal_name() {
                     button: MouseButton::Left,
                 });
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit as soon as the left panel's fragment-internal button has fired.
+    let pred_obs = Arc::clone(&observed);
+    let pred_ids = Arc::clone(&ids);
+    let clicked = run_until(&mut app, 120, move |_app| {
+        let Some((view, p1, _p2)) = *pred_ids.lock().unwrap() else {
+            return false;
+        };
+        pred_obs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(t, v, n)| *t == p1 && *v == view && n == "PanelBtn")
+    });
 
     let (view, p1, p2) = ids.lock().unwrap().expect("ids captured");
     let got = observed.lock().unwrap().clone();
@@ -166,24 +159,15 @@ fn click_watch_on_panel_entity_resolves_fragment_internal_name() {
     // carrying the host view. Before the fix, the watch on a panel entity was
     // silently ignored (the panel isn't a `scene`), so nothing fired.
     assert!(
-        got.iter()
-            .any(|(t, v, n)| *t == p1 && *v == view && n == "PanelBtn"),
+        clicked,
         "expected a UiClicked from the left panel's fragment button targeting p1 \
          with view {view:?}; observed {got:?}",
     );
     // Namescope isolation: the right panel's identically-named button was never
-    // clicked, so its watch must not have fired.
+    // clicked (the same click event is dispatched against both watches in one
+    // drive, so if p2 hasn't fired by the time p1 has, it never will).
     assert!(
         !got.iter().any(|(t, _, _)| *t == p2),
         "right panel p2 fired without being clicked (namescope cross-talk); observed {got:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

@@ -23,6 +23,7 @@ pub mod focus;
 pub mod focus_input;
 pub mod font;
 pub mod geometry;
+pub mod headless;
 pub mod image;
 pub mod imaging;
 pub mod inlines;
@@ -82,6 +83,7 @@ pub use focus_input::{
 };
 pub use font::{BevyFontProvider, FontAsset, FontAssetLoader, FontAssetPlugin, FontRegistry};
 pub use geometry::{NoesisGeometry, NoesisGeometryPlugin};
+pub use headless::NoesisHeadlessPlugin;
 pub use image::{
     BevyTextureProvider, ImageAsset, ImageAssetLoader, ImageAssetPlugin, ImageRegistry,
 };
@@ -185,27 +187,34 @@ pub struct NoesisPlugin {
     pub license: Option<NoesisLicense>,
 }
 
-impl Plugin for NoesisPlugin {
-    fn build(&self, app: &mut App) {
+impl NoesisPlugin {
+    /// Activate the license (explicit, else `NOESIS_LICENSE_*` env) and start the
+    /// process-global Noesis runtime. Both the real plugin and the headless test
+    /// harness ([`NoesisHeadlessPlugin`]) call this once at `build` time, before
+    /// any `NoesisRenderState` registers a device/provider with the runtime.
+    pub(crate) fn init_runtime(&self) {
         if let Some(lic) = self.license.clone().or_else(NoesisLicense::from_env) {
             noesis_runtime::set_license(&lic.name, &lic.key);
         }
         noesis_runtime::init();
 
         info!("Noesis runtime version {}", noesis_runtime::version());
+    }
 
-        // Global `shutdown()` is owned by `NoesisRenderState::drop`: it releases every
-        // live Noesis handle then shuts the engine down, last, on the main thread.
-        // A separate guard can't guarantee it runs after the state (Bevy gives no
-        // drop order between two main-world resources).
-
-        // NoesisRenderPlugin no-ops if RenderApp isn't present (headless tests).
+    /// Add every asset loader, input, integration, and per-element/data bridge
+    /// plugin, but **not** the render pipeline plugin. This is the bridge set
+    /// both the real [`NoesisPlugin`] (which pairs it with
+    /// [`render::NoesisRenderPlugin`]) and the headless test harness (which pairs
+    /// it with [`NoesisHeadlessPlugin`]) drive, so both exercise identical bridges.
+    ///
+    /// Exposed so a custom harness can run the bridges against its own render
+    /// wiring (or none); app code should add [`NoesisPlugin`] instead.
+    pub fn add_bridge_plugins(app: &mut App) {
         // Tuples are split to stay under Bevy's 15-element `Plugins` impl limit.
         app.add_plugins((
             xaml::XamlAssetPlugin,
             font::FontAssetPlugin,
             image::ImageAssetPlugin,
-            render::NoesisRenderPlugin,
             input::NoesisInputPlugin,
             integration::NoesisIntegrationPlugin,
         ));
@@ -250,5 +259,21 @@ impl Plugin for NoesisPlugin {
             panel::NoesisPanelPlugin,
             list::NoesisListPlugin,
         ));
+    }
+}
+
+impl Plugin for NoesisPlugin {
+    fn build(&self, app: &mut App) {
+        self.init_runtime();
+
+        // Global `shutdown()` is owned by `NoesisRenderState::drop`: it releases every
+        // live Noesis handle then shuts the engine down, last, on the main thread.
+        // A separate guard can't guarantee it runs after the state (Bevy gives no
+        // drop order between two main-world resources).
+
+        Self::add_bridge_plugins(app);
+        // NoesisRenderPlugin no-ops its render-sub-app half if RenderApp is
+        // absent (headless), but its main-world driving pipeline still runs.
+        app.add_plugins(render::NoesisRenderPlugin);
     }
 }

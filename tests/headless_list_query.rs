@@ -31,15 +31,15 @@
 //!     [`NoesisListSelection`], asserted via the message stream.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    ListedIn, NoesisCamera, NoesisListAppExt, NoesisListOps, NoesisListSelection, NoesisPlugin,
-    NoesisView, NoesisViewModel, Selected, UiList, XamlRegistry,
+    ListedIn, NoesisCamera, NoesisListAppExt, NoesisListOps, NoesisListSelection, NoesisView,
+    NoesisViewModel, Selected, UiList, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 // Host scene: a ListBox the rows bind into. An ItemTemplate binds the row's
 // `label` so realization is realistic; the reconcile/currency assertions hold at
@@ -64,12 +64,15 @@ struct Row {
     weight: i32,
 }
 
+// Stimulus/capture timings. Each stage settles a few frames before the next, so
+// an op raised by one action is observed before the following action fires.
+// These sequence the scenario; the run's exit is the assert-worthy predicate
+// below (all ops seen + selection survived), not a fixed frame count.
 const CAPTURE_DEFAULT_AT: usize = 14;
 const UPDATE_AT: usize = 18;
 const SELECT_AT: usize = 28;
 const REORDER_AT: usize = 38;
 const REMOVE_AT: usize = 48;
-const EXIT_AT: usize = 64;
 
 #[derive(Default)]
 struct OpFlags {
@@ -77,36 +80,25 @@ struct OpFlags {
     saw_update_only: bool,
     saw_moves: bool,
     saw_removes: bool,
+    // Set once the pre-selection default-currency snapshot has been taken, so the
+    // exit predicate knows that stage is behind us.
+    default_captured: bool,
 }
 
 #[test]
 fn list_reconciles_minimal_ops_and_keeps_selection() {
-    noesis_license_from_env();
-
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let flags: Arc<Mutex<OpFlags>> = Arc::new(Mutex::new(OpFlags::default()));
     // Who the bridge auto-selected from default currency, before the app touches it.
     let default_selected: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_select: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_reorder: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    // Latest selection, refreshed every frame; read by the exit predicate.
     let final_selected: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     // UI-originated selection messages (app-driven selection emits none).
     let ui_sel_msgs: Arc<Mutex<Vec<Option<Entity>>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<Row>();
 
     let entities_startup = Arc::clone(&entities);
@@ -177,10 +169,9 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
               mut sel: MessageReader<NoesisListSelection>,
               mut lists: Query<&mut UiList>,
               mut rows: Query<&mut Row>,
-              selected_q: Query<Entity, With<Selected>>,
-              mut exit: MessageWriter<AppExit>| {
+              selected_q: Query<Entity, With<Selected>>| {
             *frame += 1;
-            let (a, b, c) = entities_sys.lock().unwrap().expect("rows spawned");
+            let (a, _b, c) = entities_sys.lock().unwrap().expect("rows spawned");
 
             {
                 let mut f = flags_sys.lock().unwrap();
@@ -203,10 +194,14 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                 ui_sel_sys.lock().unwrap().push(ev.selected);
             }
 
+            // Latest selection, always current for the exit predicate.
+            *final_selected_sys.lock().unwrap() = selected_q.iter().next();
+
             // Default currency must NOT auto-select: before the app sets any
             // Selected of its own, nothing should be marked.
             if *frame == CAPTURE_DEFAULT_AT {
                 *default_selected_sys.lock().unwrap() = selected_q.iter().next();
+                flags_sys.lock().unwrap().default_captured = true;
             }
 
             // Mutate ONE row's non-order field: expect an updates-only op.
@@ -244,17 +239,30 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
 
             // Remove a row (despawn): expect a removes op.
             if *frame == REMOVE_AT {
-                commands.entity(b).despawn();
-            }
-
-            if *frame >= EXIT_AT {
-                *final_selected_sys.lock().unwrap() = selected_q.iter().next();
-                exit.write(AppExit::Success);
+                if let Some((_a, b, _c)) = *entities_sys.lock().unwrap() {
+                    commands.entity(b).despawn();
+                }
             }
         },
     );
 
-    app.run();
+    // Exit once the scenario has fully played out: every reconcile op observed
+    // and the app-driven selection has survived add/update/reorder/remove.
+    let pred_flags = Arc::clone(&flags);
+    let pred_final = Arc::clone(&final_selected);
+    let pred_entities = Arc::clone(&entities);
+    let completed = run_until(&mut app, 240, move |_app| {
+        let Some((_a, _b, c)) = *pred_entities.lock().unwrap() else {
+            return false;
+        };
+        let f = pred_flags.lock().unwrap();
+        f.default_captured
+            && f.saw_adds
+            && f.saw_update_only
+            && f.saw_moves
+            && f.saw_removes
+            && *pred_final.lock().unwrap() == Some(c)
+    });
 
     let (_a, _b, c) = entities.lock().unwrap().expect("rows spawned");
     let f = flags.lock().unwrap();
@@ -264,6 +272,11 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
     let after_reorder = *sel_after_reorder.lock().unwrap();
     let final_sel = *final_selected.lock().unwrap();
 
+    assert!(
+        completed,
+        "scenario never reached its terminal state (add/update/move/remove + \
+         surviving selection) within 240 frames",
+    );
     assert!(f.saw_adds, "rows never realized (no adds op observed)");
     assert!(
         f.saw_update_only,
@@ -307,13 +320,4 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
         Some(c),
         "selection did not survive to the end of the run",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }
