@@ -12,17 +12,14 @@
 //! null-resolve at parse time and the Border would stretch to the grid's 64.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisView,
-    XamlRegistry,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisView, XamlRegistry,
 };
 
-const EXIT_AT_FRAME: usize = 120;
+mod common;
+use common::{headless_app, run_until};
 
 const SIZES_XAML: &str = r##"<ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -50,25 +47,10 @@ type Observed = Vec<(Entity, String, String, DpValue)>;
 
 #[test]
 fn multi_uri_chain_resolves_cross_leaf_static_resource() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_spawn = Arc::clone(&view_entity);
     app.add_systems(
@@ -107,10 +89,7 @@ fn multi_uri_chain_resolves_cross_leaf_static_resource() {
     let observed_sys = Arc::clone(&observed);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
+        move |mut changes: MessageReader<NoesisDpChanged>| {
             for ev in changes.read() {
                 observed_sys.lock().unwrap().push((
                     ev.view,
@@ -119,13 +98,24 @@ fn multi_uri_chain_resolves_cross_leaf_static_resource() {
                     ev.value.clone(),
                 ));
             }
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Stop as soon as the cross-leaf reference resolves to the chained width.
+    let pred_view = Arc::clone(&view_entity);
+    let pred_observed = Arc::clone(&observed);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        pred_observed
+            .lock()
+            .unwrap()
+            .iter()
+            .rfind(|(e, n, p, _)| *e == view && n == "Styled" && p == "ActualWidth")
+            .map(|(_, _, _, v)| v.clone())
+            == Some(DpValue::F32(40.0))
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -139,18 +129,13 @@ fn multi_uri_chain_resolves_cross_leaf_static_resource() {
     // The cross-leaf `{StaticResource BaseWidth}` (styles.xaml -> sizes.xaml)
     // resolved: 40 is the chained value; an unresolved Setter would leave the
     // Border to Grid-stretch to its authored 64.
+    assert!(
+        converged,
+        "multi-URI chain never converged within 240 frames; observed {got:?}",
+    );
     assert_eq!(
         latest("Styled", "ActualWidth"),
         Some(DpValue::F32(40.0)),
         "multi-URI chain must resolve cross-leaf StaticResource in dependency order",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

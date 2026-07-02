@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 use noesis_bevy::plain_vm::PlainVmBuilder;
 use noesis_bevy::{NoesisViewModel, PlainType, PlainValue, PlainValueRef};
 use noesis_runtime::binding::{Binding, BindingMode, UpdateSourceTrigger, set_binding};
@@ -158,11 +160,8 @@ fn derive_metadata_and_value_round_trip() {
 
 #[test]
 fn derived_plain_vm_binds_two_way() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
+    if let Some(lic) = common::noesis_license_from_env() {
+        noesis_runtime::set_license(&lic.name, &lic.key);
     }
     noesis_runtime::init();
 

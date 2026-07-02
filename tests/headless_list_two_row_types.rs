@@ -12,15 +12,15 @@
 //! rows regardless of scheduler order.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    ListedIn, NoesisCamera, NoesisListAppExt, NoesisListOps, NoesisPlugin, NoesisView,
-    NoesisViewModel, UiList, XamlRegistry,
+    ListedIn, NoesisCamera, NoesisListAppExt, NoesisListOps, NoesisView, NoesisViewModel, UiList,
+    XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -47,31 +47,14 @@ struct RowB {
     weight: i32,
 }
 
-const EXIT_AT: usize = 48;
-
 #[test]
 fn two_row_types_do_not_clobber_each_others_lists() {
-    noesis_license_from_env();
-
     let views: Arc<Mutex<Option<(Entity, Entity)>>> = Arc::new(Mutex::new(None));
     // Cumulative adds observed per view: proves each list realized its own rows.
     let adds_a: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
     let adds_b: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<RowA>();
     app.add_noesis_list::<RowB>();
 
@@ -140,30 +123,36 @@ fn two_row_types_do_not_clobber_each_others_lists() {
     let views_sys = Arc::clone(&views);
     let adds_a_sys = Arc::clone(&adds_a);
     let adds_b_sys = Arc::clone(&adds_b);
-    app.add_systems(
-        Update,
-        move |mut frame: Local<usize>,
-              mut ops: MessageReader<NoesisListOps>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-            let (view_a, view_b) = views_sys.lock().unwrap().expect("views spawned");
-            for ev in ops.read() {
-                if ev.view == view_a {
-                    *adds_a_sys.lock().unwrap() += ev.adds as u32;
-                } else if ev.view == view_b {
-                    *adds_b_sys.lock().unwrap() += ev.adds as u32;
-                }
+    app.add_systems(Update, move |mut ops: MessageReader<NoesisListOps>| {
+        let Some((view_a, view_b)) = *views_sys.lock().unwrap() else {
+            return;
+        };
+        for ev in ops.read() {
+            if ev.view == view_a {
+                *adds_a_sys.lock().unwrap() += ev.adds as u32;
+            } else if ev.view == view_b {
+                *adds_b_sys.lock().unwrap() += ev.adds as u32;
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
-        },
-    );
+        }
+    });
 
-    app.run();
+    // Exit once both lists have realized all their own rows (A: 2, B: 3). If one
+    // type's diff_list clobbered the other's slot, its adds never arrive and this
+    // times out.
+    let pred_a = Arc::clone(&adds_a);
+    let pred_b = Arc::clone(&adds_b);
+    let realized = run_until(&mut app, 160, move |_app| {
+        *pred_a.lock().unwrap() == 2 && *pred_b.lock().unwrap() == 3
+    });
 
     let realized_a = *adds_a.lock().unwrap();
     let realized_b = *adds_b.lock().unwrap();
+
+    assert!(
+        realized,
+        "both lists never realized all their rows (A expects 2, B expects 3) \
+         within 160 frames; got A={realized_a} B={realized_b}",
+    );
 
     assert_eq!(
         realized_a, 2,
@@ -175,13 +164,4 @@ fn two_row_types_do_not_clobber_each_others_lists() {
         "view B's RowB list did not realize its 3 rows (clobbered by RowA's \
          diff_list?); got {realized_b} adds",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

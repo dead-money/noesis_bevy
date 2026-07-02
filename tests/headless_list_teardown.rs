@@ -17,15 +17,15 @@
 //! Font-free XAML so the scene builds without a font folder.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    ListedIn, NoesisCamera, NoesisDiagnostics, NoesisListAppExt, NoesisPlugin, NoesisView,
-    NoesisViewModel, UiList, XamlRegistry,
+    ListedIn, NoesisCamera, NoesisDiagnostics, NoesisListAppExt, NoesisView, NoesisViewModel,
+    UiList, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 // A ListBox bound by the UiList. An ItemTemplate binds the row's `label`, so rows
 // genuinely realize (each a live ClassInstance the binding must release on reap).
@@ -47,32 +47,12 @@ struct Row {
     weight: i32,
 }
 
-const CAPTURE_PRE_AT: usize = 20;
-const DESPAWN_AT: usize = 21;
-const CAPTURE_POST_AT: usize = 45;
-const EXIT_AT: usize = 55;
-
 #[test]
 fn despawning_a_list_owning_view_reaps_its_binding() {
-    noesis_license_from_env();
-
     let pre: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let post: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<Row>();
 
     app.add_systems(
@@ -110,31 +90,32 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
     let post_sys = Arc::clone(&post);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              diag: Res<NoesisDiagnostics>,
+        move |diag: Res<NoesisDiagnostics>,
               views: Query<Entity, With<NoesisView>>,
-              mut commands: Commands,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-            if *frame == CAPTURE_PRE_AT {
-                *pre_sys.lock().unwrap() = Some(diag.live_lists);
-            }
-            if *frame == DESPAWN_AT {
-                // Despawn the list-owning view; teardown must reap its ListBinding.
-                for e in &views {
-                    commands.entity(e).despawn();
+              mut commands: Commands| {
+            // Phase 0 (pre == None): wait for the binding to go live, snapshot the
+            // live count, then despawn the view. Phase 1: track the drained count.
+            if pre_sys.lock().unwrap().is_none() {
+                if diag.live_lists >= 1 {
+                    *pre_sys.lock().unwrap() = Some(diag.live_lists);
+                    // Despawn the list-owning view; teardown must reap its ListBinding.
+                    for e in &views {
+                        commands.entity(e).despawn();
+                    }
                 }
-            }
-            if *frame == CAPTURE_POST_AT {
+            } else {
                 *post_sys.lock().unwrap() = Some(diag.live_lists);
-            }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
             }
         },
     );
 
-    app.run();
+    // Exit once the binding has gone live (pre captured) and, after despawn, the
+    // live-list count has drained back to 0 (binding reaped in refcount order).
+    let pred_pre = Arc::clone(&pre);
+    let pred_post = Arc::clone(&post);
+    let drained = run_until(&mut app, 160, move |_app| {
+        *pred_pre.lock().unwrap() == Some(1) && *pred_post.lock().unwrap() == Some(0)
+    });
 
     let pre = pre
         .lock()
@@ -146,6 +127,12 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
         .expect("post-despawn live_lists captured");
     eprintln!("--- list teardown pre={pre} post={post} ---");
 
+    assert!(
+        drained,
+        "list binding never went live then drained after despawn within 160 \
+         frames; pre={pre} post={post}",
+    );
+
     // Before despawn: the binding is live (the UiList reconciled at least once).
     assert_eq!(
         pre, 1,
@@ -156,13 +143,4 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
         post, 0,
         "despawn must reap the view's list binding; {post} live lists still tracked",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

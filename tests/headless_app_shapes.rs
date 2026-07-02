@@ -6,18 +6,17 @@
 //! XAML is font-free.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisShapes,
-    NoesisView, XamlRegistry,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisShapes, NoesisView,
+    XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
 const SET_AT_FRAME: usize = 10;
-const EXIT_AT_FRAME: usize = 60;
 
 // Left/Top alignment causes each Border to shrink to content; explicit size would swallow the shape measurement.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -38,25 +37,10 @@ fn watcher() -> NoesisDp {
 
 #[test]
 fn shapes_bridge_sizes_its_container() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -89,8 +73,7 @@ fn shapes_bridge_sizes_its_container() {
         Update,
         move |mut frame: Local<usize>,
               mut q: Query<(&mut NoesisShapes, &mut NoesisDp)>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisDpChanged>| {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
@@ -107,14 +90,27 @@ fn shapes_bridge_sizes_its_container() {
                     ev.value.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Stop once the shape has resized its host and the negative control read back,
+    // rather than padding a fixed frame count. The stimulus still fires at SET_AT_FRAME.
+    let pred_view = Arc::clone(&view_entity);
+    let pred_observed = Arc::clone(&observed);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let got = pred_observed.lock().unwrap();
+        let latest = |name: &str, prop: &str| -> Option<DpValue> {
+            got.iter()
+                .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+                .map(|(_, _, _, v)| v.clone())
+        };
+        latest("Host", "ActualWidth") == Some(DpValue::F32(40.0))
+            && latest("Host", "ActualHeight") == Some(DpValue::F32(24.0))
+            && latest("Empty", "ActualWidth") == Some(DpValue::F32(0.0))
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -122,6 +118,11 @@ fn shapes_bridge_sizes_its_container() {
     for (e, name, prop, value) in &got {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
+
+    assert!(
+        converged,
+        "shapes never converged within 240 frames; observed {got:?}",
+    );
 
     let latest = |name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
@@ -148,13 +149,4 @@ fn shapes_bridge_sizes_its_container() {
         Some(DpValue::F32(0.0)),
         "shapes: an untouched container must stay at ActualWidth 0",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

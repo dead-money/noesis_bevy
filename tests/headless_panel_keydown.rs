@@ -9,16 +9,16 @@
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::{
     Key, KeyDownWatchEntry, NoesisCamera, NoesisFocus, NoesisKeyDownWatch, NoesisPanelAppExt,
-    NoesisPlugin, NoesisView, UiKeyDown, UiPanel, XamlRegistry,
+    NoesisView, UiKeyDown, UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -40,31 +40,15 @@ const FRAG_XAML: &str = r##"<TextBox xmlns="http://schemas.microsoft.com/winfx/2
 
 // Inject the key well after the fragments mount and focus lands.
 const KEY_AT: usize = 40;
-const EXIT_AT: usize = 80;
 
 #[test]
 fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
-    noesis_license_from_env();
-
     // (event_target, view, name, key) for every observed UiKeyDown.
     let observed: Arc<Mutex<Vec<(Entity, Entity, String, Key)>>> = Arc::new(Mutex::new(Vec::new()));
     // (view, p1, p2)
     let ids: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     // A registered bound field so each UiPanel actually builds + mounts.
     app.add_noesis_panel_field::<Health>();
 
@@ -121,21 +105,28 @@ fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
 
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut input: ResMut<NoesisInputQueue>,
-              mut exit: MessageWriter<AppExit>| {
+        move |mut frame: Local<usize>, mut input: ResMut<NoesisInputQueue>| {
             *frame += 1;
             if *frame == KEY_AT {
                 // Routes to the focused element (p1's PanelInput).
                 input.push(NoesisInputEvent::KeyDown(Key::Return));
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit as soon as p1's focused fragment input fires its UiKeyDown(Return).
+    // Same-drive dispatch means if p2 has not fired by then, it never will.
+    let pred_obs = Arc::clone(&observed);
+    let pred_ids = Arc::clone(&ids);
+    let fired =
+        run_until(&mut app, 200, move |_app| {
+            let Some((view, p1, _p2)) = *pred_ids.lock().unwrap() else {
+                return false;
+            };
+            pred_obs.lock().unwrap().iter().any(|(t, v, n, k)| {
+                *t == p1 && *v == view && n == "PanelInput" && *k == Key::Return
+            })
+        });
 
     let (view, p1, p2) = ids.lock().unwrap().expect("ids captured");
     let got = observed.lock().unwrap().clone();
@@ -145,10 +136,9 @@ fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
     // carrying the host view and the pressed key. Before F4/F6 a keydown watch +
     // focus on a panel entity were silently ignored (the panel isn't a `scene`).
     assert!(
-        got.iter()
-            .any(|(t, v, n, k)| *t == p1 && *v == view && n == "PanelInput" && *k == Key::Return),
+        fired,
         "expected a UiKeyDown(Return) from p1's focused fragment input targeting p1 \
-         with view {view:?}; observed {got:?}",
+         with view {view:?} within 200 frames; observed {got:?}",
     );
     // Namescope isolation: only p1's input had focus, so p2's identically-named
     // input must not have fired.
@@ -156,13 +146,4 @@ fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
         !got.iter().any(|(t, _, _, _)| *t == p2),
         "right panel p2 fired without focus (namescope cross-talk); observed {got:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

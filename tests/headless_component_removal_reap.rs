@@ -15,15 +15,15 @@
 //! Font-free XAML so the scene builds without a font folder.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    ListedIn, NoesisCamera, NoesisDiagnostics, NoesisListAppExt, NoesisPlugin, NoesisView,
-    NoesisViewModel, UiList, XamlRegistry,
+    ListedIn, NoesisCamera, NoesisDiagnostics, NoesisListAppExt, NoesisView, NoesisViewModel,
+    UiList, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -46,29 +46,13 @@ struct Row {
 const CAPTURE_PRE_AT: usize = 20;
 const REMOVE_AT: usize = 21;
 const CAPTURE_POST_AT: usize = 45;
-const EXIT_AT: usize = 55;
 
 #[test]
 fn removing_uilist_from_a_live_view_reaps_its_binding() {
-    noesis_license_from_env();
-
     let pre: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
     let post: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<Row>();
 
     app.add_systems(
@@ -109,8 +93,7 @@ fn removing_uilist_from_a_live_view_reaps_its_binding() {
         move |mut frame: Local<usize>,
               diag: Res<NoesisDiagnostics>,
               views: Query<Entity, With<UiList>>,
-              mut commands: Commands,
-              mut exit: MessageWriter<AppExit>| {
+              mut commands: Commands| {
             *frame += 1;
             if *frame == CAPTURE_PRE_AT {
                 *pre_sys.lock().unwrap() = Some((diag.live_lists, diag.live_scenes));
@@ -125,13 +108,17 @@ fn removing_uilist_from_a_live_view_reaps_its_binding() {
             if *frame == CAPTURE_POST_AT {
                 *post_sys.lock().unwrap() = Some((diag.live_lists, diag.live_scenes));
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the post-removal snapshot shows the list binding reaped while the
+    // scene stayed live.
+    let pred_post = Arc::clone(&post);
+    let reaped = run_until(
+        &mut app,
+        240,
+        move |_app| matches!(*pred_post.lock().unwrap(), Some((lists, scenes)) if lists == 0 && scenes == 1),
+    );
 
     let (pre_lists, pre_scenes) = pre.lock().unwrap().expect("pre-removal snapshot captured");
     let (post_lists, post_scenes) = post
@@ -141,6 +128,12 @@ fn removing_uilist_from_a_live_view_reaps_its_binding() {
     eprintln!(
         "--- removal reap pre=(lists={pre_lists}, scenes={pre_scenes}) \
          post=(lists={post_lists}, scenes={post_scenes}) ---"
+    );
+
+    assert!(
+        reaped,
+        "list binding never reaped to 0 (with the scene still live) within 240 \
+         frames; pre=(lists={pre_lists}, scenes={pre_scenes})",
     );
 
     // Before removal: the binding and the scene are both live.
@@ -157,13 +150,4 @@ fn removing_uilist_from_a_live_view_reaps_its_binding() {
         post_scenes, 1,
         "removing UiList must NOT tear down the view's scene; {post_scenes} live scenes",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

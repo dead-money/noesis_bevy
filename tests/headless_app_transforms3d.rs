@@ -18,18 +18,17 @@
 //! ignored test below gates that path.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    NoesisCamera, NoesisPlugin, NoesisTransform3D, NoesisTransform3DChanged, NoesisView,
-    Transform3DSpec, XamlRegistry,
+    NoesisCamera, NoesisTransform3D, NoesisTransform3DChanged, NoesisView, Transform3DSpec,
+    XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
 const SET_AT_FRAME: usize = 10;
-const EXIT_AT_FRAME: usize = 60;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -42,25 +41,10 @@ type Observed = Vec<(Entity, String, Transform3DSpec)>;
 
 #[test]
 fn transform3d_bridge_reads_back_assigned_transform() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -93,8 +77,7 @@ fn transform3d_bridge_reads_back_assigned_transform() {
         Update,
         move |mut frame: Local<usize>,
               mut q: Query<&mut NoesisTransform3D>,
-              mut changes: MessageReader<NoesisTransform3DChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisTransform3DChanged>| {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
@@ -113,14 +96,30 @@ fn transform3d_bridge_reads_back_assigned_transform() {
                     .unwrap()
                     .push((ev.view, ev.name.clone(), ev.spec));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Stop once Box has reported its assigned transform back, rather than padding a
+    // fixed frame count. The transform is assigned at SET_AT_FRAME.
+    let pred_view = Arc::clone(&view_entity);
+    let pred_observed = Arc::clone(&observed);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        pred_observed
+            .lock()
+            .unwrap()
+            .iter()
+            .rfind(|(e, name, _)| *e == view && name == "Box")
+            .map(|(_, _, spec)| {
+                spec.rotation == [10.0, 20.0, 30.0]
+                    && spec.translate == [5.0, 6.0, -7.0]
+                    && spec.scale == [2.0, 0.5, 1.5]
+                    && spec.center == [1.0, 2.0, 3.0]
+            })
+            .unwrap_or(false)
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -128,6 +127,11 @@ fn transform3d_bridge_reads_back_assigned_transform() {
     for (e, name, spec) in &got {
         eprintln!("  {e:?} {name} = {spec:?}");
     }
+
+    assert!(
+        converged,
+        "Box never reported its assigned Transform3D within 240 frames; observed {got:?}",
+    );
 
     // Negative control: an un-targeted element must never be reported.
     assert!(
@@ -166,12 +170,3 @@ fn transform3d_bridge_reads_back_assigned_transform() {
 #[test]
 #[ignore = "Transform3D perspective compositing needs the unimplemented Downsample/Upsample effect shaders"]
 fn transform3d_visual_render_is_gated_on_effect_shaders() {}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
-}

@@ -7,19 +7,16 @@
 //! Font-free XAML; no glyph rendering is asserted.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::classes::PropType;
 use noesis_bevy::viewmodel::{NoesisVm, ViewModelDef};
-use noesis_bevy::{
-    NoesisCamera, NoesisPlugin, NoesisText, NoesisTextChanged, NoesisView, XamlRegistry,
-};
+use noesis_bevy::{NoesisCamera, NoesisText, NoesisTextChanged, NoesisView, XamlRegistry};
+
+mod common;
+use common::{headless_app, run_until};
 
 const SET_AT_FRAME: usize = 6;
-const EXIT_AT_FRAME: usize = 40;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -31,25 +28,10 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 // cross-entity routing bugs that a single-view test cannot detect.
 #[test]
 fn per_entity_routing_is_isolated_across_two_views() {
-    noesis_license_from_env();
-
     let collected: Arc<Mutex<Vec<(Entity, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let views: Arc<Mutex<Vec<(Entity, &'static str)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let views_startup = Arc::clone(&views);
     app.add_systems(
@@ -72,8 +54,7 @@ fn per_entity_routing_is_isolated_across_two_views() {
         Update,
         move |mut frame: Local<usize>,
               mut vms: Query<(Entity, &mut NoesisVm)>,
-              mut changes: MessageReader<NoesisTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
             if *frame == SET_AT_FRAME {
                 let want = views_sys.lock().unwrap().clone();
@@ -89,16 +70,30 @@ fn per_entity_routing_is_isolated_across_two_views() {
                     .unwrap()
                     .push((ev.view, ev.name.clone(), ev.text.clone()));
             }
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: stop once both views have echoed their own sentinel.
+    let pred_collected = Arc::clone(&collected);
+    let pred_views = Arc::clone(&views);
+    let routed = run_until(&mut app, 240, move |_app| {
+        let want = pred_views.lock().unwrap();
+        if want.len() < 2 {
+            return false;
+        }
+        let got = pred_collected.lock().unwrap();
+        want.iter().all(|(entity, sentinel)| {
+            got.iter()
+                .any(|(e, name, text)| e == entity && name == "Echo" && text == sentinel)
+        })
+    });
 
     let want = views.lock().unwrap().clone();
     let got = collected.lock().unwrap().clone();
+    assert!(
+        routed,
+        "both views never echoed their own sentinel within 240 frames; got {got:?}",
+    );
     assert_eq!(want.len(), 2, "expected two views");
     for (entity, sentinel) in &want {
         assert!(
@@ -133,13 +128,4 @@ fn spawn_view(commands: &mut Commands, uri: &str, vm_class: &str) -> Entity {
             NoesisText::new().watching(["Echo"]),
         ))
         .id()
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

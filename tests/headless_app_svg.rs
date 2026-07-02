@@ -5,18 +5,17 @@
 //! view exists when change-detection fires; an earlier mutation drops the apply.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisSvg,
-    NoesisSvgChanged, NoesisView, XamlRegistry,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisSvg, NoesisSvgChanged,
+    NoesisView, XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
 const SET_AT_FRAME: usize = 10;
-const EXIT_AT_FRAME: usize = 60;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -27,27 +26,12 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 
 #[test]
 fn svg_bridge_parses_and_sizes_element() {
-    noesis_license_from_env();
-
     let svg_msgs: Arc<Mutex<Vec<NoesisSvgChanged>>> = Arc::new(Mutex::new(Vec::new()));
     let dp_msgs: Arc<Mutex<Vec<(Entity, String, String, DpValue)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -80,8 +64,7 @@ fn svg_bridge_parses_and_sizes_element() {
         move |mut frame: Local<usize>,
               mut q: Query<&mut NoesisSvg>,
               mut svg_changes: MessageReader<NoesisSvgChanged>,
-              mut dp_changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut dp_changes: MessageReader<NoesisDpChanged>| {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
@@ -104,14 +87,32 @@ fn svg_bridge_parses_and_sizes_element() {
                     ev.value.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Stop once Icon has reported its measured bounds and re-laid out to width 40,
+    // rather than padding a fixed frame count. The SVG apply still fires at SET_AT_FRAME.
+    let pred_view = Arc::clone(&view_entity);
+    let pred_svg = Arc::clone(&svg_msgs);
+    let pred_dp = Arc::clone(&dp_msgs);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let icon_measured = pred_svg
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.view == view && e.name == "Icon");
+        let width_ok = pred_dp
+            .lock()
+            .unwrap()
+            .iter()
+            .rfind(|(e, n, p, _)| *e == view && n == "Icon" && p == "ActualWidth")
+            .map(|(_, _, _, v)| v.clone())
+            == Some(DpValue::F32(40.0));
+        icon_measured && width_ok
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let svgs = svg_msgs.lock().unwrap().clone();
@@ -122,6 +123,10 @@ fn svg_bridge_parses_and_sizes_element() {
         eprintln!("  {:?} {} = {:?}", ev.view, ev.name, ev.bounds);
     }
 
+    assert!(
+        converged,
+        "svg never converged within 240 frames; svgs {svgs:?}, dps {dps:?}",
+    );
     assert!(
         !svgs.iter().any(|e| e.name == "Ghost"),
         "svg: a source routed to an absent x:Name must emit nothing",
@@ -151,13 +156,4 @@ fn svg_bridge_parses_and_sizes_element() {
         Some(DpValue::F32(40.0)),
         "svg: sizing Icon to the SVG width should re-layout to ActualWidth 40 (default 0)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

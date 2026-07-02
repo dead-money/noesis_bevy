@@ -7,20 +7,21 @@
 //! Font-free XAML; no font gate.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     CursorType, NoesisCamera, NoesisCursorRequested, NoesisInputEvent, NoesisInputQueue,
-    NoesisOpenUrl, NoesisPlayAudio, NoesisPlugin, NoesisView, XamlRegistry, open_url, play_audio,
+    NoesisOpenUrl, NoesisPlayAudio, NoesisView, XamlRegistry, open_url, play_audio,
 };
 
-// View is built on first PostUpdate; these constants ensure it exists before use.
+mod common;
+use common::{headless_app, run_until};
+
+// Frame-gated stimulus: the view is built on first PostUpdate, so move the mouse
+// once it exists, then trigger the open-URL / play-audio calls. Frames are instant
+// under run_until; the exit predicate is the captured callbacks, not a count.
 const MOVE_AT_FRAME: usize = 12;
 const TRIGGER_AT_FRAME: usize = 16;
-const EXIT_AT_FRAME: usize = 40;
 
 const URL: &str = "https://www.noesisengine.com/docs/";
 const AUDIO_URI: &str = "click.wav";
@@ -41,24 +42,9 @@ struct Captured {
 
 #[test]
 fn integration_callbacks_surface_as_messages() {
-    noesis_license_from_env();
-
     let captured: Arc<Mutex<Captured>> = Arc::new(Mutex::new(Captured::default()));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     app.add_systems(
         Startup,
@@ -86,8 +72,7 @@ fn integration_callbacks_surface_as_messages() {
               mut queue: ResMut<NoesisInputQueue>,
               mut cursor: MessageReader<NoesisCursorRequested>,
               mut urls: MessageReader<NoesisOpenUrl>,
-              mut audio: MessageReader<NoesisPlayAudio>,
-              mut exit: MessageWriter<AppExit>| {
+              mut audio: MessageReader<NoesisPlayAudio>| {
             *frame += 1;
 
             // Repeated across frames to guarantee an enter/move firing.
@@ -110,20 +95,31 @@ fn integration_callbacks_surface_as_messages() {
             for ev in audio.read() {
                 c.audio.push((ev.uri.clone(), ev.volume));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once all three callbacks have surfaced as messages.
+    let pred_cap = Arc::clone(&captured);
+    let converged = run_until(&mut app, 240, |_app| {
+        let c = pred_cap.lock().unwrap();
+        c.cursors.contains(&CursorType::Hand)
+            && c.urls.iter().any(|u| u == URL)
+            && c.audio
+                .iter()
+                .any(|(uri, vol)| uri == AUDIO_URI && (*vol - AUDIO_VOLUME).abs() < f32::EPSILON)
+    });
 
     let got = captured.lock().unwrap();
     eprintln!("--- integration messages ---");
     eprintln!("  cursors: {:?}", got.cursors);
     eprintln!("  urls:    {:?}", got.urls);
     eprintln!("  audio:   {:?}", got.audio);
+
+    assert!(
+        converged,
+        "not all host callbacks surfaced within 240 frames; cursors {:?} urls {:?} audio {:?}",
+        got.cursors, got.urls, got.audio,
+    );
 
     assert!(
         got.cursors.contains(&CursorType::Hand),
@@ -145,13 +141,4 @@ fn integration_callbacks_surface_as_messages() {
         "play_audio should surface NoesisPlayAudio with the exact uri+volume; observed {:?}",
         got.audio,
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

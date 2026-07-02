@@ -17,16 +17,16 @@
 //! a font gate or theme dictionary.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     FocusNavigationDirection, Key, ModifierKeys, NoesisCamera, NoesisFocus,
     NoesisFocusBindingFired, NoesisFocusControl, NoesisFocusPredicted, NoesisInputEvent,
-    NoesisInputQueue, NoesisPlugin, NoesisView, XamlRegistry,
+    NoesisInputQueue, NoesisView, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const VIEW_W: u32 = 80;
 const VIEW_H: u32 = 32;
@@ -39,7 +39,6 @@ const PRESS1_AT_FRAME: usize = 20;
 const REMOVE_AT_FRAME: usize = 28;
 /// Second chord press, after the F1 binding was detached.
 const PRESS2_AT_FRAME: usize = 36;
-const EXIT_AT_FRAME: usize = 60;
 
 /// Two `TextBox`es for directional focus navigation. Chord bindings on the root
 /// Grid fire via F-key bubble-up from the focused `TextBox`, which doesn't
@@ -60,8 +59,6 @@ fn press(queue: &mut NoesisInputQueue, key: Key) {
 
 #[test]
 fn predict_names_target_and_remove_detaches_only_dropped_binding() {
-    noesis_license_from_env();
-
     // (frame, key) per NoesisFocusBindingFired.
     let fires: Arc<Mutex<Vec<(usize, Key)>>> = Arc::new(Mutex::new(Vec::new()));
     // (from, direction, candidate, predicted_name, matches_expected) per NoesisFocusPredicted.
@@ -69,20 +66,7 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
     let preds: Arc<Mutex<Vec<Pred>>> = Arc::new(Mutex::new(Vec::new()));
     let view_id: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_id);
     app.add_systems(
@@ -119,8 +103,7 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
               mut q: Query<(&mut NoesisFocus, &mut NoesisFocusControl)>,
               mut queue: ResMut<NoesisInputQueue>,
               mut fired: MessageReader<NoesisFocusBindingFired>,
-              mut predicted: MessageReader<NoesisFocusPredicted>,
-              mut exit: MessageWriter<AppExit>| {
+              mut predicted: MessageReader<NoesisFocusPredicted>| {
             *frame += 1;
             let view = view_run.lock().unwrap().expect("view spawned");
 
@@ -176,19 +159,32 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
                     ));
                 }
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: the whole gesture sequence (setup, press-1, remove,
+    // press-2) is frame-gated in the Update system. Once the retained F2 chord has
+    // fired in the post-removal window the sequence is complete, and any F1 fire
+    // that was going to happen would have arrived on the same frame, so the
+    // negative "F1 detached" check below is meaningful.
+    let pred_fires = Arc::clone(&fires);
+    let ran = run_until(&mut app, 240, move |_app| {
+        pred_fires
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(f, key)| *key == Key::F2 && *f >= PRESS2_AT_FRAME)
+    });
 
     let fires = fires.lock().unwrap().clone();
     let preds = preds.lock().unwrap().clone();
     eprintln!("--- fires (frame, key) ---\n{fires:?}");
     eprintln!("--- preds (from, candidate, name, matches) ---\n{preds:?}");
+
+    assert!(
+        ran,
+        "retained F2 chord never fired in the post-removal window within 240 frames; fires={fires:?}",
+    );
 
     // Last entry for a (from, dir) pair; returns (candidate, predicted_name, matches_expected).
     let latest_pred =
@@ -238,22 +234,14 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
         "F2 should fire before removal; fires={fires:?}",
     );
 
-    // Post-removal: F1 detached, F2 retained.
+    // Post-removal: F1 detached, F2 retained. No upper frame bound now that the
+    // run ends event-driven; any fire at or after PRESS2 counts.
     assert!(
-        !in_window(Key::F1, PRESS2_AT_FRAME, EXIT_AT_FRAME + 1),
+        !in_window(Key::F1, PRESS2_AT_FRAME, usize::MAX),
         "after remove_from, the F1 chord must NOT fire; fires={fires:?}",
     );
     assert!(
-        in_window(Key::F2, PRESS2_AT_FRAME, EXIT_AT_FRAME + 1),
+        in_window(Key::F2, PRESS2_AT_FRAME, usize::MAX),
         "the retained F2 chord must still fire after F1 was removed; fires={fires:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

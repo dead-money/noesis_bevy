@@ -8,18 +8,15 @@
 //! Only reads the `Text` dependency property (no glyph rendering), so no font setup is needed.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
-use noesis_bevy::{
-    NoesisCamera, NoesisPlugin, NoesisText, NoesisTextChanged, NoesisView, XamlRegistry,
-};
+use noesis_bevy::{NoesisCamera, NoesisText, NoesisTextChanged, NoesisView, XamlRegistry};
+
+mod common;
+use common::{headless_app, run_until};
 
 const URI: &str = "hot.xaml";
 const RELOAD_AT_FRAME: usize = 25;
-const EXIT_AT_FRAME: usize = 90;
 
 fn xaml(label: &str) -> String {
     format!(
@@ -35,25 +32,10 @@ type Observed = Vec<(Entity, String, String)>;
 
 #[test]
 fn xaml_hot_reload_rebuilds_view_with_new_markup() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -81,8 +63,7 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
         Update,
         move |mut frame: Local<usize>,
               mut reg: ResMut<XamlRegistry>,
-              mut changes: MessageReader<NoesisTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
 
             // Same URI, new bytes: simulates what update_xaml_registry does on an asset Modified event.
@@ -96,14 +77,29 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
                     .unwrap()
                     .push((ev.view, ev.name.clone(), ev.text.clone()));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: the reload is frame-gated (frame 25), so once the latest
+    // observed Label text is "VERSION TWO" the rebuild against the new bytes has
+    // landed (the original "VERSION ONE" was necessarily observed before it).
+    let pred_observed = Arc::clone(&observed);
+    let pred_view = Arc::clone(&view_entity);
+    let reloaded = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let got = pred_observed.lock().unwrap();
+        let saw_one = got
+            .iter()
+            .any(|(e, n, t)| *e == view && n == "Label" && t == "VERSION ONE");
+        let latest_two = got
+            .iter()
+            .rfind(|(e, n, _)| *e == view && n == "Label")
+            .map(|(_, _, t)| t.as_str())
+            == Some("VERSION TWO");
+        saw_one && latest_two
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -119,6 +115,10 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
         .collect();
 
     assert!(
+        reloaded,
+        "hot-reload never converged to VERSION TWO within 240 frames; got {texts:?}",
+    );
+    assert!(
         texts.contains(&"VERSION ONE"),
         "expected to observe the original markup's text before reload; got {texts:?}",
     );
@@ -129,13 +129,4 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
          observed Text is the reloaded value (a no-op reload would stay on \
          VERSION ONE); got {texts:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

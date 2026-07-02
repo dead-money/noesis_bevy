@@ -1,5 +1,5 @@
 //! Integration test for the `NoesisVisualState` bridge (`VisualStateManager::GoToState`),
-//! run end-to-end through the real `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! run end-to-end through the Noesis driving pipeline (headless, no render graph).
 //!
 //! The bridge has no read-back message, so its effect is observed via a `NoesisDp` watch on
 //! `ActualWidth`. Driving "Widget" to "Big" must yield `ActualWidth = 50`; "Other" is left
@@ -9,18 +9,17 @@
 //! applies only on change-detection and mutating it before the view exists drops the apply.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisView,
-    NoesisVisualState, XamlRegistry,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisView, NoesisVisualState,
+    XamlRegistry,
 };
 
-const SET_AT_FRAME: usize = 10;
-const EXIT_AT_FRAME: usize = 60;
+mod common;
+use common::{headless_app, run_until};
+
+const CAP: usize = 240;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -62,25 +61,10 @@ fn watcher() -> NoesisDp {
 
 #[test]
 fn visual_state_bridge_transitions_named_control() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -111,19 +95,9 @@ fn visual_state_bridge_transitions_named_control() {
     let observed_sys = Arc::clone(&observed);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut q: Query<(&mut NoesisVisualState, &mut NoesisDp)>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-
-            if *frame == SET_AT_FRAME {
-                for (mut vs, _dp) in &mut q {
-                    // Snap (no transition) Widget -> "Big"; leave Other alone.
-                    *vs = NoesisVisualState::new().state("Widget", "Big", false);
-                }
-            }
-
+        move |mut applied: Local<bool>,
+              mut q: Query<&mut NoesisVisualState>,
+              mut changes: MessageReader<NoesisDpChanged>| {
             for ev in changes.read() {
                 observed_sys.lock().unwrap().push((
                     ev.view,
@@ -132,14 +106,34 @@ fn visual_state_bridge_transitions_named_control() {
                     ev.value.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
+            // Apply once the scene is live (the watcher has reported at least one
+            // value): mutating the write-only component before the view exists
+            // drops the one-shot apply.
+            if !*applied && !observed_sys.lock().unwrap().is_empty() {
+                for mut vs in &mut q {
+                    // Snap (no transition) Widget -> "Big"; leave Other alone.
+                    *vs = NoesisVisualState::new().state("Widget", "Big", false);
+                }
+                *applied = true;
             }
         },
     );
 
-    app.run();
+    let observed_pred = Arc::clone(&observed);
+    let view_pred = Arc::clone(&view_entity);
+    let done = run_until(&mut app, CAP, |_app| {
+        let Some(view) = *view_pred.lock().unwrap() else {
+            return false;
+        };
+        let got = observed_pred.lock().unwrap();
+        let latest = |name: &str, prop: &str| {
+            got.iter()
+                .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+                .map(|(_, _, _, v)| v.clone())
+        };
+        latest("Widget", "ActualWidth") == Some(DpValue::F32(50.0))
+            && latest("Other", "ActualWidth") == Some(DpValue::F32(10.0))
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -154,6 +148,10 @@ fn visual_state_bridge_transitions_named_control() {
             .map(|(_, _, _, v)| v.clone())
     };
 
+    assert!(
+        done,
+        "visual-state never converged within {CAP} frames; observed {got:?}",
+    );
     assert_eq!(
         latest("Widget", "ActualWidth"),
         Some(DpValue::F32(50.0)),
@@ -167,13 +165,4 @@ fn visual_state_bridge_transitions_named_control() {
         "visual-state: an undriven control must stay in its default state \
          (ActualWidth 10)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

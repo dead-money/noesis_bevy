@@ -8,15 +8,15 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     NoesisCamera, NoesisDiagnostics, NoesisPanelAppExt, NoesisPanelText, NoesisPanelTextChanged,
-    NoesisPlugin, NoesisView, UiPanel, XamlRegistry,
+    NoesisView, UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -24,35 +24,23 @@ mod ecs_ui;
 
 use ecs_ui::{Health, Score};
 
+// Stimulus timings: heal p1, then despawn p2. The run's exit is the terminal
+// predicate (both panels' values read back, isolated, and p2 reaped).
 const HEAL_AT: usize = 16;
 const DESPAWN_AT: usize = 30;
-const EXIT_AT: usize = 60;
 
 #[test]
 fn panels_multi_instance_isolate_and_reap() {
-    noesis_license_from_env();
-
     // Latest (name -> text) per panel entity, captured from the read-back.
     type Captured = HashMap<Entity, HashMap<String, String>>;
     let captured: Arc<Mutex<Captured>> = Arc::new(Mutex::new(HashMap::new()));
     let panels: Arc<Mutex<Option<(Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let live_before: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
+    // Live-panel count after the p2 despawn, refreshed every frame for the exit
+    // predicate; drops to 1 once the reap lands.
     let live_after: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>()
         .add_noesis_panel_field::<Score>();
 
@@ -108,8 +96,7 @@ fn panels_multi_instance_isolate_and_reap() {
               mut commands: Commands,
               diag: Res<NoesisDiagnostics>,
               mut healths: Query<&mut Health>,
-              mut reads: MessageReader<NoesisPanelTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut reads: MessageReader<NoesisPanelTextChanged>| {
             *frame += 1;
             for ev in reads.read() {
                 captured_sys
@@ -131,19 +118,48 @@ fn panels_multi_instance_isolate_and_reap() {
                 *before_sys.lock().unwrap() = diag.live_panels;
                 commands.entity(p2).despawn();
             }
-            if *frame >= EXIT_AT {
+            // After the despawn, track the live-panel count so the predicate sees
+            // the reap drop it to 1.
+            if *frame > DESPAWN_AT {
                 *after_sys.lock().unwrap() = diag.live_panels;
-                exit.write(AppExit::Success);
             }
         },
     );
 
-    app.run();
+    // Exit once both panels' values have read back, p1's mutation is isolated from
+    // p2, and the despawned p2 has been reaped (2 live before -> 1 after).
+    let pred_captured = Arc::clone(&captured);
+    let pred_panels = Arc::clone(&panels);
+    let pred_before = Arc::clone(&live_before);
+    let pred_after = Arc::clone(&live_after);
+    let settled = run_until(&mut app, 240, move |_app| {
+        let Some((p1, p2)) = *pred_panels.lock().unwrap() else {
+            return false;
+        };
+        let snap = pred_captured.lock().unwrap();
+        let val = |e: Entity, name: &str, want: &str| {
+            snap.get(&e)
+                .and_then(|m| m.get(name))
+                .is_some_and(|t| t == want)
+        };
+        val(p1, ecs_ui::HUD_HEALTH_VALUE, "25")
+            && val(p1, ecs_ui::HUD_SCORE_VALUE, "7")
+            && val(p2, ecs_ui::HUD_HEALTH_VALUE, "50")
+            && val(p2, ecs_ui::HUD_SCORE_VALUE, "3")
+            && *pred_before.lock().unwrap() == 2
+            && *pred_after.lock().unwrap() == 1
+    });
 
     let (p1, p2) = panels.lock().unwrap().expect("panels spawned");
     let snap = captured.lock().unwrap().clone();
     let a = snap.get(&p1).cloned().unwrap_or_default();
     let b = snap.get(&p2).cloned().unwrap_or_default();
+
+    assert!(
+        settled,
+        "panels never reached the terminal state (both values read back, isolated, \
+         p2 reaped) within 240 frames; p1={a:?} p2={b:?}",
+    );
 
     // p1 drove BOTH bindings from one aggregated DataContext.
     assert_eq!(
@@ -178,13 +194,4 @@ fn panels_multi_instance_isolate_and_reap() {
         1,
         "despawned panel was not reaped (live_panels did not drop to 1)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

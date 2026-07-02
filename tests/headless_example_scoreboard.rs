@@ -8,14 +8,14 @@
 //! Skips gracefully when `$NOESIS_SDK_DIR` is unset.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     DpValue, FontRegistry, NoesisDpChanged, NoesisItemsCurrent, NoesisVm, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/scoreboard.rs"]
@@ -24,13 +24,10 @@ mod scoreboard;
 use scoreboard::{PLAYERS_NAME, VISIBLE_TEAM_NAME};
 
 const EDIT_AT_FRAME: usize = 30;
-const EXIT_AT_FRAME: usize = 90;
 const EDIT_SELECTED_TEAM: i32 = 2; // "Horde"
 
 #[test]
 fn scoreboard_example_binds_players_and_selected_team() {
-    noesis_license_from_env();
-
     if scoreboard::sample_data_dir().is_none() {
         eprintln!("NOESIS_SDK_DIR unset — skipping scoreboard smoke test");
         return;
@@ -40,20 +37,7 @@ fn scoreboard_example_binds_players_and_selected_team() {
     let selected_idx: Arc<Mutex<Vec<(usize, i32)>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(noesis_bevy::NoesisPlugin::default());
+    let mut app = headless_app();
     // `<Window>` root needs the content-host stand-in to parse.
     app.add_plugins(noesis_bevy::NoesisWindowCompatPlugin);
 
@@ -79,8 +63,7 @@ fn scoreboard_example_binds_players_and_selected_team() {
         move |mut frame: Local<usize>,
               mut vms: Query<&mut NoesisVm>,
               mut items: MessageReader<NoesisItemsCurrent>,
-              mut dps: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut dps: MessageReader<NoesisDpChanged>| {
             *frame += 1;
 
             for ev in items.read() {
@@ -102,19 +85,31 @@ fn scoreboard_example_binds_players_and_selected_team() {
                     vm.set_i32("SelectedTeam", EDIT_SELECTED_TEAM);
                 }
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Terminal condition: the 10 players bound AND the post-edit SelectedTeam
+    // value round-tripped back through the bound DP. The edit only fires at
+    // EDIT_AT_FRAME, so this can never pass before then.
+    let pred_counts = Arc::clone(&player_counts);
+    let pred_idx = Arc::clone(&selected_idx);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let counts = pred_counts.lock().unwrap();
+        let indices = pred_idx.lock().unwrap();
+        counts.iter().any(|(_, c)| *c == 10)
+            && indices.iter().any(|(_, v)| *v == EDIT_SELECTED_TEAM)
+    });
 
     let counts = player_counts.lock().unwrap().clone();
     let indices = selected_idx.lock().unwrap().clone();
     eprintln!("--- Players counts: {counts:?}");
     eprintln!("--- VisibleTeam.SelectedIndex: {indices:?}");
+
+    assert!(
+        converged,
+        "scoreboard never reached its terminal state (10 players bound + \
+         SelectedTeam round-trip) within 240 frames; counts {counts:?} indices {indices:?}",
+    );
 
     assert!(
         counts.iter().any(|(_, c)| *c == 10),
@@ -135,13 +130,4 @@ fn scoreboard_example_binds_players_and_selected_team() {
         "SelectedIndex == {EDIT_SELECTED_TEAM} surfaced before the edit frame \
          {EDIT_AT_FRAME}; got {indices:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

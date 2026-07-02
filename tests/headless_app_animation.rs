@@ -1,5 +1,5 @@
-//! Integration test for the `NoesisAnimation` bridge through the real `NoesisPlugin` pipeline
-//! (headless, pipelined rendering on).
+//! Integration test for the `NoesisAnimation` bridge through the Noesis driving
+//! pipeline (headless, no render graph).
 //!
 //! No read-back message on this bridge; we observe via `NoesisDp` watches on the DPs the
 //! animations drive. Three elements cover the sub-features:
@@ -10,28 +10,30 @@
 //!   map-iteration bugs (only-first / only-last).
 //! - **Other**: untargeted. Negative control; must stay at ActualWidth=10.
 //!
-//! Animations run ~0.1 s; the ~4 ms frame cadence samples each in-flight animation many times,
-//! enabling the intermediate-value assertion. Each completes before the next phase begins.
+//! Storyboards advance on wall-clock (`clock_origin`), so the tight `run_until` update loop
+//! still progresses animation time and samples each ~0.1 s animation many times, enabling the
+//! intermediate-value assertion. The two phases are sequenced on observed state rather than a
+//! frame count: phase B re-begins only once phase A has actually reached its To=50, so the
+//! instant frame cadence can't collapse the phases into each other.
 //!
 //! `NoesisAnimation` starts empty and is filled after the scene exists: the begin is one-shot
 //! and would be lost if the component were mutated before the view is live.
 //!
 //! Font-free XAML; only DP values are asserted.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisAnimation, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin,
-    NoesisView, XamlRegistry,
+    DpKind, DpValue, NoesisAnimation, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisView,
+    XamlRegistry,
 };
 
-const SET_AT_FRAME: usize = 10;
-const REBEGIN_AT_FRAME: usize = 55;
-const EXIT_AT_FRAME: usize = 110;
+mod common;
+use common::{headless_app, run_until};
+
+const CAP: usize = 2000;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -58,25 +60,11 @@ fn watcher() -> NoesisDp {
 
 #[test]
 fn animation_bridge_drives_named_property() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    let phase_b_applied = Arc::new(AtomicBool::new(false));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -103,46 +91,76 @@ fn animation_bridge_drives_named_property() {
     );
 
     let observed_sys = Arc::clone(&observed);
+    let phase_b_sys = Arc::clone(&phase_b_applied);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut q: Query<(&mut NoesisAnimation, &mut NoesisDp)>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-
-            if *frame == SET_AT_FRAME {
-                for (mut anim, _dp) in &mut q {
-                    // Phase A: two distinct (name, property) entries (map-iteration test).
-                    *anim = NoesisAnimation::new()
-                        .animate_from("Box", "Width", 20.0, 50.0, 0.1)
-                        .animate("Tall", "Height", 30.0, 0.1);
-                }
-            }
-
-            if *frame == REBEGIN_AT_FRAME {
-                for (mut anim, _dp) in &mut q {
-                    // Phase B: re-assigning re-begins; replaces the held 50.
-                    *anim = NoesisAnimation::new().animate_from("Box", "Width", 50.0, 25.0, 0.1);
-                }
-            }
-
+        move |mut phase: Local<u8>,
+              mut saw_50: Local<bool>,
+              mut q: Query<&mut NoesisAnimation>,
+              mut changes: MessageReader<NoesisDpChanged>| {
+            let mut scene_live = false;
             for ev in changes.read() {
+                if ev.name == "Box"
+                    && ev.property == "ActualWidth"
+                    && ev.value == DpValue::F32(50.0)
+                {
+                    *saw_50 = true;
+                }
                 observed_sys.lock().unwrap().push((
                     ev.view,
                     ev.name.clone(),
                     ev.property.clone(),
                     ev.value.clone(),
                 ));
+                scene_live = true;
+            }
+            if !scene_live {
+                scene_live = !observed_sys.lock().unwrap().is_empty();
             }
 
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
+            // Phase A: two distinct (name, property) entries (map-iteration test).
+            // Applied once the scene is live (a watch has reported a value).
+            if *phase == 0 && scene_live {
+                for mut anim in &mut q {
+                    *anim = NoesisAnimation::new()
+                        .animate_from("Box", "Width", 20.0, 50.0, 0.1)
+                        .animate("Tall", "Height", 30.0, 0.1);
+                }
+                *phase = 1;
+            }
+
+            // Phase B: re-assigning re-begins; replaces the held 50. Gated on
+            // phase A actually reaching its To=50 so the phases stay ordered even
+            // though frames are instant now.
+            if *phase == 1 && *saw_50 {
+                for mut anim in &mut q {
+                    *anim = NoesisAnimation::new().animate_from("Box", "Width", 50.0, 25.0, 0.1);
+                }
+                *phase = 2;
+                phase_b_sys.store(true, Ordering::SeqCst);
             }
         },
     );
 
-    app.run();
+    let observed_pred = Arc::clone(&observed);
+    let view_pred = Arc::clone(&view_entity);
+    let phase_b_pred = Arc::clone(&phase_b_applied);
+    let done = run_until(&mut app, CAP, |_app| {
+        if !phase_b_pred.load(Ordering::SeqCst) {
+            return false;
+        }
+        let Some(view) = *view_pred.lock().unwrap() else {
+            return false;
+        };
+        let got = observed_pred.lock().unwrap();
+        let latest = |name: &str, prop: &str| {
+            got.iter()
+                .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+                .map(|(_, _, _, v)| v.clone())
+        };
+        latest("Box", "ActualWidth") == Some(DpValue::F32(25.0))
+            && latest("Tall", "ActualHeight") == Some(DpValue::F32(30.0))
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -165,6 +183,12 @@ fn animation_bridge_drives_named_property() {
             })
             .collect()
     };
+
+    assert!(
+        done,
+        "animation never converged (phase B To=25 + Tall=30) within {CAP} frames; \
+         observed {got:?}",
+    );
 
     let box_w = series("Box", "ActualWidth");
 
@@ -203,13 +227,4 @@ fn animation_bridge_drives_named_property() {
         Some(DpValue::F32(10.0)),
         "animation: an undriven element must stay at its authored ActualWidth 10",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

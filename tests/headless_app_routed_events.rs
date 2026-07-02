@@ -6,19 +6,18 @@
 //! assertions, catching a broken subscribe/reconcile or snapshot path.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::routed_events::{
     EventWatchEntry, MouseButton, NoesisEventWatch, NoesisRoutedEvent, RoutedEvent,
 };
-use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisView, XamlRegistry};
+
+mod common;
+use common::{headless_app, run_until};
 
 const INJECT_AT_FRAME: usize = 14;
-const EXIT_AT_FRAME: usize = 50;
 
 // 64x32 grid fully covered by a hit-testable Border (has a Background).
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -37,25 +36,10 @@ type Collected = Vec<(
 
 #[test]
 fn routed_event_watch_surfaces_mouse_down_with_args() {
-    noesis_license_from_env();
-
     let collected: Arc<Mutex<Collected>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -87,8 +71,7 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
         Update,
         move |mut frame: Local<usize>,
               mut input: ResMut<NoesisInputQueue>,
-              mut events: MessageReader<NoesisRoutedEvent>,
-              mut exit: MessageWriter<AppExit>| {
+              mut events: MessageReader<NoesisRoutedEvent>| {
             *frame += 1;
 
             // Pushed in Update so PostUpdate's apply pass drains it onto the View this same frame.
@@ -112,14 +95,29 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
                     ev.args.position,
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Stop as soon as the injected MouseDown surfaces on Target with args, rather
+    // than padding a fixed frame count. The stimulus still fires at INJECT_AT_FRAME.
+    let pred_view = Arc::clone(&view_entity);
+    let pred_collected = Arc::clone(&collected);
+    let observed_hit = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        pred_collected
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(e, name, event, button, pos)| {
+                *e == view
+                    && name == "Target"
+                    && *event == RoutedEvent::MouseDown
+                    && button.is_some()
+                    && pos.is_some()
+            })
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = collected.lock().unwrap().clone();
@@ -127,6 +125,11 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
     for (e, name, event, button, pos) in &got {
         eprintln!("  {e:?} {name} {event:?} button={button:?} pos={pos:?}");
     }
+
+    assert!(
+        observed_hit,
+        "no MouseDown routed event surfaced on Target within 240 frames; observed {got:?}",
+    );
 
     let hit = got
         .iter()
@@ -149,14 +152,5 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
             );
         }
         None => panic!("MouseDown args should carry a position"),
-    }
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
     }
 }

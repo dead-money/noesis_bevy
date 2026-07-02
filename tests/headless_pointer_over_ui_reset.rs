@@ -1,7 +1,7 @@
 //! Regression for P1.13: [`NoesisPointerOverUi`] must not stay stuck `true`
 //! after the view under the pointer despawns.
 //!
-//! Drives a full-bleed, hit-test-visible Border, moves the Noesis pointer onto
+//! Drives a full-bleed, hit-test-visible Button, moves the Noesis pointer onto
 //! it (so `over` latches `true`), then despawns the view. Before the fix,
 //! `apply_input` bailed out on the now-empty scene map without clearing the
 //! flag, so `over` stayed `true` forever — exactly the state that wrongly
@@ -13,14 +13,14 @@
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue, NoesisPointerOverUi};
 use noesis_bevy::routed_events::MouseButton;
-use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisView, XamlRegistry};
+
+mod common;
+use common::{headless_app, run_until};
 
 // A full-bleed Button: it consumes pointer input, so the `View` returns
 // "over hit-test-visible UI" for a press on it (a plain Border doesn't consume
@@ -31,35 +31,21 @@ const XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/2006/xa
 
 // Press/release the pointer every frame across this window so the events land
 // after the scene has built (build takes a handful of frames), not before it
-// exists. Each press latches the "over UI" flag.
+// exists. Each press latches the "over UI" flag. These sequence the scenario;
+// the run's exit is the terminal predicate (post-despawn sample captured), not a
+// fixed frame count.
 const MOVE_FROM: usize = 15;
 const DESPAWN_AT: usize = 35;
 const CAPTURE_POST_AT: usize = 55;
-const EXIT_AT: usize = 65;
 
 #[test]
 fn pointer_over_ui_resets_when_view_despawns() {
-    noesis_license_from_env();
-
     // Latched true if `over` was ever observed true while the view was alive.
     let over_while_alive = Arc::new(Mutex::new(false));
     // `over` sampled well after the despawn.
     let over_after_despawn = Arc::new(Mutex::new(None::<bool>));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     app.add_systems(
         Startup,
@@ -85,8 +71,7 @@ fn pointer_over_ui_resets_when_view_despawns() {
               mut input: ResMut<NoesisInputQueue>,
               over: Res<NoesisPointerOverUi>,
               views: Query<Entity, With<NoesisView>>,
-              mut commands: Commands,
-              mut exit: MessageWriter<AppExit>| {
+              mut commands: Commands| {
             *frame += 1;
             if (MOVE_FROM..DESPAWN_AT).contains(&*frame) {
                 input.push(NoesisInputEvent::MouseMove { x: 32, y: 16 });
@@ -114,13 +99,14 @@ fn pointer_over_ui_resets_when_view_despawns() {
             if *frame == CAPTURE_POST_AT {
                 *post_sys.lock().unwrap() = Some(over.over);
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the post-despawn sample has been taken; assert its value after.
+    let pred_post = Arc::clone(&over_after_despawn);
+    let captured = run_until(&mut app, 120, move |_app| {
+        pred_post.lock().unwrap().is_some()
+    });
 
     let over_while_alive = *over_while_alive.lock().unwrap();
     let over_after_despawn = over_after_despawn
@@ -131,6 +117,10 @@ fn pointer_over_ui_resets_when_view_despawns() {
         "--- pointer-over-ui reset: while_alive={over_while_alive} after_despawn={over_after_despawn} ---"
     );
 
+    assert!(
+        captured,
+        "post-despawn sample was never taken within 120 frames"
+    );
     // Guards the test isn't vacuous: the pointer really did latch onto the UI.
     assert!(
         over_while_alive,
@@ -141,13 +131,4 @@ fn pointer_over_ui_resets_when_view_despawns() {
         !over_after_despawn,
         "pointer-over-UI stayed true after the view despawned (P1.13 regression)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

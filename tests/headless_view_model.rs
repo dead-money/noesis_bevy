@@ -14,6 +14,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod common;
+
 use bevy::prelude::Entity;
 use noesis_bevy::viewmodel::{SharedVmChangedQueue, ViewModelChangeForwarder, VmValue};
 use noesis_runtime::classes::ClassBuilder;
@@ -64,11 +66,8 @@ fn assert_change(queue: &SharedVmChangedQueue, view: Entity, prop: &str, value: 
 
 #[test]
 fn view_model_two_way_binding_round_trips() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
+    if let Some(lic) = common::noesis_license_from_env() {
+        noesis_runtime::set_license(&lic.name, &lic.key);
     }
     noesis_runtime::init();
 

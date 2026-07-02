@@ -11,48 +11,39 @@
 //! `NoesisIntermediate` off the survivor itself — otherwise the render world
 //! blits the last-painted frame over live content forever.
 //!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
-//! Font-free XAML so the scene builds without a font folder.
+//! Runs on the real render graph ([`render_app`]) because the ghost is a
+//! render-world extraction bug. One `#[test]` per file (thread-affine Noesis
+//! runtime, one app per process). Font-free XAML so the scene builds without a
+//! font folder.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
-use noesis_bevy::{NoesisCamera, NoesisIntermediate, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisIntermediate, NoesisView, XamlRegistry};
+
+mod common;
+use common::{render_app, run_until, settle};
 
 const URI: &str = "ghost.xaml";
 const REMOVE_AT_FRAME: usize = 25;
 const CAPTURE_HAD_AT: usize = 24;
-const EXIT_AT_FRAME: usize = 55;
+const CAPTURE_AFTER_AT: usize = 55;
+// Frames pumped after the capture, before the app drops, to drain any in-flight
+// pipeline compile (dropping mid-compile segfaults the GPU driver).
+const SETTLE_FRAMES: usize = 60;
+const CAP: usize = 240;
 
 const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     Background="#FF3050FF"/>"##;
 
 #[test]
 fn removing_the_view_component_removes_the_published_intermediate() {
-    noesis_license_from_env();
-
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     // Presence of NoesisIntermediate on the view before the removal and after.
     let had_before: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let has_after: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = render_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -81,8 +72,7 @@ fn removing_the_view_component_removes_the_published_intermediate() {
         Update,
         move |mut frame: Local<usize>,
               mut commands: Commands,
-              intermediates: Query<Entity, With<NoesisIntermediate>>,
-              mut exit: MessageWriter<AppExit>| {
+              intermediates: Query<Entity, With<NoesisIntermediate>>| {
             *frame += 1;
 
             if *frame == CAPTURE_HAD_AT {
@@ -94,20 +84,25 @@ fn removing_the_view_component_removes_the_published_intermediate() {
                     commands.entity(view).remove::<NoesisView>();
                 }
             }
-            if *frame == EXIT_AT_FRAME {
+            if *frame == CAPTURE_AFTER_AT {
                 *has_after_sys.lock().unwrap() = Some(intermediates.iter().next().is_some());
-                exit.write(AppExit::Success);
             }
         },
     );
 
-    app.run();
+    let has_after_pred = Arc::clone(&has_after);
+    let captured = run_until(&mut app, CAP, |_app| {
+        has_after_pred.lock().unwrap().is_some()
+    });
+    assert!(
+        captured,
+        "post-removal intermediate presence never captured within {CAP} frames"
+    );
+
+    settle(&mut app, SETTLE_FRAMES);
 
     let had_before = *had_before.lock().unwrap();
-    let has_after = has_after
-        .lock()
-        .unwrap()
-        .expect("post-removal intermediate presence captured");
+    let has_after = has_after.lock().unwrap().unwrap();
     eprintln!(
         "--- intermediate ghost (component removal) had_before={had_before} has_after={has_after} ---"
     );
@@ -122,13 +117,4 @@ fn removing_the_view_component_removes_the_published_intermediate() {
          NoesisIntermediate must be removed or the render world blits a frozen ghost over \
          live content forever",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

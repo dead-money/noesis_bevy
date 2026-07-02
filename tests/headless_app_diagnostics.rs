@@ -7,16 +7,15 @@
 //! font gate.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
-use noesis_bevy::{NoesisCamera, NoesisDiagnostics, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisDiagnostics, NoesisView, XamlRegistry};
+
+mod common;
+use common::{headless_app, run_until};
 
 const EARLY_AT_FRAME: usize = 3;
 const SAMPLE_AT_FRAME: usize = 40;
-const EXIT_AT_FRAME: usize = 50;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -26,25 +25,10 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 
 #[test]
 fn diagnostics_resource_mirrors_allocator_counters() {
-    noesis_license_from_env();
-
     let early: Arc<Mutex<Option<NoesisDiagnostics>>> = Arc::new(Mutex::new(None));
     let late: Arc<Mutex<Option<NoesisDiagnostics>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     app.add_systems(
         Startup,
@@ -66,9 +50,7 @@ fn diagnostics_resource_mirrors_allocator_counters() {
     let late_sys = Arc::clone(&late);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              diag: Res<NoesisDiagnostics>,
-              mut exit: MessageWriter<AppExit>| {
+        move |mut frame: Local<usize>, diag: Res<NoesisDiagnostics>| {
             *frame += 1;
             if *frame == EARLY_AT_FRAME {
                 *early_sys.lock().unwrap() = Some(*diag);
@@ -76,13 +58,24 @@ fn diagnostics_resource_mirrors_allocator_counters() {
             if *frame == SAMPLE_AT_FRAME {
                 *late_sys.lock().unwrap() = Some(*diag);
             }
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: stop once the late (frame 40) snapshot has been captured
+    // with a non-zero live allocation, which is the crux of the assertion. The
+    // early/late captures stay frame-gated so the two-sample refresh proof holds.
+    let pred_late = Arc::clone(&late);
+    let sampled = run_until(&mut app, 240, move |_app| {
+        pred_late
+            .lock()
+            .unwrap()
+            .is_some_and(|d| d.allocated_memory > 0)
+    });
+
+    assert!(
+        sampled,
+        "late diagnostics snapshot with non-zero allocated_memory never captured within 240 frames",
+    );
 
     let late = snapshot(&late, "late");
     let early = snapshot(&early, "early");
@@ -117,13 +110,4 @@ fn snapshot(slot: &Arc<Mutex<Option<NoesisDiagnostics>>>, which: &str) -> Noesis
     slot.lock()
         .unwrap()
         .unwrap_or_else(|| panic!("{which} diagnostics snapshot captured"))
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

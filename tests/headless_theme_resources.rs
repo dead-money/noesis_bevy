@@ -19,17 +19,15 @@
 //! confirms the code keys.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     DpKind, DpValue, NoesisCamera, NoesisDefaultThemePlugin, NoesisDp, NoesisDpChanged,
-    NoesisPlugin, NoesisResources, NoesisResourcesInstalled, NoesisView, XamlRegistry,
+    NoesisResources, NoesisResourcesInstalled, NoesisView, XamlRegistry,
 };
 
-const EXIT_AT_FRAME: usize = 120;
+mod common;
+use common::{headless_app, run_until};
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -47,26 +45,11 @@ type Observed = Vec<(Entity, String, String, DpValue)>;
 
 #[test]
 fn theme_chain_and_code_resources_coexist() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let installed: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     // The theme populates `application_resources` with its URI chain.
     app.add_plugins(NoesisDefaultThemePlugin::default());
 
@@ -115,11 +98,8 @@ fn theme_chain_and_code_resources_coexist() {
     let installed_sys = Arc::clone(&installed);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut installs: MessageReader<NoesisResourcesInstalled>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
+        move |mut changes: MessageReader<NoesisDpChanged>,
+              mut installs: MessageReader<NoesisResourcesInstalled>| {
             for ev in changes.read() {
                 observed_sys.lock().unwrap().push((
                     ev.view,
@@ -131,23 +111,48 @@ fn theme_chain_and_code_resources_coexist() {
             for ev in installs.read() {
                 installed_sys.lock().unwrap().push(ev.present.clone());
             }
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Latest observed value for a (view, name, property) triple.
+    let latest_of = |got: &Observed, view: Entity, name: &str, prop: &str| -> Option<DpValue> {
+        got.iter()
+            .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+            .map(|(_, _, _, v)| v.clone())
+    };
+
+    // Exit once both widths have converged and an install has been reported.
+    let pred_observed = Arc::clone(&observed);
+    let pred_installed = Arc::clone(&installed);
+    let pred_view = Arc::clone(&view_entity);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let got = pred_observed.lock().unwrap();
+        let widths_ok = latest_of(&got, view, "Themed", "ActualWidth") == Some(DpValue::F32(40.0))
+            && latest_of(&got, view, "FromTheme", "ActualWidth") == Some(DpValue::F32(17.0));
+        let install_ok = pred_installed
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|present| {
+                present.contains(&"AccentBrush".to_string())
+                    && present.contains(&"PanelWidth".to_string())
+            });
+        widths_ok && install_ok
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
     let installs = installed.lock().unwrap().clone();
 
-    let latest = |name: &str, prop: &str| -> Option<DpValue> {
-        got.iter()
-            .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
-            .map(|(_, _, _, v)| v.clone())
-    };
+    let latest = |name: &str, prop: &str| -> Option<DpValue> { latest_of(&got, view, name, prop) };
+
+    assert!(
+        converged,
+        "theme + code resources never converged within 240 frames; observed {got:?}",
+    );
 
     // The code-built value survived the theme chain: unset would Grid-stretch to
     // 64 (its authored width), 40 proves `{StaticResource PanelWidth}` resolved
@@ -174,13 +179,4 @@ fn theme_chain_and_code_resources_coexist() {
         present.contains(&"AccentBrush".to_string()) && present.contains(&"PanelWidth".to_string()),
         "read-back should confirm both code-built keys present with a theme installed; got {present:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

@@ -15,15 +15,15 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     NoesisCamera, NoesisDiagnostics, NoesisPanelAppExt, NoesisPanelText, NoesisPanelTextChanged,
-    NoesisPlugin, NoesisView, NoesisViewModel, UiPanel, XamlRegistry,
+    NoesisView, NoesisViewModel, UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -43,29 +43,11 @@ const MISSING_URI: &str = "missing.xaml";
 #[derive(Component, NoesisViewModel)]
 struct Health(f32);
 
-const EXIT_AT: usize = 48;
-
 #[test]
 fn broken_fragment_degrades_gracefully_without_blocking_siblings() {
-    noesis_license_from_env();
-
     let captured: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    let final_live: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>();
 
     app.add_systems(
@@ -102,50 +84,46 @@ fn broken_fragment_degrades_gracefully_without_blocking_siblings() {
     );
 
     let captured_sys = Arc::clone(&captured);
-    let final_sys = Arc::clone(&final_live);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              diag: Res<NoesisDiagnostics>,
-              mut reads: MessageReader<NoesisPanelTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
+        move |mut reads: MessageReader<NoesisPanelTextChanged>| {
             for ev in reads.read() {
                 captured_sys
                     .lock()
                     .unwrap()
                     .insert(ev.name.clone(), ev.text.clone());
             }
-            if *frame >= EXIT_AT {
-                *final_sys.lock().unwrap() = diag.live_panels;
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run(); // completing without panic is itself part of the assertion
+    // Event-driven exit: the good panel bound its text through the UI. Completing
+    // without panic is itself part of the assertion.
+    let pred_captured = Arc::clone(&captured);
+    let bound = run_until(&mut app, 240, move |_app| {
+        pred_captured
+            .lock()
+            .unwrap()
+            .get("GoodText")
+            .map(String::as_str)
+            == Some("42")
+    });
 
     let good = captured.lock().unwrap().clone();
-    let live = *final_live.lock().unwrap();
+    let live = app.world().resource::<NoesisDiagnostics>().live_panels;
 
+    // The good panel bound despite its broken sibling.
+    assert!(
+        bound,
+        "the valid panel's binding did not reach the UI within 240 frames; reads {good:?}",
+    );
     // Only the good fragment built a PanelEntry; the broken one's build returned None.
     assert_eq!(
         live, 1,
         "expected exactly 1 live panel (the broken fragment must not mount), got {live}",
     );
-    // The good panel bound despite its broken sibling.
     assert_eq!(
         good.get("GoodText").map(String::as_str),
         Some("42"),
         "the valid panel's binding did not reach the UI; reads {good:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

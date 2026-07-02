@@ -5,21 +5,22 @@
 //! What this asserts: no panic, the malformed fragment still builds a `PanelEntry`
 //! (`live_panels == 2`, distinguishing the lenient-parse path from F5's hard
 //! `None` case), and a valid sibling panel is unaffected. The `error!` surfacing
-//! is exercised by this path (a tag-mismatch fragment); see the run log.
+//! is exercised by this path (a tag-mismatch fragment); the ERROR-level tracing
+//! event is captured on the reconcile thread and asserted below.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     NoesisCamera, NoesisDiagnostics, NoesisPanelAppExt, NoesisPanelText, NoesisPanelTextChanged,
-    NoesisPlugin, NoesisView, NoesisViewModel, UiPanel, XamlRegistry,
+    NoesisView, NoesisViewModel, UiPanel, XamlRegistry,
 };
 use tracing::Subscriber;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+mod common;
+use common::{headless_app, run_until};
 
 /// Collects ERROR-level tracing messages so the test can assert F5b surfaced one.
 struct ErrorCapture(Arc<Mutex<Vec<String>>>);
@@ -64,37 +65,19 @@ const BAD_XAML: &str = r##"<StackPanel xmlns="http://schemas.microsoft.com/winfx
 #[derive(Component, NoesisViewModel)]
 struct Health(f32);
 
-const EXIT_AT: usize = 48;
-
 #[test]
 fn malformed_fragment_loads_partial_and_is_surfaced() {
-    noesis_license_from_env();
-
     let captured: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    let final_live: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
     let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Capture ERROR events on this thread (where the NonSend reconcile runs) so we
-    // can assert F5b actually logged. Disable Bevy's LogPlugin so ours is the sink.
+    // can assert F5b actually logged. The headless harness installs no LogPlugin,
+    // so ours is the sink.
     let _log_guard = tracing::subscriber::set_default(
         tracing_subscriber::registry().with(ErrorCapture(Arc::clone(&errors))),
     );
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::log::LogPlugin>()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>();
 
     app.add_systems(
@@ -133,32 +116,47 @@ fn malformed_fragment_loads_partial_and_is_surfaced() {
     );
 
     let captured_sys = Arc::clone(&captured);
-    let final_sys = Arc::clone(&final_live);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              diag: Res<NoesisDiagnostics>,
-              mut reads: MessageReader<NoesisPanelTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
+        move |mut reads: MessageReader<NoesisPanelTextChanged>| {
             for ev in reads.read() {
                 captured_sys
                     .lock()
                     .unwrap()
                     .insert(ev.name.clone(), ev.text.clone());
             }
-            if *frame >= EXIT_AT {
-                *final_sys.lock().unwrap() = diag.live_panels;
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Terminal success: both panels mounted (malformed loads a partial tree), the
+    // good sibling bound, and the F5b error! surfaced the malformed URI.
+    let pred_captured = Arc::clone(&captured);
+    let pred_errors = Arc::clone(&errors);
+    let done = run_until(&mut app, 240, move |app| {
+        let good = pred_captured
+            .lock()
+            .unwrap()
+            .get("GoodText")
+            .map(String::as_str)
+            == Some("42");
+        let live = app.world().resource::<NoesisDiagnostics>().live_panels == 2;
+        let surfaced = pred_errors
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.contains("bad.xaml") && e.contains("parser warning"));
+        good && live && surfaced
+    });
 
     let good = captured.lock().unwrap().clone();
-    let live = *final_live.lock().unwrap();
+    let live = app.world().resource::<NoesisDiagnostics>().live_panels;
+    let errs = errors.lock().unwrap().clone();
 
+    assert!(
+        done,
+        "F5b scenario never reached terminal state within 240 frames; \
+         live_panels={live}, reads {good:?}, errors {errs:?}",
+    );
     // Both built a PanelEntry: the malformed one still LOADS (partial tree), unlike
     // F5's missing-URI case where load returns None and the panel never mounts.
     assert_eq!(
@@ -170,22 +168,11 @@ fn malformed_fragment_loads_partial_and_is_surfaced() {
         Some("42"),
         "the valid sibling's binding did not reach the UI; reads {good:?}",
     );
-
     // F5b: the malformed fragment's parser warning surfaced as a Bevy error! naming
     // the panel's URI, instead of vanishing into the Noesis log.
-    let errs = errors.lock().unwrap().clone();
     assert!(
         errs.iter()
             .any(|e| e.contains("bad.xaml") && e.contains("parser warning")),
         "expected an F5b error! surfacing the malformed fragment; captured errors: {errs:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

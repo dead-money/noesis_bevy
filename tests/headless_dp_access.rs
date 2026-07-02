@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+mod common;
+
 use noesis_bevy::dp::{DpKind, DpValue};
 use noesis_runtime::view::{FrameworkElement, View};
 use noesis_runtime::xaml_provider::XamlProvider;
@@ -35,11 +37,8 @@ impl XamlProvider for InMem {
 
 #[test]
 fn dp_access_writes_and_reads_by_name_and_type() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
+    if let Some(lic) = common::noesis_license_from_env() {
+        noesis_runtime::set_license(&lic.name, &lic.key);
     }
     noesis_runtime::init();
 

@@ -7,17 +7,15 @@
 //! present in the live application resources.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisResources,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisResources,
     NoesisResourcesInstalled, NoesisView, XamlRegistry,
 };
 
-const EXIT_AT_FRAME: usize = 60;
+mod common;
+use common::{headless_app, run_until};
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -40,26 +38,11 @@ fn watcher() -> NoesisDp {
 
 #[test]
 fn app_resources_resolve_static_resource() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let installed: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     // Registered before the scene builds: bridge installs in Sync, scene builds in Ensure,
     // so {StaticResource} references resolve at parse time.
@@ -94,12 +77,8 @@ fn app_resources_resolve_static_resource() {
     let installed_sys = Arc::clone(&installed);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut installs: MessageReader<NoesisResourcesInstalled>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-
+        move |mut changes: MessageReader<NoesisDpChanged>,
+              mut installs: MessageReader<NoesisResourcesInstalled>| {
             for ev in changes.read() {
                 observed_sys.lock().unwrap().push((
                     ev.view,
@@ -111,14 +90,31 @@ fn app_resources_resolve_static_resource() {
             for ev in installs.read() {
                 installed_sys.lock().unwrap().push(ev.present.clone());
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Stop as soon as both resource keys are confirmed installed and both watched
+    // widths have converged, rather than padding a fixed frame count.
+    let pred_view = Arc::clone(&view_entity);
+    let pred_observed = Arc::clone(&observed);
+    let pred_installed = Arc::clone(&installed);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let present_ok = pred_installed.lock().unwrap().last().is_some_and(|p| {
+            p.contains(&"AccentBrush".to_string()) && p.contains(&"PanelWidth".to_string())
+        });
+        let got = pred_observed.lock().unwrap();
+        let latest = |name: &str, prop: &str| -> Option<DpValue> {
+            got.iter()
+                .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+                .map(|(_, _, _, v)| v.clone())
+        };
+        present_ok
+            && latest("Themed", "ActualWidth") == Some(DpValue::F32(40.0))
+            && latest("Plain", "ActualWidth") == Some(DpValue::F32(20.0))
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -131,6 +127,11 @@ fn app_resources_resolve_static_resource() {
     for present in &installs {
         eprintln!("  present = {present:?}");
     }
+
+    assert!(
+        converged,
+        "resources never converged within 240 frames; observed {got:?}, installs {installs:?}",
+    );
 
     let latest = |name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
@@ -162,13 +163,4 @@ fn app_resources_resolve_static_resource() {
         Some(DpValue::F32(20.0)),
         "resources: an element without the StaticResource keeps its authored width",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

@@ -6,17 +6,23 @@
 //!  2. Pipelined-cleanup deadlock: no `NonSendMut<NoesisRenderState>` system may live in
 //!     the render schedule, or Bevy's pipelined render-thread cleanup handshake deadlocks.
 //!
-//! If either regresses, `app.run()` hangs and the outer test timeout fails the run.
+//! If either regresses, driving or dropping the app hangs and the outer test timeout
+//! fails the run. Runs on the real render graph ([`render_app`]) so the pipelined
+//! render thread the deadlock lives on is actually spun up.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
-use noesis_bevy::{NoesisCamera, NoesisPlugin, NoesisView, XamlRegistry};
+use noesis_bevy::{NoesisCamera, NoesisIntermediate, NoesisView, XamlRegistry};
 
-const FRAMES: usize = 30;
+mod common;
+use common::{render_app, run_until, settle};
+
+// Frames to keep pumping after the scene is up, before the app drops. The scene
+// coming up can leave Bevy async-compiling a render pipeline on a driver thread;
+// dropping mid-compile segfaults the GPU driver, so we drain that first.
+const SETTLE_FRAMES: usize = 180;
+const CAP: usize = 240;
 
 // No text element, so the scene builds without a font folder.
 const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -24,26 +30,7 @@ const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xa
 
 #[test]
 fn headless_drive_and_teardown_do_not_hang() {
-    noesis_runtime::set_license(
-        &std::env::var("NOESIS_LICENSE_NAME").unwrap_or_default(),
-        &std::env::var("NOESIS_LICENSE_KEY").unwrap_or_default(),
-    );
-
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    // Pipelined rendering stays enabled; exercises the deadlock path (bug 2 above).
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = render_app();
 
     app.add_systems(
         Startup,
@@ -60,15 +47,23 @@ fn headless_drive_and_teardown_do_not_hang() {
             ));
         },
     );
-    app.add_systems(
-        Update,
-        |mut frame: Local<usize>, mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-            if *frame >= FRAMES {
-                exit.write(AppExit::Success);
-            }
-        },
+
+    // The scene is live once it publishes an intermediate: that means the render
+    // graph actually ran, which is the state teardown must unwind cleanly.
+    let up = run_until(&mut app, CAP, |app| {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(), With<NoesisIntermediate>>();
+        q.iter(app.world()).next().is_some()
+    });
+    assert!(
+        up,
+        "view never published a NoesisIntermediate within {CAP} frames"
     );
 
-    app.run();
+    // Drain any in-flight pipeline compile before the drop below tears down.
+    settle(&mut app, SETTLE_FRAMES);
+
+    // Dropping `app` here exercises the teardown ordering + pipelined-cleanup path.
+    drop(app);
 }

@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+mod common;
+
 use noesis_bevy::items::ItemsBinding;
 use noesis_runtime::view::{FrameworkElement, View};
 use noesis_runtime::xaml_provider::XamlProvider;
@@ -30,11 +32,8 @@ impl XamlProvider for InMem {
 
 #[test]
 fn items_source_populates_and_mutates_combobox() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
+    if let Some(lic) = common::noesis_license_from_env() {
+        noesis_runtime::set_license(&lic.name, &lic.key);
     }
     noesis_runtime::init();
 

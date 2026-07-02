@@ -7,19 +7,21 @@
 //! are asserted.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    InlineSpec, InlinesReadback, NoesisCamera, NoesisInlines, NoesisInlinesChanged, NoesisPlugin,
-    NoesisView, TextDecorations, XamlRegistry,
+    InlineSpec, InlinesReadback, NoesisCamera, NoesisInlines, NoesisInlinesChanged, NoesisView,
+    TextDecorations, XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
+// Frame-gated stimulus: apply the initial tree once the scene exists, then
+// re-apply the replacement a few frames later. Frames are instant under
+// run_until; the exit predicate below is the terminal read-back, not a count.
 const APPLY_AT_FRAME: usize = 10;
 const REAPPLY_AT_FRAME: usize = 30;
-const EXIT_AT_FRAME: usize = 70;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -49,25 +51,10 @@ type Observed = Vec<(Entity, String, InlinesReadback)>;
 
 #[test]
 fn inlines_bridge_reapply_decorations_and_ui_container() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -99,8 +86,7 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
         Update,
         move |mut frame: Local<usize>,
               mut q: Query<&mut NoesisInlines>,
-              mut changes: MessageReader<NoesisInlinesChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisInlinesChanged>| {
             *frame += 1;
 
             if *frame == APPLY_AT_FRAME {
@@ -124,14 +110,27 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
                     .unwrap()
                     .push((ev.view, ev.name.clone(), ev.value.clone()));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once both the initial tree ("firstX") and the re-applied replacement
+    // ("second Y") have been read back from the live TextBlock.
+    let pred_observed = Arc::clone(&observed);
+    let pred_view = Arc::clone(&view_entity);
+    let converged = run_until(&mut app, 240, |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let got = pred_observed.lock().unwrap();
+        let saw_initial = got
+            .iter()
+            .any(|(e, n, r)| *e == view && n == "Body" && r.text == "firstX");
+        let latest_is_replacement = got
+            .iter()
+            .rfind(|(e, n, _)| *e == view && n == "Body")
+            .is_some_and(|(_, _, r)| r.text == "second Y" && r.hosted_ui == 1);
+        saw_initial && latest_is_replacement
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -139,6 +138,12 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
     for (e, name, value) in &got {
         eprintln!("  {e:?} {name} = {value:?}");
     }
+
+    assert!(
+        converged,
+        "inlines re-apply never converged (initial 'firstX' then replacement \
+         'second Y') within 240 frames; observed {got:?}",
+    );
 
     let body_reads: Vec<&InlinesReadback> = got
         .iter()
@@ -189,13 +194,4 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
         latest.text, "firstX",
         "re-apply must replace the initial content, not retain it",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

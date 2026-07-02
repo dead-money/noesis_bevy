@@ -21,15 +21,15 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     NoesisCamera, NoesisDiagnostics, NoesisPanelAppExt, NoesisPanelText, NoesisPanelTextChanged,
-    NoesisPlugin, NoesisView, NoesisViewModel, UiPanel, XamlRegistry,
+    NoesisView, NoesisViewModel, UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 // Host scene: one named StackPanel that panels mount into.
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -55,35 +55,23 @@ struct Health(f32);
 #[derive(Component, NoesisViewModel)]
 struct Score(i32);
 
+// Frame-gated stimulus: heal panel A, then despawn panel B. Frames are instant
+// under run_until; the exit predicate is the terminal aggregate/isolate/reap
+// state, not a fixed frame count.
 const HEAL_AT: usize = 16;
 const DESPAWN_AT: usize = 30;
-const EXIT_AT: usize = 64;
 
 #[test]
 fn panel_entity_aggregates_isolates_and_reaps() {
-    noesis_license_from_env();
-
     // Latest (name -> text) per panel entity, captured from the read-back.
     type Captured = HashMap<Entity, HashMap<String, String>>;
     let captured: Arc<Mutex<Captured>> = Arc::new(Mutex::new(HashMap::new()));
     let entities: Arc<Mutex<Option<(Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let baseline_live: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
+    // Live panel count, refreshed every frame once the despawn has fired.
     let final_live: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>()
         .add_noesis_panel_field::<Score>();
 
@@ -145,8 +133,7 @@ fn panel_entity_aggregates_isolates_and_reaps() {
               mut commands: Commands,
               diag: Res<NoesisDiagnostics>,
               mut healths: Query<&mut Health>,
-              mut reads: MessageReader<NoesisPanelTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut reads: MessageReader<NoesisPanelTextChanged>| {
             *frame += 1;
 
             for ev in reads.read() {
@@ -167,20 +154,45 @@ fn panel_entity_aggregates_isolates_and_reaps() {
                 }
             }
 
-            // Record live panel count just before despawn (baseline = 2).
+            // Record live panel count just before despawn (baseline = 2), then despawn.
             if *frame == DESPAWN_AT {
                 *baseline_sys.lock().unwrap() = diag.live_panels;
                 commands.entity(panel_b).despawn();
             }
 
-            if *frame >= EXIT_AT {
+            // After the despawn, keep the post-reap count current for the predicate.
+            if *frame > DESPAWN_AT {
                 *final_sys.lock().unwrap() = diag.live_panels;
-                exit.write(AppExit::Success);
             }
         },
     );
 
-    app.run();
+    // Exit once aggregation + isolation reads have landed and the reap has settled
+    // (baseline 2 captured, live count back to 1).
+    let pred_captured = Arc::clone(&captured);
+    let pred_entities = Arc::clone(&entities);
+    let pred_baseline = Arc::clone(&baseline_live);
+    let pred_final = Arc::clone(&final_live);
+    let completed = run_until(&mut app, 240, |_app| {
+        let Some((panel_a, panel_b)) = *pred_entities.lock().unwrap() else {
+            return false;
+        };
+        let snap = pred_captured.lock().unwrap();
+        let a = snap.get(&panel_a);
+        let b = snap.get(&panel_b);
+        let a_ready = a.is_some_and(|m| {
+            m.get("HealthText").map(String::as_str) == Some("25")
+                && m.get("ScoreText").map(String::as_str) == Some("7")
+        });
+        let b_ready = b.is_some_and(|m| {
+            m.get("HealthText").map(String::as_str) == Some("50")
+                && m.get("ScoreText").map(String::as_str) == Some("3")
+        });
+        a_ready
+            && b_ready
+            && *pred_baseline.lock().unwrap() == 2
+            && *pred_final.lock().unwrap() == 1
+    });
 
     let (panel_a, panel_b) = entities.lock().unwrap().expect("panels spawned");
     let snap = captured.lock().unwrap().clone();
@@ -188,6 +200,12 @@ fn panel_entity_aggregates_isolates_and_reaps() {
     let b = snap.get(&panel_b).cloned().unwrap_or_default();
     let baseline = *baseline_live.lock().unwrap();
     let final_count = *final_live.lock().unwrap();
+
+    assert!(
+        completed,
+        "panel scenario never reached its terminal state (aggregate + isolate + \
+         reap) within 240 frames; A {a:?} B {b:?} baseline {baseline} final {final_count}",
+    );
 
     // Aggregation: panel A drove BOTH bindings from one DataContext.
     assert_eq!(
@@ -219,13 +237,4 @@ fn panel_entity_aggregates_isolates_and_reaps() {
         final_count, 1,
         "despawned panel was not reaped (live_panels did not drop to 1)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

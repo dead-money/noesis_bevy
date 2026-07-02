@@ -20,17 +20,15 @@
 //!   `cargo test -p noesis_bevy --test headless_write_before_scene -- --nocapture`
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisText, NoesisView,
-    XamlRegistry,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisText, NoesisView, XamlRegistry,
 };
 
-const FRAMES: usize = 60;
+mod common;
+use common::{headless_app, run_until};
+
 const REGISTER_AT_FRAME: usize = 8;
 const TARGET: &str = "Label";
 const WRITTEN: &str = "Applied";
@@ -44,28 +42,10 @@ const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xa
 
 #[test]
 fn write_set_before_scene_builds_still_lands() {
-    noesis_runtime::set_license(
-        &std::env::var("NOESIS_LICENSE_NAME").unwrap_or_default(),
-        &std::env::var("NOESIS_LICENSE_KEY").unwrap_or_default(),
-    );
-
-    // (frame, text) for every NoesisTextChanged observed on TARGET.
+    // (frame, text) for every NoesisDpChanged observed on TARGET.
     let observed: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     // Spawn the view and seed the write at startup, but do NOT register the XAML
     // yet: the scene cannot build, so the write's `is_changed` is consumed against
@@ -89,8 +69,7 @@ fn write_set_before_scene_builds_still_lands() {
         Update,
         move |mut frame: Local<usize>,
               mut reg: ResMut<XamlRegistry>,
-              mut changed: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changed: MessageReader<NoesisDpChanged>| {
             *frame += 1;
             if *frame == REGISTER_AT_FRAME {
                 reg.insert("late.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
@@ -102,26 +81,31 @@ fn write_set_before_scene_builds_still_lands() {
                     }
                 }
             }
-            if *frame >= FRAMES {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the written value has been read back through the DP watch.
+    let pred_observed = Arc::clone(&observed);
+    let applied = run_until(&mut app, 240, move |_app| {
+        pred_observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, text)| text == WRITTEN)
+    });
 
     let seen = observed.lock().unwrap().clone();
     // The write must reach the element only after the late scene build, and the
     // final observed value must be the written one (not the XAML default).
-    let applied = seen.iter().find(|(_, text)| text == WRITTEN);
     assert!(
-        applied.is_some(),
-        "write never applied; observed read-backs: {seen:?}"
+        applied,
+        "write never applied within 240 frames; observed read-backs: {seen:?}"
     );
-    let (applied_frame, _) = applied.unwrap();
+    let applied_hit = seen.iter().find(|(_, text)| text == WRITTEN).unwrap();
     assert!(
-        *applied_frame >= REGISTER_AT_FRAME,
-        "write applied at frame {applied_frame}, before the scene could build at {REGISTER_AT_FRAME}"
+        applied_hit.0 >= REGISTER_AT_FRAME,
+        "write applied at frame {}, before the scene could build at {REGISTER_AT_FRAME}",
+        applied_hit.0
     );
     let last = seen.last().map(|(_, t)| t.as_str());
     assert_eq!(

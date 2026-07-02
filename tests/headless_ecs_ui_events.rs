@@ -7,17 +7,17 @@
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::routed_events::MouseButton;
 use noesis_bevy::{
-    ClickWatchEntry, NoesisCamera, NoesisClickWatch, NoesisPanelAppExt, NoesisPlugin, NoesisView,
-    UiClicked, UiPanel, XamlRegistry,
+    ClickWatchEntry, NoesisCamera, NoesisClickWatch, NoesisPanelAppExt, NoesisView, UiClicked,
+    UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -43,32 +43,18 @@ fn heal_on_click(on: On<UiClicked>, mut huds: Query<&mut Health, With<UiPanel>>)
     }
 }
 
+// Stimulus timings: press once the panels are live, release two frames later.
+// The run's exit is the heal-observed predicate below.
 const PRESS_AT: usize = 18;
 const RELEASE_AT: usize = 20;
-const EXIT_AT: usize = 50;
 
 #[test]
 fn named_button_event_retargets_to_panel() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Vec<(Entity, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let panels: Arc<Mutex<Option<(Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let final_hp: Arc<Mutex<Option<(f32, f32)>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>()
         .add_noesis_panel_field::<Score>();
 
@@ -137,8 +123,7 @@ fn named_button_event_retargets_to_panel() {
         Update,
         move |mut frame: Local<usize>,
               mut input: ResMut<NoesisInputQueue>,
-              healths: Query<&Health>,
-              mut exit: MessageWriter<AppExit>| {
+              healths: Query<&Health>| {
             *frame += 1;
             // Click HealP1 (top half: y=8).
             if *frame == PRESS_AT {
@@ -158,21 +143,36 @@ fn named_button_event_retargets_to_panel() {
                     button: MouseButton::Left,
                 });
             }
-            if *frame >= EXIT_AT {
-                let (p1, p2) = panels_sys.lock().unwrap().expect("panels");
-                *final_sys.lock().unwrap() =
-                    Some((healths.get(p1).unwrap().0, healths.get(p2).unwrap().0));
-                exit.write(AppExit::Success);
+            // Latest health per panel, refreshed every frame for the exit predicate.
+            if let Some((p1, p2)) = *panels_sys.lock().unwrap() {
+                if let (Ok(h1), Ok(h2)) = (healths.get(p1), healths.get(p2)) {
+                    *final_sys.lock().unwrap() = Some((h1.0, h2.0));
+                }
             }
         },
     );
 
-    app.run();
+    // Exit once the targeted panel has been healed by its button click (p1 40 ->
+    // 65) with the other panel untouched.
+    let pred_panels = Arc::clone(&panels);
+    let pred_final = Arc::clone(&final_hp);
+    let healed = run_until(&mut app, 240, move |_app| {
+        let Some((_p1, _p2)) = *pred_panels.lock().unwrap() else {
+            return false;
+        };
+        matches!(*pred_final.lock().unwrap(), Some((hp1, hp2)) if (hp1 - 65.0).abs() < 0.5 && (hp2 - 40.0).abs() < 0.5)
+    });
 
     let (p1, _p2) = panels.lock().unwrap().expect("panels");
     let got = observed.lock().unwrap().clone();
     let (hp1, hp2) = final_hp.lock().unwrap().expect("final hp captured");
     eprintln!("--- observed UiClicked: {got:?}; final hp=({hp1},{hp2}) ---");
+
+    assert!(
+        healed,
+        "panel 1 was never healed to 65 (with panel 2 untouched) within 240 \
+         frames; observed {got:?}, final hp=({hp1},{hp2})",
+    );
 
     // The UiClicked from "HealP1" must target panel 1's entity.
     assert!(
@@ -188,13 +188,4 @@ fn named_button_event_retargets_to_panel() {
         (hp2 - 40.0).abs() < 0.5,
         "panel 2 was wrongly affected by panel 1's button (hp2={hp2})",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

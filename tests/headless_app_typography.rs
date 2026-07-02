@@ -8,19 +8,18 @@
 //! Bevy change-detection drops a write made before the view exists.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     DpKind, DpValue, FontStretch, FontStyle, FontWeight, NoesisCamera, NoesisDp, NoesisDpChanged,
-    NoesisPlugin, NoesisTypography, NoesisTypographyChanged, NoesisView, TypographyField,
-    TypographyValue, XamlRegistry,
+    NoesisTypography, NoesisTypographyChanged, NoesisView, TypographyField, TypographyValue,
+    XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
 const SET_AT_FRAME: usize = 10;
-const EXIT_AT_FRAME: usize = 60;
 
 // Both elements authored with identical defaults so every assertion has a known
 // "before" value. Other is left un-bridged as the negative control.
@@ -52,26 +51,11 @@ fn typo_watcher() -> NoesisTypography {
 
 #[test]
 fn typography_bridge_applies_all_font_properties() {
-    noesis_license_from_env();
-
     let observed_dp: Arc<Mutex<ObservedDp>> = Arc::new(Mutex::new(Vec::new()));
     let observed_typo: Arc<Mutex<ObservedTypo>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -106,8 +90,7 @@ fn typography_bridge_applies_all_font_properties() {
         move |mut frame: Local<usize>,
               mut q: Query<(&mut NoesisTypography, &mut NoesisDp)>,
               mut dp_changes: MessageReader<NoesisDpChanged>,
-              mut typo_changes: MessageReader<NoesisTypographyChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut typo_changes: MessageReader<NoesisTypographyChanged>| {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
@@ -140,14 +123,42 @@ fn typography_bridge_applies_all_font_properties() {
                     ev.value.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once every restyled Title property has read back (FontSize via DP; the
+    // three enum props + FontFamily via the typed watch). Negative controls are
+    // asserted after the run.
+    let pred_dp = Arc::clone(&observed_dp);
+    let pred_typo = Arc::clone(&observed_typo);
+    let pred_view = Arc::clone(&view_entity);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let dp = pred_dp.lock().unwrap();
+        let typo = pred_typo.lock().unwrap();
+        let dp_is = |name: &str, prop: &str, want: &DpValue| {
+            dp.iter()
+                .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+                .is_some_and(|(_, _, _, v)| v == want)
+        };
+        let typo_has = |name: &str, want: &TypographyValue| {
+            typo.iter()
+                .any(|(e, n, v)| *e == view && n == name && v == want)
+        };
+        dp_is("Title", "FontSize", &DpValue::F32(30.0))
+            && typo_has(
+                "Title",
+                &TypographyValue::FontFamily(Some("Arial".to_string())),
+            )
+            && typo_has("Title", &TypographyValue::FontWeight(FontWeight::Bold))
+            && typo_has("Title", &TypographyValue::FontStyle(FontStyle::Italic))
+            && typo_has(
+                "Title",
+                &TypographyValue::FontStretch(FontStretch::Condensed),
+            )
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got_dp = observed_dp.lock().unwrap().clone();
@@ -173,6 +184,12 @@ fn typography_bridge_applies_all_font_properties() {
             .rfind(|(e, n, v)| *e == view && n == name && want(v))
             .map(|(_, _, v)| v.clone())
     };
+
+    assert!(
+        converged,
+        "restyled Title font properties never all read back within 240 frames; \
+         dp={got_dp:?} typo={got_typo:?}",
+    );
 
     assert_eq!(
         latest_dp("Title", "FontSize"),
@@ -214,13 +231,4 @@ fn typography_bridge_applies_all_font_properties() {
         Some(TypographyValue::FontWeight(FontWeight::Normal)),
         "negative control: un-bridged Other must keep authored FontWeight Normal(400)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

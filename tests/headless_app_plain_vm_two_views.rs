@@ -7,19 +7,18 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    NoesisCamera, NoesisPlugin, NoesisText, NoesisTextChanged, NoesisView, NoesisViewModel,
+    NoesisCamera, NoesisText, NoesisTextChanged, NoesisView, NoesisViewModel,
     NoesisViewModelAppExt, XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
 const SEED_A: &str = "Alpha";
 const SEED_B: &str = "Beta";
-const EXIT_AT_FRAME: usize = 48;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -34,25 +33,10 @@ struct DemoVm {
 
 #[test]
 fn two_views_same_plain_vm_type_both_bind() {
-    noesis_license_from_env();
-
     let text_changes: Arc<Mutex<Vec<(Entity, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let views: Arc<Mutex<HashMap<&'static str, Entity>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_view_model::<DemoVm>();
 
     let views_startup = Arc::clone(&views);
@@ -84,25 +68,35 @@ fn two_views_same_plain_vm_type_both_bind() {
     let text_sys = Arc::clone(&text_changes);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut changes: MessageReader<NoesisTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
+        move |mut changes: MessageReader<NoesisTextChanged>| {
             for ev in changes.read() {
                 text_sys.lock().unwrap().push((ev.view, ev.text.clone()));
-            }
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
             }
         },
     );
 
-    app.run();
+    // Exit once both views have independently seeded their TextBox.
+    let pred_texts = Arc::clone(&text_changes);
+    let pred_views = Arc::clone(&views);
+    let converged = run_until(&mut app, 240, |_app| {
+        let map = pred_views.lock().unwrap();
+        let (Some(&view_a), Some(&view_b)) = (map.get("a"), map.get("b")) else {
+            return false;
+        };
+        let texts = pred_texts.lock().unwrap();
+        texts.iter().any(|(e, t)| *e == view_a && t == SEED_A)
+            && texts.iter().any(|(e, t)| *e == view_b && t == SEED_B)
+    });
 
     let views = views.lock().unwrap().clone();
     let view_a = views["a"];
     let view_b = views["b"];
     let texts = text_changes.lock().unwrap().clone();
+
+    assert!(
+        converged,
+        "both views' plain VMs never seeded within 240 frames; got {texts:?}",
+    );
 
     assert!(
         texts.iter().any(|(e, t)| *e == view_a && t == SEED_A),
@@ -113,13 +107,4 @@ fn two_views_same_plain_vm_type_both_bind() {
         "view B's plain VM never seeded its TextBox (second-view registration collision?); \
          got {texts:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

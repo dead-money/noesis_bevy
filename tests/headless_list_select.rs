@@ -20,15 +20,15 @@
 //! against regressing to that.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, ListedIn, NoesisCamera, NoesisDp, NoesisListAppExt, NoesisListSelection, NoesisPlugin,
-    NoesisView, NoesisViewModel, Selected, UiList, XamlRegistry,
+    DpKind, ListedIn, NoesisCamera, NoesisDp, NoesisListAppExt, NoesisListSelection, NoesisView,
+    NoesisViewModel, Selected, UiList, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -48,33 +48,18 @@ struct Row {
     weight: i32,
 }
 
+// The control SelectedIndex write fires at this frame; capture/exit are the
+// asserted terminal condition below, not a fixed frame.
 const SELECT_AT: usize = 16;
-const CAPTURE_AT: usize = 30;
-const EXIT_AT: usize = 40;
 
 #[test]
 fn control_selection_marks_selected_and_emits_message() {
-    noesis_license_from_env();
-
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
-    // What the bridge marked Selected after we drove the control's SelectedIndex.
+    // Latest Selected the bridge marked after we drove the control's SelectedIndex.
     let selected_after: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_msgs: Arc<Mutex<Vec<Option<Entity>>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<Row>();
 
     let entities_startup = Arc::clone(&entities);
@@ -136,12 +121,14 @@ fn control_selection_marks_selected_and_emits_message() {
               mut commands: Commands,
               views: Query<Entity, With<UiList>>,
               mut sel: MessageReader<NoesisListSelection>,
-              selected_q: Query<Entity, With<Selected>>,
-              mut exit: MessageWriter<AppExit>| {
+              selected_q: Query<Entity, With<Selected>>| {
             *frame += 1;
             for ev in sel.read() {
                 sel_msgs_sys.lock().unwrap().push(ev.selected);
             }
+
+            // Latest bridge-marked selection, always current for the exit predicate.
+            *selected_after_sys.lock().unwrap() = selected_q.iter().next();
 
             // Drive the live ListBox's SelectedIndex to row 2 (C), the faithful
             // headless proxy for a user picking that row.
@@ -156,22 +143,31 @@ fn control_selection_marks_selected_and_emits_message() {
                     );
                 }
             }
-
-            if *frame == CAPTURE_AT {
-                *selected_after_sys.lock().unwrap() = selected_q.iter().next();
-            }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the control-side selection reached the bridge: row C is marked
+    // Selected AND a NoesisListSelection for C was emitted.
+    let pred_entities = Arc::clone(&entities);
+    let pred_selected = Arc::clone(&selected_after);
+    let pred_msgs = Arc::clone(&sel_msgs);
+    let reached = run_until(&mut app, 160, move |_app| {
+        let Some((_a, _b, c)) = *pred_entities.lock().unwrap() else {
+            return false;
+        };
+        *pred_selected.lock().unwrap() == Some(c) && pred_msgs.lock().unwrap().contains(&Some(c))
+    });
 
     let (_a, _b, c) = entities.lock().unwrap().expect("rows spawned");
     let selected = *selected_after.lock().unwrap();
     let msgs = sel_msgs.lock().unwrap().clone();
 
+    assert!(
+        reached,
+        "control-side SelectedIndex write never reached the bridge (C marked \
+         Selected + NoesisListSelection for C) within 160 frames; selected \
+         {selected:?} msgs {msgs:?}",
+    );
     assert_eq!(
         selected,
         Some(c),
@@ -182,13 +178,4 @@ fn control_selection_marks_selected_and_emits_message() {
         msgs.contains(&Some(c)),
         "selecting row 2 (C) emitted no NoesisListSelection for C; got {msgs:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

@@ -10,19 +10,18 @@
 //! Font-free XAML; only DP values and predictions are asserted, so no font gate.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     DpKind, DpValue, FocusNavigationDirection, NoesisCamera, NoesisDp, NoesisDpChanged,
-    NoesisFocus, NoesisFocusControl, NoesisFocusPredicted, NoesisPlugin, NoesisView, XamlRegistry,
+    NoesisFocus, NoesisFocusControl, NoesisFocusPredicted, NoesisView, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const FOCUS_AT_FRAME: usize = 10;
 const MOVE_AT_FRAME: usize = 25;
-const EXIT_AT_FRAME: usize = 60;
 
 // Two focusable TextBoxes side-by-side so Right navigation has a real spatial target.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -45,26 +44,11 @@ type ObservedPredict = Vec<(Entity, String, bool, bool)>;
 
 #[test]
 fn focus_control_moves_focus_and_predicts() {
-    noesis_license_from_env();
-
     let dp_seen: Arc<Mutex<ObservedDp>> = Arc::new(Mutex::new(Vec::new()));
     let predict_seen: Arc<Mutex<ObservedPredict>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -97,8 +81,7 @@ fn focus_control_moves_focus_and_predicts() {
         move |mut frame: Local<usize>,
               mut q: Query<(&mut NoesisFocus, &mut NoesisFocusControl)>,
               mut dp_changes: MessageReader<NoesisDpChanged>,
-              mut predicts: MessageReader<NoesisFocusPredicted>,
-              mut exit: MessageWriter<AppExit>| {
+              mut predicts: MessageReader<NoesisFocusPredicted>| {
             *frame += 1;
 
             if *frame == FOCUS_AT_FRAME {
@@ -134,14 +117,32 @@ fn focus_control_moves_focus_and_predicts() {
                     ev.matches_expected,
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: stop once the move has focused Second (First lost focus)
+    // and the matching prediction has surfaced. The move is frame-gated above.
+    let pred_dp = Arc::clone(&dp_seen);
+    let pred_predict = Arc::clone(&predict_seen);
+    let pred_view = Arc::clone(&view_entity);
+    let converged = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let dp = pred_dp.lock().unwrap();
+        let latest = |np: &str| -> Option<DpValue> {
+            dp.iter()
+                .rfind(|(e, k, _)| *e == view && k == np)
+                .map(|(_, _, v)| v.clone())
+        };
+        let focus_moved = latest("Second.IsFocused") == Some(DpValue::Bool(true))
+            && latest("First.IsFocused") == Some(DpValue::Bool(false));
+        let predicted = pred_predict.lock().unwrap();
+        let has_predict = predicted.iter().any(|(e, from, candidate, matches)| {
+            *e == view && from == "First" && *candidate && *matches
+        });
+        focus_moved && has_predict
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let dp = dp_seen.lock().unwrap().clone();
@@ -161,6 +162,11 @@ fn focus_control_moves_focus_and_predicts() {
             .rfind(|(e, k, _)| *e == view && k == np)
             .map(|(_, _, v)| v.clone())
     };
+
+    assert!(
+        converged,
+        "focus move + prediction never converged within 240 frames; dp={dp:?} predicted={predicted:?}",
+    );
 
     assert_eq!(
         latest("Second.IsFocused"),
@@ -183,13 +189,4 @@ fn focus_control_moves_focus_and_predicts() {
         "expected a NoesisFocusPredicted(First -> Right) with candidate && matches_expected; \
          got {predicted:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

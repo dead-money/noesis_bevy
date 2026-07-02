@@ -15,17 +15,17 @@
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::routed_events::MouseButton;
 use noesis_bevy::{
-    ClickWatchEntry, NoesisCamera, NoesisClickWatch, NoesisLayout, NoesisPanelAppExt, NoesisPlugin,
-    NoesisView, UiClicked, UiPanel, XamlRegistry,
+    ClickWatchEntry, NoesisCamera, NoesisClickWatch, NoesisLayout, NoesisPanelAppExt, NoesisView,
+    UiClicked, UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -45,35 +45,22 @@ const FRAG_XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/20
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="PanelBtn" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Content="X"/>"##;
 
+// Left click fires first (25/27), then the right positive-control click (31/33).
+// The right click landing is the terminal condition; the left click has already
+// had its full chance to (wrongly) fire by then.
 const PRESS_L: usize = 25;
 const RELEASE_L: usize = 27;
 const PRESS_R: usize = 31;
 const RELEASE_R: usize = 33;
-const EXIT_AT: usize = 60;
 
 #[test]
 fn layout_write_on_panel_entity_resolves_fragment_internal_name() {
-    noesis_license_from_env();
-
     // event_target of every observed UiClicked.
     let observed: Arc<Mutex<Vec<Entity>>> = Arc::new(Mutex::new(Vec::new()));
     // (p1 = left, p2 = right)
     let ids: Arc<Mutex<Option<(Entity, Entity)>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>();
 
     let obs = Arc::clone(&observed);
@@ -129,9 +116,7 @@ fn layout_write_on_panel_entity_resolves_fragment_internal_name() {
 
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut input: ResMut<NoesisInputQueue>,
-              mut exit: MessageWriter<AppExit>| {
+        move |mut frame: Local<usize>, mut input: ResMut<NoesisInputQueue>| {
             *frame += 1;
             // Click the LEFT half's center (16,16): hits only if the button is still
             // full-bleed there, i.e. if the F6 margin did NOT apply.
@@ -170,13 +155,20 @@ fn layout_write_on_panel_entity_resolves_fragment_internal_name() {
                     button: MouseButton::Left,
                 });
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the right (positive-control) button has fired. The left click at
+    // frames 25/27 has fully dispatched before the right press at 31, so if the
+    // left button were going to (wrongly) fire it would already be recorded.
+    let pred_obs = Arc::clone(&observed);
+    let pred_ids = Arc::clone(&ids);
+    let right_fired = run_until(&mut app, 160, move |_app| {
+        let Some((_p1, p2)) = *pred_ids.lock().unwrap() else {
+            return false;
+        };
+        pred_obs.lock().unwrap().contains(&p2)
+    });
 
     let (p1, p2) = ids.lock().unwrap().expect("ids captured");
     let got = observed.lock().unwrap().clone();
@@ -186,6 +178,10 @@ fn layout_write_on_panel_entity_resolves_fragment_internal_name() {
 
     // Positive control: the right (un-margined) button was hit, proving click
     // injection and the panel-entity click watch both work.
+    assert!(
+        right_fired,
+        "positive control failed: the right panel's full-bleed button was not clicked within 160 frames; observed {got:?}",
+    );
     assert!(
         got.contains(&p2),
         "positive control failed: the right panel's full-bleed button was not clicked; observed {got:?}",
@@ -198,13 +194,4 @@ fn layout_write_on_panel_entity_resolves_fragment_internal_name() {
         "left panel fired: its NoesisLayout margin did not reach the fragment button \
          (F6 fragment resolution missing), so it stayed full-bleed and the click hit; observed {got:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

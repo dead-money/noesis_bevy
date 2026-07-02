@@ -14,20 +14,21 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    NoesisCamera, NoesisDp, NoesisPlugin, NoesisText, NoesisTextChanged, NoesisView,
-    NoesisViewModel, NoesisViewModelAppExt, XamlRegistry,
+    NoesisCamera, NoesisDp, NoesisText, NoesisTextChanged, NoesisView, NoesisViewModel,
+    NoesisViewModelAppExt, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const SEED: &str = "Hello";
 const EDIT: &str = "World";
+// Frame-gated stimulus: simulate the user edit once the scene exists. Frames are
+// instant under run_until; the exit predicate is the round-trip, not this count.
 const EDIT_AT_FRAME: usize = 14;
-const EXIT_AT_FRAME: usize = 48;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -44,27 +45,12 @@ struct DemoVm {
 
 #[test]
 fn plain_vm_component_round_trips_two_way() {
-    noesis_license_from_env();
-
     let titles: Arc<Mutex<HashMap<Entity, String>>> = Arc::new(Mutex::new(HashMap::new()));
     // Rust→UI proof: Box text from the NoesisText watch
     let text_changes: Arc<Mutex<Vec<(Entity, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_view_model::<DemoVm>();
 
     let view_startup = Arc::clone(&view_entity);
@@ -97,8 +83,7 @@ fn plain_vm_component_round_trips_two_way() {
         move |mut frame: Local<usize>,
               vms: Query<(Entity, &DemoVm)>,
               mut dps: Query<&mut NoesisDp>,
-              mut changes: MessageReader<NoesisTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
 
             // UI→Rust readback
@@ -119,18 +104,36 @@ fn plain_vm_component_round_trips_two_way() {
                     *dp = NoesisDp::new().set_string("Box", "Text", EDIT);
                 }
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once both directions have landed: the seed reached the TextBox (Rust→UI)
+    // and the DP edit wrote back into the DemoVm component (UI→Rust).
+    let pred_titles = Arc::clone(&titles);
+    let pred_texts = Arc::clone(&text_changes);
+    let pred_view = Arc::clone(&view_entity);
+    let converged = run_until(&mut app, 240, |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let seeded = pred_texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(e, t)| *e == view && t == SEED);
+        let wrote_back = pred_titles.lock().unwrap().get(&view).map(String::as_str) == Some(EDIT);
+        seeded && wrote_back
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let final_titles = titles.lock().unwrap().clone();
     let texts = text_changes.lock().unwrap().clone();
+
+    assert!(
+        converged,
+        "plain VM two-way round-trip never converged within 240 frames; \
+         titles {final_titles:?} text changes {texts:?}",
+    );
 
     assert!(
         texts.iter().any(|(e, t)| *e == view && t == SEED),
@@ -142,13 +145,4 @@ fn plain_vm_component_round_trips_two_way() {
         Some(EDIT),
         "UI→Rust writeback never reached the DemoVm component; titles {final_titles:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

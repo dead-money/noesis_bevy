@@ -13,16 +13,14 @@
 //!   `cargo test -p noesis_bevy --test headless_app_commands -- --nocapture`
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::commands::{CommandsDef, NoesisCommandInvoked, NoesisCommands};
-use noesis_bevy::{
-    NoesisCamera, NoesisInputEvent, NoesisInputQueue, NoesisPlugin, NoesisView, XamlRegistry,
-};
+use noesis_bevy::{NoesisCamera, NoesisInputEvent, NoesisInputQueue, NoesisView, XamlRegistry};
 use noesis_runtime::view::MouseButton;
+
+mod common;
+use common::{headless_app, run_until};
 
 const VIEW_W: u32 = 64;
 const VIEW_H: u32 = 32;
@@ -30,7 +28,6 @@ const VIEW_H: u32 = 32;
 // Wait for scene build + DataContext attach + binding resolution before clicking.
 const CLICK_FIRE_AT_FRAME: usize = 14;
 const CLICK_PARAM_AT_FRAME: usize = 20;
-const EXIT_AT_FRAME: usize = 60;
 
 const PAYLOAD: &str = "payload-42";
 
@@ -77,25 +74,10 @@ fn left_click(queue: &mut NoesisInputQueue, x: i32, y: i32) {
 
 #[test]
 fn ui_command_invocation_surfaces_message_with_decoded_parameter() {
-    noesis_license_from_env();
-
     let collected: Arc<Mutex<Vec<Invocation>>> = Arc::new(Mutex::new(Vec::new()));
     let view_id: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_id);
     app.add_systems(
@@ -127,8 +109,7 @@ fn ui_command_invocation_surfaces_message_with_decoded_parameter() {
         Update,
         move |mut frame: Local<usize>,
               mut queue: ResMut<NoesisInputQueue>,
-              mut invoked: MessageReader<NoesisCommandInvoked>,
-              mut exit: MessageWriter<AppExit>| {
+              mut invoked: MessageReader<NoesisCommandInvoked>| {
             *frame += 1;
 
             if *frame == CLICK_FIRE_AT_FRAME {
@@ -146,14 +127,25 @@ fn ui_command_invocation_surfaces_message_with_decoded_parameter() {
                     ev.parameter.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: stop once both commands have surfaced for the view (the
+    // parameterless Fire and the parameterized FireParam). Both clicks are frame-
+    // gated in the Update system above, so this passes only after they fire.
+    let pred_collected = Arc::clone(&collected);
+    let pred_view = Arc::clone(&view_id);
+    let both_invoked = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let got = pred_collected.lock().unwrap();
+        got.iter()
+            .any(|(_, e, name, param)| *e == view && name == "Fire" && param.is_none())
+            && got.iter().any(|(_, e, name, param)| {
+                *e == view && name == "FireParam" && param.as_deref() == Some(PAYLOAD)
+            })
+    });
 
     let view = view_id.lock().unwrap().expect("view was never spawned");
     let got = collected.lock().unwrap().clone();
@@ -161,6 +153,11 @@ fn ui_command_invocation_surfaces_message_with_decoded_parameter() {
     for (f, e, name, param) in &got {
         eprintln!("  frame {f}: {e:?} {name} param={param:?}");
     }
+
+    assert!(
+        both_invoked,
+        "both commands never surfaced within 240 frames; got {got:?}",
+    );
 
     assert!(
         got.iter()
@@ -198,13 +195,4 @@ fn ui_command_invocation_surfaces_message_with_decoded_parameter() {
         got.iter().all(|(f, _, _, _)| *f >= CLICK_FIRE_AT_FRAME),
         "a command was invoked before the synthetic click; got {got:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

@@ -9,17 +9,17 @@
 //! global observer must receive a `UiClicked` targeting that row's entity.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::routed_events::MouseButton;
 use noesis_bevy::{
-    ListedIn, NoesisCamera, NoesisListAppExt, NoesisPlugin, NoesisView, NoesisViewModel, UiClicked,
-    UiList, XamlRegistry,
+    ListedIn, NoesisCamera, NoesisListAppExt, NoesisView, NoesisViewModel, UiClicked, UiList,
+    XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 // A non-virtualizing ItemsControl (default StackPanel items panel) whose rows are
 // fixed-height, full-width, hit-testable Borders, so each row realizes headless
@@ -49,32 +49,16 @@ struct Row {
 
 const PRESS_AT: usize = 30;
 const RELEASE_AT: usize = 32;
-const EXIT_AT: usize = 64;
 
 /// What an observer captured off a `UiClicked`: (target entity, view).
 type Observed = Vec<(Entity, Entity)>;
 
 #[test]
 fn list_row_click_triggers_uiclicked_targeting_the_row() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<Row>();
 
     // Global observer: the push-based half of Primitive 3, per row.
@@ -141,9 +125,7 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
 
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut input: ResMut<NoesisInputQueue>,
-              mut exit: MessageWriter<AppExit>| {
+        move |mut frame: Local<usize>, mut input: ResMut<NoesisInputQueue>| {
             *frame += 1;
             // Click the top row (A), centered at y=20 of its 40px container.
             if *frame == PRESS_AT {
@@ -163,13 +145,22 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
                     button: MouseButton::Left,
                 });
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit as soon as the observer sees a UiClicked targeting the top row (A).
+    let pred_obs = Arc::clone(&observed);
+    let pred_entities = Arc::clone(&entities);
+    let fired = run_until(&mut app, 160, move |_app| {
+        let Some((_view, a, _b, _c)) = *pred_entities.lock().unwrap() else {
+            return false;
+        };
+        pred_obs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(target, _)| *target == a)
+    });
 
     let (view, a, _b, _c) = entities.lock().unwrap().expect("rows spawned");
     let got = observed.lock().unwrap().clone();
@@ -178,6 +169,11 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
         eprintln!("  target={target:?} view={v:?}");
     }
 
+    assert!(
+        fired,
+        "observer never received a UiClicked targeting the clicked row entity (A) \
+         within 160 frames; observed {got:?}",
+    );
     let hit = got
         .iter()
         .find(|(target, _)| *target == a)
@@ -186,13 +182,4 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
         hit.1, view,
         "per-row UiClicked.view should be the owning view entity",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

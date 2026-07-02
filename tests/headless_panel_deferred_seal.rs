@@ -10,15 +10,15 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    NoesisCamera, NoesisPanelAppExt, NoesisPanelText, NoesisPanelTextChanged, NoesisPlugin,
-    NoesisView, SealPanel, UiPanel, XamlRegistry,
+    NoesisCamera, NoesisPanelAppExt, NoesisPanelText, NoesisPanelTextChanged, NoesisView,
+    SealPanel, UiPanel, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -30,30 +30,14 @@ use ecs_ui::{Health, Score};
 // the panel is sealed once the contributor is done.
 const ADD_SCORE_AT: usize = 8;
 const SEAL_AT: usize = 12;
-const EXIT_AT: usize = 60;
 
 #[test]
 fn deferred_seal_binds_a_late_added_field() {
-    noesis_license_from_env();
-
     // Latest (name -> text) captured from the read-back.
     let captured: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let panel: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_panel_field::<Health>()
         .add_noesis_panel_field::<Score>();
 
@@ -96,8 +80,7 @@ fn deferred_seal_binds_a_late_added_field() {
         Update,
         move |mut frame: Local<usize>,
               mut commands: Commands,
-              mut reads: MessageReader<NoesisPanelTextChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut reads: MessageReader<NoesisPanelTextChanged>| {
             *frame += 1;
             for ev in reads.read() {
                 captured_sys
@@ -112,15 +95,25 @@ fn deferred_seal_binds_a_late_added_field() {
             if *frame == SEAL_AT {
                 commands.entity(p).insert(SealPanel);
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once BOTH the spawn-time Health and the late-added Score have bound and
+    // read back through the panel. A broken deferred seal would freeze on Health
+    // alone and Score would never arrive, timing this out.
+    let pred_captured = Arc::clone(&captured);
+    let bound = run_until(&mut app, 240, move |_app| {
+        let snap = pred_captured.lock().unwrap();
+        snap.get(ecs_ui::HUD_HEALTH_VALUE).map(String::as_str) == Some("100")
+            && snap.get(ecs_ui::HUD_SCORE_VALUE).map(String::as_str) == Some("7")
+    });
 
     let snap = captured.lock().unwrap().clone();
+    assert!(
+        bound,
+        "deferred panel never bound both Health and the late-added Score within \
+         240 frames; reads {snap:?}",
+    );
     // The component present at spawn binds.
     assert_eq!(
         snap.get(ecs_ui::HUD_HEALTH_VALUE).map(String::as_str),
@@ -134,13 +127,4 @@ fn deferred_seal_binds_a_late_added_field() {
         Some("7"),
         "late-added Score did not bind; the deferred seal didn't capture it; reads {snap:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

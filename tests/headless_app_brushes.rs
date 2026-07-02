@@ -14,18 +14,17 @@
 //! read-back to `unsafe_code = forbid` code.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     BrushReadback, BrushTarget, GradientStop, NoesisBrushChanged, NoesisBrushes, NoesisCamera,
-    NoesisPlugin, NoesisView, XamlRegistry,
+    NoesisView, XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
 const SET_AT_FRAME: usize = 10;
-const EXIT_AT_FRAME: usize = 60;
 
 // Distinct-per-channel colors: every channel differs within a color *and* across
 // colors, so a swapped channel, a zeroed channel, or a cross-element/cross-target
@@ -51,25 +50,10 @@ type Observed = Vec<(Entity, String, BrushTarget, BrushReadback)>;
 
 #[test]
 fn brushes_bridge_paints_and_reads_back() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -102,8 +86,7 @@ fn brushes_bridge_paints_and_reads_back() {
         Update,
         move |mut frame: Local<usize>,
               mut q: Query<&mut NoesisBrushes>,
-              mut changes: MessageReader<NoesisBrushChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisBrushChanged>| {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
@@ -137,14 +120,38 @@ fn brushes_bridge_paints_and_reads_back() {
                     ev.readback,
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // The latest readback for a (view, name, target) triple.
+    let last_for =
+        |got: &Observed, view: Entity, name: &str, target: BrushTarget| -> Option<BrushReadback> {
+            got.iter()
+                .rfind(|(e, n, t, _)| *e == view && n == name && *t == target)
+                .map(|(_, _, _, r)| *r)
+        };
+
+    // Event-driven exit: stop once every painted target has read back (the five
+    // solids plus the gradient), not after a padded frame count.
+    let pred_observed = Arc::clone(&observed);
+    let pred_view = Arc::clone(&view_entity);
+    let painted = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let got = pred_observed.lock().unwrap();
+        last_for(&got, view, "Panel", BrushTarget::Background)
+            == Some(BrushReadback::Solid(PANEL_BG))
+            && last_for(&got, view, "Panel2", BrushTarget::Background)
+                == Some(BrushReadback::Solid(PANEL2_BG))
+            && last_for(&got, view, "Label", BrushTarget::Foreground)
+                == Some(BrushReadback::Solid(LABEL_FG))
+            && last_for(&got, view, "Bar", BrushTarget::Fill)
+                == Some(BrushReadback::Solid(BAR_FILL))
+            && last_for(&got, view, "Bar", BrushTarget::Stroke)
+                == Some(BrushReadback::Solid(BAR_STROKE))
+            && last_for(&got, view, "Grad", BrushTarget::Fill) == Some(BrushReadback::NonSolid)
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -154,10 +161,13 @@ fn brushes_bridge_paints_and_reads_back() {
     }
 
     let last = |name: &str, target: BrushTarget| -> Option<BrushReadback> {
-        got.iter()
-            .rfind(|(e, n, t, _)| *e == view && n == name && *t == target)
-            .map(|(_, _, _, r)| *r)
+        last_for(&got, view, name, target)
     };
+
+    assert!(
+        painted,
+        "brush read-backs never all landed within 240 frames; observed {got:?}",
+    );
 
     assert_eq!(
         last("Panel", BrushTarget::Background),
@@ -202,13 +212,4 @@ fn brushes_bridge_paints_and_reads_back() {
         !got.iter().any(|(_, n, _, _)| n == "Other"),
         "an un-targeted element must not emit a brush read-back",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

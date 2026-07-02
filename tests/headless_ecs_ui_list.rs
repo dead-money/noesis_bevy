@@ -8,17 +8,17 @@
 //! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::input::{NoesisInputEvent, NoesisInputQueue};
 use noesis_bevy::routed_events::MouseButton;
 use noesis_bevy::{
-    ListedIn, NoesisCamera, NoesisListAppExt, NoesisListOps, NoesisListSelection, NoesisPlugin,
-    NoesisView, Selected, UiClicked, UiList, XamlRegistry,
+    ListedIn, NoesisCamera, NoesisListAppExt, NoesisListOps, NoesisListSelection, NoesisView,
+    Selected, UiClicked, UiList, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 #[allow(dead_code)]
 #[path = "../examples/ecs_ui.rs"]
@@ -62,32 +62,16 @@ const UPDATE_AT: usize = 36; // mutate a non-order field -> update-only
 const REORDER_AT: usize = 44; // flip sort -> Move ops; selection must survive
 const CAPTURE_REORDER_AT: usize = 50;
 const REMOVE_AT: usize = 54; // despawn -> removes op
-const EXIT_AT: usize = 66;
 
 #[test]
 fn list_reconciles_minimally_and_row_click_selects() {
-    noesis_license_from_env();
-
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let flags: Arc<Mutex<OpFlags>> = Arc::new(Mutex::new(OpFlags::default()));
     let row_clicks: Arc<Mutex<Vec<Entity>>> = Arc::new(Mutex::new(Vec::new()));
     let sel_after_click: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_reorder: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
     app.add_noesis_list::<Item>();
 
     // Capture row-targeted clicks, and drive selection with the EXAMPLE's own
@@ -152,8 +136,7 @@ fn list_reconciles_minimally_and_row_click_selects() {
               mut sel_msgs: MessageReader<NoesisListSelection>,
               mut lists: Query<&mut UiList>,
               mut items: Query<&mut Item>,
-              selected_q: Query<Entity, With<Selected>>,
-              mut exit: MessageWriter<AppExit>| {
+              selected_q: Query<Entity, With<Selected>>| {
             *frame += 1;
             let (_a, b, _c) = entities_sys.lock().unwrap().expect("rows spawned");
 
@@ -217,13 +200,27 @@ fn list_reconciles_minimally_and_row_click_selects() {
             if *frame == REMOVE_AT {
                 commands.entity(b).despawn();
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the scenario has fully played out: all reconcile op shapes seen,
+    // the row-B click captured, and selection survived the reorder onto B.
+    let pred_flags = Arc::clone(&flags);
+    let pred_clicks = Arc::clone(&row_clicks);
+    let pred_reorder = Arc::clone(&sel_after_reorder);
+    let pred_entities = Arc::clone(&entities);
+    let completed = run_until(&mut app, 240, move |_app| {
+        let Some((_a, b, _c)) = *pred_entities.lock().unwrap() else {
+            return false;
+        };
+        let f = pred_flags.lock().unwrap();
+        f.adds
+            && f.update_only
+            && f.moves
+            && f.removes
+            && pred_clicks.lock().unwrap().contains(&b)
+            && *pred_reorder.lock().unwrap() == Some(b)
+    });
 
     let (_a, b, _c) = entities.lock().unwrap().expect("rows spawned");
     let f = flags.lock().unwrap();
@@ -232,6 +229,12 @@ fn list_reconciles_minimally_and_row_click_selects() {
     let after_reorder = *sel_after_reorder.lock().unwrap();
     eprintln!(
         "--- row clicks: {clicks:?}; sel@click={after_click:?} sel@reorder={after_reorder:?} ---"
+    );
+
+    assert!(
+        completed,
+        "scenario never reached its terminal state (add/update/move/remove + \
+         row-B click + surviving selection) within 240 frames",
     );
 
     // Reconcile: the minimal op shapes, never a Reset.
@@ -261,13 +264,4 @@ fn list_reconciles_minimally_and_row_click_selects() {
         Some(b),
         "selection was lost across the reorder — Move did not preserve currency",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

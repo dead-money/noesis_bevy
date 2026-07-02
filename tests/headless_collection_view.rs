@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+mod common;
+
 use noesis_bevy::ItemValue;
 use noesis_bevy::items::{CollectionViewOp, ItemsBinding};
 use noesis_runtime::view::{FrameworkElement, View};
@@ -34,11 +36,8 @@ impl XamlProvider for InMem {
 
 #[test]
 fn collection_view_navigates_current_item() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
+    if let Some(lic) = common::noesis_license_from_env() {
+        noesis_runtime::set_license(&lic.name, &lic.key);
     }
     noesis_runtime::init();
 

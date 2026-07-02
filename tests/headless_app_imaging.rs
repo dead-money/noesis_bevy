@@ -1,4 +1,4 @@
-//! Integration test for the [`NoesisImaging`] bridge, headless with pipelined rendering.
+//! Integration test for the [`NoesisImaging`] bridge, on the headless harness.
 //!
 //! A `13x7` RGBA8 bitmap staged via [`NoesisImaging`] must drive `Pic.ActualWidth = 13`
 //! and `Pic.ActualHeight = 7`. Noesis sizes `<Image Stretch="None"/>` from the source
@@ -17,17 +17,15 @@
 //! Font-free XAML: only sizes are asserted, no font gate needed.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     DpKind, DpValue, ImageReadback, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisImageChanged,
-    NoesisImaging, NoesisPlugin, NoesisView, XamlRegistry,
+    NoesisImaging, NoesisView, XamlRegistry,
 };
 
-const EXIT_AT_FRAME: usize = 120;
+mod common;
+use common::{headless_app, run_until};
 
 const BMP_W: u32 = 13;
 const BMP_H: u32 = 7;
@@ -46,28 +44,13 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 
 #[test]
 fn imaging_bridge_drives_image_from_rust_bitmap() {
-    noesis_license_from_env();
-
     let dp_observed: Arc<Mutex<Vec<(Entity, String, String, DpValue)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let img_observed: Arc<Mutex<Vec<(Entity, String, ImageReadback)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -109,12 +92,8 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
     let img_sys = Arc::clone(&img_observed);
     app.add_systems(
         Update,
-        move |mut frame: Local<usize>,
-              mut dp_changes: MessageReader<NoesisDpChanged>,
-              mut img_changes: MessageReader<NoesisImageChanged>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-
+        move |mut dp_changes: MessageReader<NoesisDpChanged>,
+              mut img_changes: MessageReader<NoesisImageChanged>| {
             for ev in dp_changes.read() {
                 dp_sys.lock().unwrap().push((
                     ev.view,
@@ -129,14 +108,43 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
                     .unwrap()
                     .push((ev.view, ev.name.clone(), ev.readback));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Latest read-backs, keyed by the spawned view; read by the exit predicate.
+    let latest_img = |img: &[(Entity, String, ImageReadback)],
+                      view: Entity,
+                      name: &str|
+     -> Option<ImageReadback> {
+        img.iter()
+            .rfind(|(e, n, _)| *e == view && n == name)
+            .map(|(_, _, rb)| *rb)
+    };
+    let latest_dp = |dp: &[(Entity, String, String, DpValue)],
+                     view: Entity,
+                     name: &str,
+                     prop: &str|
+     -> Option<DpValue> {
+        dp.iter()
+            .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
+            .map(|(_, _, _, v)| v.clone())
+    };
+
+    // Event-driven exit: stop once the staged bitmap has sized Pic on both channels
+    // and the negative control has reported its default 0.
+    let pred_dp = Arc::clone(&dp_observed);
+    let pred_img = Arc::clone(&img_observed);
+    let pred_view = Arc::clone(&view_entity);
+    let converged = run_until(&mut app, 240, |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        let img = pred_img.lock().unwrap();
+        let dp = pred_dp.lock().unwrap();
+        latest_img(&img, view, "Pic").map(|rb| rb.actual_size) == Some([BMP_W as f32, BMP_H as f32])
+            && latest_dp(&dp, view, "Pic", "ActualWidth") == Some(DpValue::F32(BMP_W as f32))
+            && latest_dp(&dp, view, "Empty", "ActualWidth") == Some(DpValue::F32(0.0))
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let dp = dp_observed.lock().unwrap().clone();
@@ -151,18 +159,13 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
         eprintln!("  {e:?} {name}.{prop} = {value:?}");
     }
 
-    let latest_img = |name: &str| -> Option<ImageReadback> {
-        img.iter()
-            .rfind(|(e, n, _)| *e == view && n == name)
-            .map(|(_, _, rb)| *rb)
-    };
-    let latest_dp = |name: &str, prop: &str| -> Option<DpValue> {
-        dp.iter()
-            .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
-            .map(|(_, _, _, v)| v.clone())
-    };
+    assert!(
+        converged,
+        "imaging never sized Pic from the staged bitmap within 240 frames; \
+         img {img:?} dp {dp:?}",
+    );
 
-    let pic = latest_img("Pic").expect("expected a NoesisImageChanged for Pic");
+    let pic = latest_img(&img, view, "Pic").expect("expected a NoesisImageChanged for Pic");
     assert!(
         pic.has_source,
         "Pic should have a non-null Source (declared in XAML)",
@@ -177,7 +180,7 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
 
     // Independent corroboration via the generic DP bridge.
     assert_eq!(
-        latest_dp("Pic", "ActualWidth"),
+        latest_dp(&dp, view, "Pic", "ActualWidth"),
         Some(DpValue::F32(BMP_W as f32)),
         "imaging: Pic.ActualWidth should resolve to the staged bitmap width {BMP_W}",
     );
@@ -185,17 +188,8 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
     // Negative control: unregistered URI stays 0, proving size came from staged bytes
     // and the bridge only touched its target.
     assert_eq!(
-        latest_dp("Empty", "ActualWidth"),
+        latest_dp(&dp, view, "Empty", "ActualWidth"),
         Some(DpValue::F32(0.0)),
         "imaging: an Image with an unregistered Source must measure to 0",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

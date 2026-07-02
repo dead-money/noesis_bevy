@@ -12,17 +12,16 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisText, NoesisUi,
-    NoesisView, XamlRegistry,
+    DpKind, DpValue, NoesisCamera, NoesisDp, NoesisDpChanged, NoesisText, NoesisUi, NoesisView,
+    XamlRegistry,
 };
 
-const FRAMES: usize = 60;
+mod common;
+use common::{headless_app, run_until};
+
 const WRITE_AT_FRAME: usize = 2;
 const REGISTER_AT_FRAME: usize = 8;
 const TARGET: &str = "Label";
@@ -35,30 +34,12 @@ const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xa
 
 #[test]
 fn write_without_spawning_the_bridge_survives() {
-    noesis_runtime::set_license(
-        &std::env::var("NOESIS_LICENSE_NAME").unwrap_or_default(),
-        &std::env::var("NOESIS_LICENSE_KEY").unwrap_or_default(),
-    );
-
     let observed: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(Vec::new()));
     // Records that the auto-attached components were reachable through NoesisUi
     // even though the test never spawned them.
     let bridges_present = Arc::new(AtomicBool::new(false));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     // A bare view: no NoesisText, no NoesisDp. Required components attach them.
     app.add_systems(Startup, |mut commands: Commands| {
@@ -80,8 +61,7 @@ fn write_without_spawning_the_bridge_survives() {
         move |mut frame: Local<usize>,
               mut reg: ResMut<XamlRegistry>,
               mut writer: NoesisUi<(&mut NoesisText, &mut NoesisDp)>,
-              mut changed: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changed: MessageReader<NoesisDpChanged>| {
             *frame += 1;
 
             // Write before the scene exists, through the auto-attached bridges.
@@ -102,27 +82,31 @@ fn write_without_spawning_the_bridge_survives() {
                     }
                 }
             }
-            if *frame >= FRAMES {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    let exit = app.run();
+    // Exit once the written value has been read back through the auto-attached DP.
+    let pred_observed = Arc::clone(&observed);
+    let applied = run_until(&mut app, 240, move |_app| {
+        pred_observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, text)| text == WRITTEN)
+    });
 
     assert!(
         bridges_present.load(Ordering::SeqCst),
         "NoesisText/NoesisDp were not auto-attached to the bare NoesisView"
     );
     let seen = observed.lock().unwrap().clone();
-    let applied = seen.iter().find(|(_, text)| text == WRITTEN);
     assert!(
-        applied.is_some(),
-        "write never reached the element; observed: {seen:?}"
+        applied,
+        "write never reached the element within 240 frames; observed: {seen:?}"
     );
+    let applied_hit = seen.iter().find(|(_, text)| text == WRITTEN).unwrap();
     assert!(
-        applied.unwrap().0 >= REGISTER_AT_FRAME,
+        applied_hit.0 >= REGISTER_AT_FRAME,
         "write applied before the scene could build"
     );
-    assert!(matches!(exit, AppExit::Success), "app exited with {exit:?}");
 }

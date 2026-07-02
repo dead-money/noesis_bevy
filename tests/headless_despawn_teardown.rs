@@ -12,19 +12,16 @@
 //! Font-free XAML so the scene builds without a font folder.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
-use noesis_bevy::{
-    NoesisCamera, NoesisDiagnostics, NoesisDp, NoesisPlugin, NoesisView, XamlRegistry,
-};
+use noesis_bevy::{NoesisCamera, NoesisDiagnostics, NoesisDp, NoesisView, XamlRegistry};
+
+mod common;
+use common::{headless_app, run_until};
 
 const CAPTURE_PRE_AT: usize = 20;
 const DESPAWN_AT: usize = 21;
 const CAPTURE_POST_AT: usize = 45;
-const EXIT_AT: usize = 55;
 
 const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     x:Name="Panel"
@@ -33,25 +30,10 @@ const XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xa
 
 #[test]
 fn despawning_a_view_reaps_its_noesis_state() {
-    noesis_license_from_env();
-
     let pre: Arc<Mutex<Option<NoesisDiagnostics>>> = Arc::new(Mutex::new(None));
     let post: Arc<Mutex<Option<NoesisDiagnostics>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     app.add_systems(
         Startup,
@@ -82,8 +64,7 @@ fn despawning_a_view_reaps_its_noesis_state() {
         move |mut frame: Local<usize>,
               diag: Res<NoesisDiagnostics>,
               views: Query<Entity, With<NoesisView>>,
-              mut commands: Commands,
-              mut exit: MessageWriter<AppExit>| {
+              mut commands: Commands| {
             *frame += 1;
             if *frame == CAPTURE_PRE_AT {
                 *pre_sys.lock().unwrap() = Some(*diag);
@@ -97,17 +78,25 @@ fn despawning_a_view_reaps_its_noesis_state() {
             if *frame == CAPTURE_POST_AT {
                 *post_sys.lock().unwrap() = Some(*diag);
             }
-            if *frame >= EXIT_AT {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the post-despawn snapshot shows the view's scene reaped.
+    let pred_post = Arc::clone(&post);
+    let reaped = run_until(
+        &mut app,
+        240,
+        move |_app| matches!(*pred_post.lock().unwrap(), Some(d) if d.live_scenes == 0),
+    );
 
     let pre = snapshot(&pre, "pre-despawn");
     let post = snapshot(&post, "post-despawn");
     eprintln!("--- despawn teardown pre={pre:?} post={post:?} ---");
+
+    assert!(
+        reaped,
+        "view scene never reaped to 0 live scenes within 240 frames; post={post:?}",
+    );
 
     // Before despawn: the scene built (so its side-table entry exists) and the
     // bridges resolved at least one name through FFI.
@@ -141,13 +130,4 @@ fn snapshot(slot: &Arc<Mutex<Option<NoesisDiagnostics>>>, which: &str) -> Noesis
     slot.lock()
         .unwrap()
         .unwrap_or_else(|| panic!("{which} diagnostics snapshot captured"))
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

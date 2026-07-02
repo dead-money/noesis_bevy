@@ -15,21 +15,22 @@
 //! Font-free XAML; no glyph rendering involved.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     ConvertArg, Converted, DpKind, DpValue, NoesisBinding, NoesisCamera, NoesisDiagnostics,
-    NoesisDp, NoesisDpChanged, NoesisPlugin, NoesisView, SourceSpec, XamlRegistry,
+    NoesisDp, NoesisDpChanged, NoesisView, SourceSpec, XamlRegistry,
 };
 
+mod common;
+use common::{headless_app, run_until};
+
+// Stimulus sequence: settle the live binding, drop it, mutate the source past the
+// reap, then snapshot. The run's exit is the terminal post-removal predicate.
 const CAPTURE_PRE_AT: usize = 25;
 const REMOVE_AT: usize = 26;
 const MUTATE_AT: usize = 30;
 const CAPTURE_POST_AT: usize = 50;
-const EXIT_AT_FRAME: usize = 70;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -53,27 +54,12 @@ fn upper_binding() -> NoesisBinding {
 
 #[test]
 fn removing_binding_from_a_live_view_reaps_and_stops_it() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let pre: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
     let post: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -116,8 +102,7 @@ fn removing_binding_from_a_live_view_reaps_and_stops_it() {
               mut commands: Commands,
               diag: Res<NoesisDiagnostics>,
               mut dps: Query<&mut NoesisDp>,
-              mut changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisDpChanged>| {
             *frame += 1;
             for ev in changes.read() {
                 observed_sys.lock().unwrap().push((
@@ -147,13 +132,17 @@ fn removing_binding_from_a_live_view_reaps_and_stops_it() {
             if *frame == CAPTURE_POST_AT {
                 *post_sys.lock().unwrap() = Some((diag.live_bindings, diag.live_scenes));
             }
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the post-removal snapshot has been taken and shows the binding
+    // entries drained while the scene stayed live.
+    let pred_post = Arc::clone(&post);
+    let reaped = run_until(
+        &mut app,
+        240,
+        move |_app| matches!(*pred_post.lock().unwrap(), Some((bindings, scenes)) if bindings == 0 && scenes == 1),
+    );
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -172,6 +161,12 @@ fn removing_binding_from_a_live_view_reaps_and_stops_it() {
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
             .map(|(_, _, _, v)| v.clone())
     };
+
+    assert!(
+        reaped,
+        "binding entries never drained to 0 (with the scene still live) within \
+         240 frames; pre=(bindings={pre_bindings}, scenes={pre_scenes})",
+    );
 
     // Control: the binding delivered "HELLO" while it was live.
     assert!(
@@ -202,13 +197,4 @@ fn removing_binding_from_a_live_view_reaps_and_stops_it() {
         post_scenes, 1,
         "removing NoesisBinding must NOT tear down the view's scene; {post_scenes} live scenes",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

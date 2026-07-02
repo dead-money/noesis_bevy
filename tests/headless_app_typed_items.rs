@@ -12,22 +12,20 @@
 //! Theme-free XAML with no `ItemTemplate`; no font gate needed.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    ItemValue, NoesisCamera, NoesisItems, NoesisItemsCurrent, NoesisPlugin, NoesisView,
-    XamlRegistry,
+    ItemValue, NoesisCamera, NoesisItems, NoesisItemsCurrent, NoesisView, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const VIEW_W: u32 = 120;
 const VIEW_H: u32 = 80;
 
 // wait for scene to be live; one-shot change-detection apply is lost before the control exists
 const SET_AT_FRAME: usize = 12;
-const EXIT_AT_FRAME: usize = 60;
 
 const XAML: &str = r##"<ListBox xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -38,25 +36,10 @@ type Observed = Vec<(usize, Entity, String, usize, i32, Option<ItemValue>)>;
 
 #[test]
 fn typed_items_populate_select_and_read_back() {
-    noesis_license_from_env();
-
     let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -85,8 +68,7 @@ fn typed_items_populate_select_and_read_back() {
         Update,
         move |mut frame: Local<usize>,
               mut q: Query<&mut NoesisItems>,
-              mut changes: MessageReader<NoesisItemsCurrent>,
-              mut exit: MessageWriter<AppExit>| {
+              mut changes: MessageReader<NoesisItemsCurrent>| {
             *frame += 1;
 
             if *frame == SET_AT_FRAME {
@@ -107,14 +89,26 @@ fn typed_items_populate_select_and_read_back() {
                     ev.current.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Exit once the driven selection has round-tripped back: 3 items present,
+    // index 1 current, unboxing to the typed i32 20.
+    let pred_observed = Arc::clone(&observed);
+    let pred_view = Arc::clone(&view_entity);
+    let read_back = run_until(&mut app, 240, move |_app| {
+        let Some(view) = *pred_view.lock().unwrap() else {
+            return false;
+        };
+        pred_observed
+            .lock()
+            .unwrap()
+            .iter()
+            .rfind(|(_, e, name, _, _, _)| *e == view && name == "Ports")
+            .is_some_and(|(_, _, _, count, idx, current)| {
+                *count == 3 && *idx == 1 && *current == Some(ItemValue::I32(20))
+            })
+    });
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let got = observed.lock().unwrap().clone();
@@ -122,6 +116,12 @@ fn typed_items_populate_select_and_read_back() {
     for (f, e, name, count, idx, current) in &got {
         eprintln!("  f{f} {e:?} {name} count={count} idx={idx} current={current:?}");
     }
+
+    assert!(
+        read_back,
+        "typed items never converged (count 3 / index 1 / I32(20)) within 240 \
+         frames; observed {got:?}",
+    );
 
     let latest = got
         .iter()
@@ -152,13 +152,4 @@ fn typed_items_populate_select_and_read_back() {
             .all(|(f, _, _, _, sel, _)| *sel != 1 || *f >= SET_AT_FRAME),
         "selected_index 1 surfaced before the drive frame; got {got:?}",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

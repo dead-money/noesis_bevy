@@ -8,20 +8,19 @@
 //! change replayed the whole accumulated history).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
     DpKind, DpValue, FocusNavigationDirection, NoesisCamera, NoesisDp, NoesisDpChanged,
-    NoesisFocus, NoesisFocusControl, NoesisPlugin, NoesisView, XamlRegistry,
+    NoesisFocus, NoesisFocusControl, NoesisView, XamlRegistry,
 };
+
+mod common;
+use common::{headless_app, run_until};
 
 const FOCUS_AT_FRAME: usize = 10;
 const MOVE_AT_FRAME: usize = 25;
 const CHECK_AT_FRAME: usize = 40;
-const EXIT_AT_FRAME: usize = 60;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -42,26 +41,11 @@ type ObservedDp = Vec<(Entity, String, DpValue)>;
 
 #[test]
 fn focus_control_one_shots_drain_after_apply() {
-    noesis_license_from_env();
-
     let dp_seen: Arc<Mutex<ObservedDp>> = Arc::new(Mutex::new(Vec::new()));
     let moves_after_check: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = headless_app();
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
@@ -92,8 +76,7 @@ fn focus_control_one_shots_drain_after_apply() {
         Update,
         move |mut frame: Local<usize>,
               mut q: Query<(&mut NoesisFocus, &mut NoesisFocusControl)>,
-              mut dp_changes: MessageReader<NoesisDpChanged>,
-              mut exit: MessageWriter<AppExit>| {
+              mut dp_changes: MessageReader<NoesisDpChanged>| {
             *frame += 1;
 
             if *frame == FOCUS_AT_FRAME {
@@ -120,14 +103,21 @@ fn focus_control_one_shots_drain_after_apply() {
                     ev.value.clone(),
                 ));
             }
-
-            if *frame >= EXIT_AT_FRAME {
-                exit.write(AppExit::Success);
-            }
         },
     );
 
-    app.run();
+    // Event-driven exit: the move/check are frame-gated (the move must land, then
+    // a later frame reads back the drained `moves` len), so exit once that post-
+    // apply snapshot exists.
+    let pred_moves = Arc::clone(&moves_after_check);
+    let checked = run_until(&mut app, 240, move |_app| {
+        pred_moves.lock().unwrap().is_some()
+    });
+
+    assert!(
+        checked,
+        "post-apply `moves` snapshot never captured within 240 frames",
+    );
 
     let view = view_entity.lock().unwrap().expect("view spawned");
     let dp = dp_seen.lock().unwrap().clone();
@@ -151,13 +141,4 @@ fn focus_control_one_shots_drain_after_apply() {
         Some(0),
         "moves must be drained after apply (was push-only pre-fix)",
     );
-}
-
-fn noesis_license_from_env() {
-    if let (Ok(name), Ok(key)) = (
-        std::env::var("NOESIS_LICENSE_NAME"),
-        std::env::var("NOESIS_LICENSE_KEY"),
-    ) {
-        noesis_runtime::set_license(&name, &key);
-    }
 }

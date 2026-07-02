@@ -8,8 +8,9 @@
 //! The fix splits the work: a render-world system resolves each target's GPU
 //! texture and hands it back through the baker's shared state; the main-world
 //! system pulls the resolved texture and bakes. This test queues one label, runs
-//! with pipelined rendering on (so both worlds are live), and asserts the bake
-//! completes ([`NoesisLabelBaker::pending_count`] drops to zero) without panic.
+//! on the real render graph ([`render_app`], so both worlds are live), and
+//! asserts the bake completes ([`NoesisLabelBaker::pending_count`] drops to zero)
+//! without panic.
 //!
 //! Skips (passes) when `$NOESIS_SDK_DIR` is unset: the bake gates on an installed
 //! font, and the font is read from the SDK at runtime, never vendored.
@@ -18,18 +19,20 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
-use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{
-    FontRegistry, NoesisCamera, NoesisLabelBaker, NoesisLabelBakerPlugin, NoesisPlugin, NoesisView,
-    XamlRegistry,
+    FontRegistry, NoesisCamera, NoesisLabelBaker, NoesisLabelBakerPlugin, NoesisView, XamlRegistry,
 };
 
-const FRAMES: usize = 180;
+mod common;
+use common::{render_app, run_until, settle};
+
+const CAP: usize = 240;
+// Frames pumped after the bake drains, before the app drops. The scene can leave
+// Bevy async-compiling a render pipeline on a driver thread; dropping mid-compile
+// segfaults the GPU driver, so we drain that first.
+const SETTLE_FRAMES: usize = 180;
 const BAKE_URI: &str = "bake_label.xaml";
 
 // A named TextBlock the bake writes into. Text forces the font gate, which is
@@ -54,33 +57,13 @@ fn sdk_font() -> Option<(PathBuf, Vec<u8>)> {
 
 #[test]
 fn bake_label_completes_without_cross_world_panic() {
-    noesis_runtime::set_license(
-        &std::env::var("NOESIS_LICENSE_NAME").unwrap_or_default(),
-        &std::env::var("NOESIS_LICENSE_KEY").unwrap_or_default(),
-    );
-
     let Some((_, font_bytes)) = sdk_font() else {
         eprintln!("NOESIS_SDK_DIR unset or font missing; skipping bake_label test");
         return;
     };
     let font_bytes = Arc::new(font_bytes);
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
-                ..default()
-            }),
-    );
-    // Pipelined rendering on: the render world and main world run concurrently,
-    // exercising the cross-world texture handoff the fix relies on.
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(4)));
-    app.add_plugins(NoesisPlugin::default());
+    let mut app = render_app();
     app.add_plugins(NoesisLabelBakerPlugin);
 
     app.add_systems(
@@ -127,33 +110,16 @@ fn bake_label_completes_without_cross_world_panic() {
         },
     );
 
-    // Latch completion when the bake drains, but keep running to a fixed frame
-    // budget before exiting. Exiting the instant the bake finishes can tear the
-    // app down while Bevy is still async-compiling a pipeline on a background
-    // thread, which segfaults the GPU driver. A fixed budget lets that settle,
-    // matching the other headless tests.
-    let completed = Arc::new(AtomicBool::new(false));
-    let completed_sys = Arc::clone(&completed);
-    app.add_systems(
-        Update,
-        move |mut frame: Local<usize>,
-              baker: Res<NoesisLabelBaker>,
-              mut exit: MessageWriter<AppExit>| {
-            *frame += 1;
-            if baker.pending_count() == 0 {
-                completed_sys.store(true, Ordering::SeqCst);
-            }
-            if *frame >= FRAMES {
-                exit.write(AppExit::Success);
-            }
-        },
-    );
-
-    let exit = app.run();
-
+    // Drive until the bake drains. The predicate is the real success condition
+    // (no cross-world panic occurred and pending fell to zero), not a frame count.
+    let completed = run_until(&mut app, CAP, |app| {
+        app.world().resource::<NoesisLabelBaker>().pending_count() == 0
+    });
     assert!(
-        completed.load(Ordering::SeqCst),
-        "bake never completed within {FRAMES} frames (pending labels remain)"
+        completed,
+        "bake never completed within {CAP} frames (pending labels remain)"
     );
-    assert!(matches!(exit, AppExit::Success), "app exited with {exit:?}");
+
+    // Drain any in-flight pipeline compile before dropping the app.
+    settle(&mut app, SETTLE_FRAMES);
 }
