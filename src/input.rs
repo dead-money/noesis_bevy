@@ -53,7 +53,7 @@ use bevy::input::{
     touch::{TouchInput, TouchPhase},
 };
 use bevy::prelude::*;
-use bevy::window::{CursorMoved, PrimaryWindow, WindowFocused, WindowResized};
+use bevy::window::{CursorLeft, CursorMoved, PrimaryWindow, WindowFocused, WindowResized};
 use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use noesis_runtime::view::{Key, MouseButton};
 
@@ -300,6 +300,31 @@ fn forward_cursor_moved(
     }
 }
 
+/// When the cursor leaves the primary window, move the Noesis pointer off-view
+/// so hover highlights clear and [`NoesisPointerOverUi`] resets — otherwise a
+/// pointer parked over UI as it exits keeps `over` true, wrongly suppressing
+/// 3D interaction. `CursorLeft` carries no position, so we send a move to a
+/// coordinate that hit-tests nothing.
+#[allow(clippy::needless_pass_by_value)]
+fn forward_cursor_left(
+    mut reader: MessageReader<CursorLeft>,
+    mut queue: ResMut<NoesisInputQueue>,
+    mut last: ResMut<LastPointer>,
+    primary_window: Single<Entity, With<PrimaryWindow>>,
+) {
+    let primary_window = *primary_window;
+    let mut left_primary = false;
+    for ev in reader.read() {
+        if ev.window == primary_window {
+            left_primary = true;
+        }
+    }
+    if left_primary {
+        queue.push_to_opt(last.target, NoesisInputEvent::MouseMove { x: -1, y: -1 });
+        last.valid = false;
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn forward_mouse_buttons(
     mut reader: MessageReader<MouseButtonInput>,
@@ -528,6 +553,7 @@ impl Plugin for NoesisInputPlugin {
                     clear_queue_before_push,
                     resize_noesis_scene,
                     forward_cursor_moved,
+                    forward_cursor_left,
                     forward_mouse_buttons,
                     forward_mouse_wheel,
                     forward_keyboard,

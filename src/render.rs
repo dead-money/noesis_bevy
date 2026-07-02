@@ -4230,6 +4230,11 @@ impl NoesisRenderState {
         // `values_mut().next()` is HashMap order and unstable across insertions,
         // so pick by `Entity` — the same rule the coordinate forwarders use.
         let Some(primary) = self.scenes.keys().min().copied() else {
+            // No live scenes: nothing can be under the pointer, so drop any stale
+            // "over UI" state (a view despawned while the pointer was over it must
+            // not keep suppressing 3D interaction). See also `apply_noesis_input`,
+            // which resets even on frames with no queued events.
+            self.pointer_over_ui = false;
             return;
         };
         if self.scenes.len() > 1 {
@@ -4277,7 +4282,7 @@ impl NoesisRenderState {
                     value,
                     horizontal: false,
                 } => {
-                    let _ = scene.view.scroll(x, y, value);
+                    over_ui = scene.view.scroll(x, y, value);
                 }
                 E::Scroll {
                     x,
@@ -4285,16 +4290,16 @@ impl NoesisRenderState {
                     value,
                     horizontal: true,
                 } => {
-                    let _ = scene.view.hscroll(x, y, value);
+                    over_ui = scene.view.hscroll(x, y, value);
                 }
                 E::TouchDown { x, y, id } => {
-                    let _ = scene.view.touch_down(x, y, id);
+                    over_ui = scene.view.touch_down(x, y, id);
                 }
                 E::TouchMove { x, y, id } => {
-                    let _ = scene.view.touch_move(x, y, id);
+                    over_ui = scene.view.touch_move(x, y, id);
                 }
                 E::TouchUp { x, y, id } => {
-                    let _ = scene.view.touch_up(x, y, id);
+                    over_ui = scene.view.touch_up(x, y, id);
                 }
                 E::KeyDown(k) => {
                     let _ = scene.view.key_down(k);
@@ -5252,10 +5257,17 @@ fn apply_noesis_input(
     let (Some(queue), Some(mut state)) = (queue, state) else {
         return;
     };
-    if queue.events.is_empty() {
+    if !queue.events.is_empty() {
+        state.apply_input(&queue.events);
+    } else if state.scenes.is_empty() {
+        // No events and no scenes: a view despawned while the pointer was over
+        // it would otherwise leave `pointer_over_ui` stuck true forever, wrongly
+        // suppressing 3D interaction. `apply_input` clears it when it runs, but
+        // teardown frames carry no events, so clear it here too.
+        state.pointer_over_ui = false;
+    } else {
         return;
     }
-    state.apply_input(&queue.events);
     // Publish on change only, so idle pointer frames don't churn change detection.
     if let Some(mut over_ui) = over_ui
         && over_ui.over != state.pointer_over_ui
