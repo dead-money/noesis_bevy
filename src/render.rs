@@ -1815,6 +1815,13 @@ impl NoesisRenderState {
             drop(entry);
         }
         self.failed_fragments.retain(|(ent, _)| *ent != entity);
+        // Panels are also valid targets for the click/keydown watches (both reap
+        // paths key into `self.panels`), so this terminal teardown must prune
+        // their dedupe snapshots just as [`Self::teardown_for`] does for views —
+        // otherwise a despawned watched panel leaks its entries forever.
+        self.last_click_target.retain(|(ent, _), _| *ent != entity);
+        self.last_keydown_swallow
+            .retain(|(ent, _), _| *ent != entity);
     }
 
     /// Poll panel `entity`'s watched fragment-scope names, returning `(name,
