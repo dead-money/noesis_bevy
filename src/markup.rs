@@ -37,7 +37,7 @@ pub use noesis_runtime::markup::{
 /// initialization (Bevy's default startup order suffices unless overridden).
 ///
 /// Non-send resource: [`MarkupExtensionRegistration`] holds `!Send`/`!Sync`
-/// Noesis handles, so this is stored via `init_non_send_resource` and accessed
+/// Noesis handles, so this is stored via `init_non_send` and accessed
 /// through `NonSendMut`.
 #[derive(Default)]
 pub struct NoesisMarkupExtensionRegistry {
@@ -71,7 +71,7 @@ pub struct NoesisMarkupExtensionPlugin;
 
 impl Plugin for NoesisMarkupExtensionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_non_send_resource::<NoesisMarkupExtensionRegistry>();
+        app.init_non_send::<NoesisMarkupExtensionRegistry>();
     }
 }
 
