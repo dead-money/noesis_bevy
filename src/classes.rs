@@ -69,7 +69,7 @@ pub use noesis_runtime::ffi::{ClassBase, PropType};
 /// startup order suffices unless you override it).
 ///
 /// Non-send resource: [`ClassRegistration`] holds `!Send`/`!Sync` Noesis handles,
-/// so it is stored via `init_non_send_resource` and accessed through `NonSendMut`.
+/// so it is stored via `init_non_send` and accessed through `NonSendMut`.
 /// Class registration is a main-thread, startup-time concern anyway, since Noesis
 /// is thread-affine.
 #[derive(Default)]
@@ -108,7 +108,7 @@ pub struct NoesisClassPlugin;
 
 impl Plugin for NoesisClassPlugin {
     fn build(&self, app: &mut App) {
-        app.init_non_send_resource::<NoesisClassRegistry>();
+        app.init_non_send::<NoesisClassRegistry>();
     }
 }
 

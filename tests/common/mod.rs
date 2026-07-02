@@ -88,6 +88,11 @@ pub fn render_app() -> App {
             // backend can abort the process during teardown (free(): invalid
             // pointer after the test passes) when JACK/PulseAudio are absent.
             .disable::<bevy::audio::AudioPlugin>()
+            // UI compositing never draws meshes; PBR's clustering and
+            // mesh-preprocessing compute pipelines are the one shader family
+            // whose in-driver JIT crashes (NVVM error 3, then DeviceLost) on
+            // Ada GPUs under the wgpu 29 stack. Skip compiling them at all.
+            .disable::<bevy::pbr::PbrPlugin>()
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,

@@ -30,8 +30,8 @@ default = []
 debug = ["bevy/debug"]
 
 [dependencies]
-bevy = "0.18"
-bevy_render = "0.18"
+bevy = "0.19"
+bevy_render = "0.19"
 bytemuck = { version = "1.25", features = ["derive"] }
 # The derive crate ships in this repo and releases in lockstep (path for local
 # dev, version for the published crate).
@@ -47,10 +47,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # move alongside O(1) Entity lookup.
 indexmap = "2"
 thiserror = "2"
-# Pinned to match Bevy 0.18's transitive wgpu version. Cargo dedupes them into a
+# Pinned to match Bevy 0.19's transitive wgpu version. Cargo dedupes them into a
 # single crate, so RenderDevice traits remain interchangeable between this
 # crate's wgpu types and Bevy's.
-wgpu = "27.0.1"
+wgpu = "29.0.3"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -518,12 +518,12 @@ impl WgpuRenderDevice {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("noesis_runtime pipeline layout"),
             bind_group_layouts: &[
-                &vs_uniform_bind_group_layout,
-                &ps_uniform_bind_group_layout,
-                &pattern_bind_group_layout,
-                &image_bind_group_layout,
+                Some(&vs_uniform_bind_group_layout),
+                Some(&ps_uniform_bind_group_layout),
+                Some(&pattern_bind_group_layout),
+                Some(&image_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipelines = PipelineCache::new(device.clone(), pipeline_layout, RT_COLOR_FORMAT);
@@ -1172,8 +1172,8 @@ fn build_sampler(device: &wgpu::Device, state: SamplerState) -> wgpu::Sampler {
         _ => wgpu::FilterMode::Linear,
     };
     let mipmap_filter = match state.mip_filter_raw() {
-        0 | 1 => wgpu::FilterMode::Nearest,
-        _ => wgpu::FilterMode::Linear,
+        0 | 1 => wgpu::MipmapFilterMode::Nearest,
+        _ => wgpu::MipmapFilterMode::Linear,
     };
     let lod_max = match state.mip_filter_raw() {
         0 => 0.25, // disabled: restrict to mip 0
@@ -1790,6 +1790,7 @@ impl RenderDevice for WgpuRenderDevice {
             depth_stencil_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         rpass.set_pipeline(pipeline);
         if has_stencil {
