@@ -4266,7 +4266,10 @@ impl NoesisRenderState {
                     over_ui = scene.view.mouse_button_up(x, y, button);
                 }
                 E::MouseWheel { x, y, delta } => {
-                    let _ = scene.view.mouse_wheel(x, y, delta);
+                    over_ui = scene.view.mouse_wheel(x, y, delta);
+                }
+                E::MouseHWheel { x, y, delta } => {
+                    over_ui = scene.view.mouse_hwheel(x, y, delta);
                 }
                 E::Scroll {
                     x,

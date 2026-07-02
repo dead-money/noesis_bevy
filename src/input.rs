@@ -92,8 +92,8 @@ pub enum NoesisInputEvent {
         /// Which button changed.
         button: MouseButton,
     },
-    /// A wheel detent, in the Win32 `WHEEL_DELTA` convention Noesis expects
-    /// (120 units per notch).
+    /// A vertical wheel detent, in the Win32 `WHEEL_DELTA` convention Noesis
+    /// expects (120 units per notch).
     MouseWheel {
         /// X position in view-pixel space.
         x: i32,
@@ -102,9 +102,22 @@ pub enum NoesisInputEvent {
         /// Wheel movement in 120-units-per-notch increments.
         delta: i32,
     },
-    /// A scroll in line counts, the path Noesis's scrolling controls listen
-    /// on. Emitted alongside [`MouseWheel`](Self::MouseWheel) so controls
-    /// bound to either signal respond.
+    /// A horizontal wheel detent (tilt-wheel or trackpad swipe), same
+    /// 120-units-per-notch convention as [`MouseWheel`](Self::MouseWheel);
+    /// positive scrolls right.
+    MouseHWheel {
+        /// X position in view-pixel space.
+        x: i32,
+        /// Y position in view-pixel space.
+        y: i32,
+        /// Wheel movement in 120-units-per-notch increments.
+        delta: i32,
+    },
+    /// A scroll in line counts, the other path Noesis's scrolling controls
+    /// listen on. Reserved for an explicit scroll source (e.g. a gamepad
+    /// bridge); the mouse wheel drives [`MouseWheel`](Self::MouseWheel) /
+    /// [`MouseHWheel`](Self::MouseHWheel) only, so a `ScrollViewer` reachable
+    /// by both paths isn't scrolled twice.
     Scroll {
         /// X position in view-pixel space.
         x: i32,
@@ -327,13 +340,15 @@ fn forward_mouse_wheel(
     mut queue: ResMut<NoesisInputQueue>,
     last: Res<LastPointer>,
 ) {
-    // Emit both a Noesis MouseWheel event (Windows-style, 120 units per
-    // detent) and a Scroll event (line count) so controls listening to
-    // either get the signal. Redundant calls are cheap.
+    // Feed the wheel path only: MouseWheel (vertical) and MouseHWheel
+    // (horizontal), Windows-style 120 units per detent. The Scroll (line-count)
+    // path also drives ScrollViewers, so emitting both would scroll a control
+    // reachable by both at double rate; Scroll is reserved for an explicit
+    // scroll source (see [`NoesisInputEvent::Scroll`]).
     for ev in reader.read() {
         let (x, y) = if last.valid { (last.x, last.y) } else { (0, 0) };
-        // Convert pixel scroll to "lines" for the Scroll path: rough
-        // heuristic of 40 px/line; MouseScrollUnit::Line passes through.
+        // Convert pixel scroll to "lines": rough heuristic of 40 px/line;
+        // MouseScrollUnit::Line passes through.
         let lines_y = match ev.unit {
             MouseScrollUnit::Line => ev.y,
             MouseScrollUnit::Pixel => ev.y / 40.0,
@@ -344,6 +359,7 @@ fn forward_mouse_wheel(
         };
         // 120 units per line is the Win32 `WHEEL_DELTA` convention Noesis uses.
         let wheel_delta = (lines_y * 120.0) as i32;
+        let hwheel_delta = (lines_x * 120.0) as i32;
         // Route to the same view the last move was converted against.
         if wheel_delta != 0 {
             queue.push_to_opt(
@@ -355,25 +371,13 @@ fn forward_mouse_wheel(
                 },
             );
         }
-        if lines_y != 0.0 {
+        if hwheel_delta != 0 {
             queue.push_to_opt(
                 last.target,
-                NoesisInputEvent::Scroll {
+                NoesisInputEvent::MouseHWheel {
                     x,
                     y,
-                    value: lines_y,
-                    horizontal: false,
-                },
-            );
-        }
-        if lines_x != 0.0 {
-            queue.push_to_opt(
-                last.target,
-                NoesisInputEvent::Scroll {
-                    x,
-                    y,
-                    value: lines_x,
-                    horizontal: true,
+                    delta: hwheel_delta,
                 },
             );
         }
