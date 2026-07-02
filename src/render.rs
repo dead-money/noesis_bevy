@@ -3172,38 +3172,48 @@ impl NoesisRenderState {
 
     /// Apply view `entity`'s one-shot directional / tab focus moves
     /// (`UIElement::MoveFocus`). Missing names warn; a move that didn't shift
-    /// focus warns (non-traversable direction / no neighbour).
+    /// focus warns (non-traversable direction / no neighbour). Returns `false`
+    /// when the target root wasn't ready to receive the actions (scene not yet
+    /// built / no content, or panel fragment not yet mounted), so the caller can
+    /// keep the one-shots queued until the mount/build frame instead of dropping
+    /// them; an empty `moves` slice reports `true` (nothing to do).
     pub(crate) fn apply_focus_moves_for(
         &mut self,
         entity: Entity,
         moves: &[crate::focus_input::FocusMove],
-    ) {
+    ) -> bool {
         if moves.is_empty() {
-            return;
+            return true;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
             // Panel entity: resolve in the fragment's private namescope.
-            if let Some(panel) = self.panels.get(&entity) {
-                for m in moves {
-                    let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
-                        warn!(
-                            "NoesisFocusControl: move-from x:Name {:?} not found in panel fragment",
-                            m.from,
-                        );
-                        continue;
-                    };
-                    if !element.move_focus(m.direction, m.wrapped) {
-                        warn!(
-                            "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
-                            m.direction, m.wrapped, m.from,
-                        );
-                    }
+            let Some(panel) = self.panels.get(&entity) else {
+                return false;
+            };
+            if panel.mounted_for_uri.is_none() {
+                // Fragment exists but isn't in the visual tree yet; focus can't
+                // move on a detached element — retry once it mounts.
+                return false;
+            }
+            for m in moves {
+                let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
+                    warn!(
+                        "NoesisFocusControl: move-from x:Name {:?} not found in panel fragment",
+                        m.from,
+                    );
+                    continue;
+                };
+                if !element.move_focus(m.direction, m.wrapped) {
+                    warn!(
+                        "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
+                        m.direction, m.wrapped, m.from,
+                    );
                 }
             }
-            return;
+            return true;
         };
         let Some(content) = scene.view.content() else {
-            return;
+            return false;
         };
         for m in moves {
             let Some(mut element) = resolve_named(&content, &m.from) else {
@@ -3220,41 +3230,48 @@ impl NoesisRenderState {
                 );
             }
         }
+        true
     }
 
     /// Apply view `entity`'s one-shot focus-engagement actions
-    /// (`UIElement::Focus(engage)`).
+    /// (`UIElement::Focus(engage)`). Returns `false` when the target root wasn't
+    /// ready (see [`Self::apply_focus_moves_for`]); an empty slice reports `true`.
     pub(crate) fn apply_focus_engages_for(
         &mut self,
         entity: Entity,
         engages: &[crate::focus_input::FocusEngage],
-    ) {
+    ) -> bool {
         if engages.is_empty() {
-            return;
+            return true;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
             // Panel entity: resolve in the fragment's private namescope.
-            if let Some(panel) = self.panels.get(&entity) {
-                for e in engages {
-                    let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
-                        warn!(
-                            "NoesisFocusControl: engage x:Name {:?} not found in panel fragment",
-                            e.name,
-                        );
-                        continue;
-                    };
-                    if !element.focus_engage(e.engage) {
-                        warn!(
-                            "NoesisFocusControl: element {:?} refused focus(engage={})",
-                            e.name, e.engage,
-                        );
-                    }
+            let Some(panel) = self.panels.get(&entity) else {
+                return false;
+            };
+            if panel.mounted_for_uri.is_none() {
+                // Not in the visual tree yet; retry once it mounts.
+                return false;
+            }
+            for e in engages {
+                let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
+                    warn!(
+                        "NoesisFocusControl: engage x:Name {:?} not found in panel fragment",
+                        e.name,
+                    );
+                    continue;
+                };
+                if !element.focus_engage(e.engage) {
+                    warn!(
+                        "NoesisFocusControl: element {:?} refused focus(engage={})",
+                        e.name, e.engage,
+                    );
                 }
             }
-            return;
+            return true;
         };
         let Some(content) = scene.view.content() else {
-            return;
+            return false;
         };
         for e in engages {
             let Some(mut element) = resolve_named(&content, &e.name) else {
@@ -3271,6 +3288,7 @@ impl NoesisRenderState {
                 );
             }
         }
+        true
     }
 
     /// Reconcile view `entity`'s `KeyBinding`s against `specs`. Each binding's
