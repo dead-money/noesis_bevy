@@ -5019,6 +5019,8 @@ pub(crate) fn add_bridge_reap<C: ReapOnRemove>(app: &mut App) {
 #[allow(clippy::needless_pass_by_value)]
 fn teardown_removed_views(
     mut removed: RemovedComponents<NoesisView>,
+    alive: Query<Entity>,
+    mut commands: Commands,
     state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
@@ -5026,6 +5028,18 @@ fn teardown_removed_views(
     };
     for entity in removed.read() {
         state.teardown_for(entity);
+        // `RemovedComponents<NoesisView>` fires both when the whole entity is
+        // despawned and when only the component is dropped off a surviving
+        // entity (a game toggling its UI off while keeping Camera2d/NoesisCamera).
+        // A despawn reaps every component (NoesisIntermediate included); a
+        // survivor keeps its last-published intermediate, and `teardown_for` has
+        // just pruned it out of `publish_intermediates`' sweep — so unless we
+        // strip it here the render world blits the last-painted frame forever
+        // (the P0.8 ghost). Guard on liveness: a `remove` command on a despawned
+        // entity would panic at flush.
+        if alive.contains(entity) {
+            commands.entity(entity).remove::<NoesisIntermediate>();
+        }
     }
 }
 
