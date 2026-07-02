@@ -37,7 +37,7 @@ use crate::NoesisLicense;
 use crate::render::{NoesisRenderState, build_main_world_pipeline};
 
 /// Test/CI harness plugin: initializes the Noesis runtime, wires the main-world
-/// driving pipeline, and inserts a [`NoesisRenderState`] backed by a
+/// driving pipeline, and inserts a `NoesisRenderState` backed by a
 /// directly-requested wgpu device, with no `RenderApp`.
 ///
 /// See the [module docs](self) for the composition it expects.
@@ -71,7 +71,7 @@ impl Plugin for NoesisHeadlessPlugin {
     }
 
     /// Request a wgpu device on the main thread (block-on'd) and insert the
-    /// [`NoesisRenderState`] as a main-world non-send resource, pinning it and
+    /// `NoesisRenderState` as a main-world non-send resource, pinning it and
     /// every Noesis handle it owns to the main thread. Runs in `finish` so it
     /// lands after `build` has initialized the runtime, mirroring how the real
     /// [`NoesisRenderPlugin`](crate::NoesisRenderPlugin) defers state creation.
