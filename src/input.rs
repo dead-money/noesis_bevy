@@ -324,19 +324,11 @@ fn forward_mouse_wheel(
 #[allow(clippy::needless_pass_by_value)]
 fn forward_keyboard(mut reader: MessageReader<KeyboardInput>, mut queue: ResMut<NoesisInputQueue>) {
     for ev in reader.read() {
-        // Skip synthetic repeat events; Noesis runs its own repeat timing
-        // off the logical KeyDown/KeyUp pair.
-        if ev.repeat {
-            // Still emit Char on repeat so TextBox auto-repeat works.
-            if matches!(ev.state, ButtonState::Pressed)
-                && let Some(text) = ev.text.as_deref()
-            {
-                for ch in text.chars() {
-                    queue.push(NoesisInputEvent::Char(ch as u32));
-                }
-            }
-            continue;
-        }
+        // Forward OS auto-repeat as repeated KeyDown: `View::KeyDown` has no
+        // internal repeat timer, so held keys (arrows, Backspace/Delete —
+        // KeyDown-handled, not Char-handled) act once otherwise. Repeat events
+        // are always `Pressed` and carry `text`, so the normal arm below emits
+        // the accompanying Char exactly once.
         let key = key_map::from_bevy(ev.key_code);
         match ev.state {
             ButtonState::Pressed => {
