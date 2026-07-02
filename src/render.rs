@@ -1548,6 +1548,13 @@ impl NoesisRenderState {
         self.lists.len()
     }
 
+    /// Number of live [`NoesisBinding`](crate::binding::NoesisBinding) target
+    /// entries. Mirrors `self.binding_entries.len()`.
+    #[must_use]
+    pub(crate) fn live_binding_count(&self) -> usize {
+        self.binding_entries.len()
+    }
+
     /// Whether view `entity` already has a built binding for `(element,
     /// property)`. The bridge builds each target's runtime binding once.
     pub(crate) fn has_binding(&self, entity: Entity, element: &str, property: &str) -> bool {
@@ -1570,21 +1577,41 @@ impl NoesisRenderState {
     }
 
     /// Reap view `entity`'s single [`NoesisBinding`](crate::binding::NoesisBinding)
-    /// target `(element, property)`: clear the live binding off the element's DP
-    /// (`ClearValue`, so it stops driving the property) before dropping the owning
-    /// entry. Mirrors [`Self::reap_items_for`]'s detach-then-drop order; the clear
-    /// is a no-op when the scene or element is gone or the binding never attached.
+    /// target `(element, property)`: detach the live binding off the element's DP
+    /// (`ClearBinding`, so it stops driving the property) before dropping the
+    /// owning entry. Mirrors [`Self::reap_items_for`]'s detach-then-drop order; the
+    /// clear is a no-op when the scene or element is gone or the binding never
+    /// attached.
     pub(crate) fn reap_binding_for(&mut self, entity: Entity, element: &str, property: &str) {
         let key = (entity, element.to_owned(), property.to_owned());
         if let Some(entry) = self.binding_entries.get(&key)
             && let Some(scene) = self.scenes.get(&entity)
             && !entry.needs_bind(&scene.built_for_uri)
             && let Some(content) = scene.view.content()
-            && let Some(mut target) = resolve_named(&content, element)
+            && let Some(target) = resolve_named(&content, element)
         {
-            target.clear_value(property);
+            let _ = noesis_runtime::binding::clear_binding(&target, property);
         }
         self.binding_entries.remove(&key);
+    }
+
+    /// Reap *every* of view `entity`'s [`NoesisBinding`](crate::binding::NoesisBinding)
+    /// targets: detach each still-live binding off its element, then drop the
+    /// entries. The component-removal counterpart of the per-target
+    /// [`Self::reap_binding_for`] (which it delegates to), invoked when the whole
+    /// `NoesisBinding` component leaves an otherwise-live view. Idempotent with
+    /// despawn teardown: a despawned entity has no scene, so each clear no-ops and
+    /// only the side-table drain runs.
+    pub(crate) fn reap_bindings_for(&mut self, entity: Entity) {
+        let targets: Vec<(String, String)> = self
+            .binding_entries
+            .keys()
+            .filter(|(ent, _, _)| *ent == entity)
+            .map(|(_, element, property)| (element.clone(), property.clone()))
+            .collect();
+        for (element, property) in targets {
+            self.reap_binding_for(entity, &element, &property);
+        }
     }
 
     /// Drop (and unbind) any of view `entity`'s binding targets no longer named

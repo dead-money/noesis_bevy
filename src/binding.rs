@@ -68,7 +68,7 @@ use noesis_runtime::converters::Converter;
 use noesis_runtime::multi_binding::{MultiBinding, MultiConverter};
 use noesis_runtime::view::FrameworkElement;
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 pub use noesis_runtime::binding::BindingMode;
 pub use noesis_runtime::converters::{ConvertArg, Converted, ValueConverter};
@@ -436,6 +436,12 @@ pub(crate) fn sync_binding_bridge(
     }
 }
 
+impl ReapOnRemove for NoesisBinding {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_bindings_for(entity);
+    }
+}
+
 /// Wires the per-view value-converter / multi-binding bridge. Added transitively
 /// by [`crate::NoesisPlugin`].
 pub struct NoesisBindingPlugin;
@@ -443,5 +449,6 @@ pub struct NoesisBindingPlugin;
 impl Plugin for NoesisBindingPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PostUpdate, sync_binding_bridge.in_set(NoesisSet::Apply));
+        add_bridge_reap::<NoesisBinding>(app);
     }
 }
