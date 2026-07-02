@@ -216,6 +216,13 @@ impl ImageRegistry {
             },
         );
     }
+
+    /// Drop the image staged under `uri`, reclaiming its buffer. Used by the
+    /// imaging bridge's component-removal reap to reclaim a bitmap no live
+    /// [`crate::imaging::NoesisImaging`] references any longer.
+    pub(crate) fn remove(&mut self, uri: &str) {
+        self.entries.remove(uri);
+    }
 }
 
 /// Main-app system that keeps [`ImageRegistry`] in sync with the asset

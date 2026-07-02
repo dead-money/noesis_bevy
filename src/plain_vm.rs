@@ -62,7 +62,7 @@ pub use noesis_runtime::plain_vm::{
     PlainVmClass,
 };
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, add_reap_system};
 use crate::viewmodel::AttachTarget;
 
 /// The UI→Rust writeback sink shared between the (main-thread) `on_set` hook and
@@ -274,6 +274,26 @@ fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
     }
 }
 
+/// Reap view `entity`'s `T` plain view model when the `T` component is removed
+/// while its view stays live. Without it the entry's `set_sink` keeps
+/// accumulating UI writebacks that nobody drains (unbounded growth as the user
+/// interacts) and the instance stays attached as `DataContext`. Plain VMs are
+/// keyed `(entity, TypeId)`, so this cannot ride the [`crate::render::ReapOnRemove`]
+/// trait (one impl per component, but here the component *is* the generic `T`);
+/// it wires through [`add_reap_system`] like the trait-driven bridges do.
+#[allow(clippy::needless_pass_by_value)]
+fn reap_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
+    mut removed: RemovedComponents<T>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        state.reap_plain_vm_for(entity, std::any::TypeId::of::<T>());
+    }
+}
+
 /// `App` methods to register a plain-struct view model type. Add
 /// [`crate::NoesisPlugin`] first, then register the type; attach the `T`
 /// component to a [`NoesisView`](crate::NoesisView) entity to bind it.
@@ -318,5 +338,6 @@ fn register_plain_vm<T: NoesisViewModel + Component<Mutability = Mutable>>(
         PostUpdate,
         sync_plain_vm_system::<T>.in_set(NoesisSet::Apply),
     );
+    add_reap_system(app, reap_plain_vm_system::<T>);
     app
 }
