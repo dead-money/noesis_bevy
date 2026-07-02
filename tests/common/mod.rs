@@ -84,6 +84,10 @@ pub fn render_app() -> App {
         DefaultPlugins
             .build()
             .disable::<bevy::winit::WinitPlugin>()
+            // No test plays audio, and on a session-less CI runner the cpal/ALSA
+            // backend can abort the process during teardown (free(): invalid
+            // pointer after the test passes) when JACK/PulseAudio are absent.
+            .disable::<bevy::audio::AudioPlugin>()
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,

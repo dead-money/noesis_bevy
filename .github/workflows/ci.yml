@@ -64,6 +64,11 @@ jobs:
     name: build • clippy • test
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, noesis-sdk]
+    env:
+      # The runner service has no login session; winit's Wayland probe errors
+      # without it. Any writable existing path satisfies the check (the runner
+      # context is not available in job-level env, so a literal path).
+      XDG_RUNTIME_DIR: /tmp
     steps:
       - name: Checkout
         uses: actions/checkout@v6
