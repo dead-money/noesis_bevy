@@ -5384,6 +5384,7 @@ fn prepare_noesis_blit(
 /// gates on it); on the Core2d path (`noesis_blit_2d`) the blit runs on any view
 /// that has published a [`NoesisIntermediate`], `NoesisCamera` or not.
 #[derive(Component, ExtractComponent, Clone, Copy, Default, Debug)]
+#[extract_component_sync_target(Self)]
 pub struct NoesisCamera;
 
 /// The painted intermediate for a view, published onto the camera entity by the
@@ -5393,6 +5394,7 @@ pub struct NoesisCamera;
 /// Both fields are `wgpu::TextureView` (Arc-backed, `Send + Sync`), so the
 /// cross-world hand-off is a cheap clone.
 #[derive(Component, ExtractComponent, Clone)]
+#[extract_component_sync_target(Self)]
 pub struct NoesisIntermediate {
     /// `Rgba8Unorm` raw view, sampled when the target is plain `Rgba8Unorm`.
     view: wgpu::TextureView,
