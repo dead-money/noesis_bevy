@@ -19,12 +19,34 @@
 
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use bevy::app::{PluginGroup, PluginsState};
 use bevy::asset::AssetPlugin;
 use bevy::input::InputPlugin;
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowPlugin};
 use noesis_bevy::{NoesisHeadlessPlugin, NoesisLicense, NoesisPlugin};
+
+/// One-Noesis-init-per-process interlock. Noesis' class/resource registration is
+/// process-global and thread-affine, so two Noesis tests sharing a process is
+/// undefined behavior (the teardown SIGSEGV). nextest runs each `#[test]` in its
+/// own process, which resets this to `false`. Under a plain `cargo test`, every
+/// `#[test]` in a suite binary shares one process, so the second Noesis init
+/// trips this and fails loudly with instructions instead of crashing.
+static NOESIS_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Claim this process for a single Noesis-initializing test. Every entry point
+/// that brings up the runtime calls it first; the second call in one process
+/// panics. See [`NOESIS_CLAIMED`].
+pub fn claim_noesis_process() {
+    assert!(
+        !NOESIS_CLAIMED.swap(true, Ordering::SeqCst),
+        "second Noesis init in one process: these suites must run under \
+         cargo-nextest (process-per-test). Use `cargo nextest run`, not \
+         `cargo test`. See tests/README.md."
+    );
+}
 
 /// The Noesis license from `NOESIS_LICENSE_NAME` / `NOESIS_LICENSE_KEY`, or
 /// `None` (trial mode). Threaded into whichever plugin brings up the runtime.
@@ -41,6 +63,7 @@ pub fn noesis_license_from_env() -> Option<NoesisLicense> {
 /// none), exactly as under the old `WindowPlugin { primary_window: None }` setup.
 /// Tests feed input through `NoesisInputQueue` directly instead.
 pub fn headless_app() -> App {
+    claim_noesis_process();
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin));
     NoesisPlugin::add_bridge_plugins(&mut app);
@@ -55,6 +78,7 @@ pub fn headless_app() -> App {
 /// [`run_until`] then [`settle`] so any in-flight pipeline compile drains before
 /// the app drops.
 pub fn render_app() -> App {
+    claim_noesis_process();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins

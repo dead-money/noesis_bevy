@@ -74,5 +74,18 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo test
-        run: cargo test --all-features
+      # Keeps the non-test targets (examples, benches) compiling; the suites
+      # themselves are built and run by nextest below.
+      - name: cargo build
+        run: cargo build --all-targets --all-features
+
+      # The integration suites are three binaries that must run process-per-test
+      # (Noesis state is process-global and thread-affine); nextest is that model.
+      # See tests/README.md. Cached by the persistent target/ (clean: false).
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo nextest run
+        run: cargo nextest run --profile ci --all-targets --all-features
