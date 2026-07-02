@@ -15,9 +15,11 @@
 //! # Threading
 //!
 //! Callbacks fire from inside Noesis's XAML parser, on whichever thread
-//! triggered the load. In a Bevy app that's the render thread (which drives the
-//! View). Handlers must be `Send`; if you need cross-thread fan-out (e.g. Bevy
-//! ECS state), keep the body small and queue the work.
+//! triggered the load. In a Bevy app that's the main thread, during the
+//! scene-build pass that drives the View. The handler runs while Noesis (and
+//! the `NoesisRenderState` that owns it) is borrowed, so it must not reenter
+//! the Bevy `World`; keep the body small and queue any ECS work for a later
+//! system. Handlers are still `Send`-bound by the FFI.
 
 use bevy::prelude::*;
 

@@ -91,7 +91,7 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
               mut exit: MessageWriter<AppExit>| {
             *frame += 1;
 
-            // Pushed in Update so it survives PreUpdate's queue reset and is extracted this same frame.
+            // Pushed in Update so PostUpdate's apply pass drains it onto the View this same frame.
             // MouseMove first: Noesis hit-tests on the last known pointer position.
             if *frame == INJECT_AT_FRAME {
                 input.push(NoesisInputEvent::MouseMove { x: 32, y: 16 });

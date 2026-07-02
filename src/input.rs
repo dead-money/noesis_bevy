@@ -1,11 +1,12 @@
 //! Bevy → Noesis input forwarding.
 //!
-//! The main app observes Bevy's raw input events and a few window events,
-//! converts each into a [`NoesisInputEvent`], and pushes it onto a shared
-//! [`NoesisInputQueue`] resource. The queue is cloned into the render world
-//! via [`ExtractResource`] each frame; the render-side `apply_noesis_input`
-//! system (defined in `render.rs`) drains it onto the live
-//! [`noesis_runtime::view::View`] just before the frame is driven.
+//! The app observes Bevy's raw input events and a few window events, converts
+//! each into a [`NoesisInputEvent`], and pushes it onto the shared
+//! [`NoesisInputQueue`] resource. The `apply_noesis_input` system (defined in
+//! `render.rs`, in [`NoesisSet::Apply`](crate::NoesisSet)) drains that queue
+//! onto the live [`noesis_runtime::view::View`] just before the frame is
+//! driven. Both ends live in the main world, on the one thread Noesis is
+//! pinned to.
 //!
 //! # Coordinate handling
 //!
@@ -25,26 +26,10 @@
 //!
 //! # Queue lifecycle
 //!
-//! Systems that push run in `PreUpdate`. The resource is cloned to the
-//! render world by [`ExtractResourcePlugin`] between the main schedule
-//! and the render sub-app's own schedules. Since Bevy's `Last` runs
-//! *before* the render sub-app's `ExtractSchedule` (the main schedule
-//! completes, then sub-apps run), we can't clear in `Last`; that would
-//! wipe the queue before extract copies it. Instead we clear at the
-//! very start of the next frame's `PreUpdate`, before the forwarders
-//! push new events:
-//!
-//! ```text
-//!   Frame N PreUpdate:  clear (drops N-1 events already extracted)
-//!                       push frame-N events A, B, C
-//!   Frame N Last:       (no-op)
-//!   Between N and N+1:  ExtractSchedule copies [A, B, C] into render world
-//!   Render frame N:     apply_noesis_input drains render-side copy
-//!   Frame N+1 PreUpdate: clear (drops A, B, C from main queue), then push again
-//! ```
-//!
-//! `Clone` on the queue is cheap: every variant is `Copy`-sized, so
-//! extract is a `Vec` clone.
+//! The forwarders push in `PreUpdate`; `apply_noesis_input` drains the queue
+//! in `PostUpdate` ([`NoesisSet::Apply`](crate::NoesisSet)), leaving it empty
+//! for the next frame's pushes. Push and drain both touch the one main-world
+//! resource in schedule order, so no separate clearing pass is needed.
 
 use bevy::input::{
     ButtonState,
@@ -54,7 +39,6 @@ use bevy::input::{
 };
 use bevy::prelude::*;
 use bevy::window::{CursorLeft, CursorMoved, PrimaryWindow, WindowFocused, WindowResized};
-use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use noesis_runtime::view::{Key, MouseButton};
 
 use crate::render::NoesisView;
@@ -188,9 +172,9 @@ pub struct TargetedInput {
 }
 
 /// Batched input events waiting to be drained onto the Noesis `View`.
-/// Populated by systems in this module; drained by the render-world
-/// `apply_noesis_input` system every frame.
-#[derive(Resource, ExtractResource, Clone, Default, Debug)]
+/// Populated by systems in this module; drained by the `apply_noesis_input`
+/// system every frame.
+#[derive(Resource, Clone, Default, Debug)]
 pub struct NoesisInputQueue {
     /// Events queued this frame, in arrival order, each tagged with its target
     /// view (see [`TargetedInput`]).
@@ -228,7 +212,7 @@ impl NoesisInputQueue {
         self.events.push(TargetedInput { target, event: ev });
     }
 
-    /// Drain every queued event, leaving the queue empty. The render-side
+    /// Drain every queued event, leaving the queue empty. The
     /// `apply_noesis_input` system uses this to feed events onto the [`View`].
     ///
     /// [`View`]: noesis_runtime::view::View
@@ -492,11 +476,9 @@ fn forward_focus(
 /// resize. Makes the `NoesisNode` blit effectively 1:1 and brings the
 /// cursor-coord ratio in `to_view_coords` down to just the scale factor.
 ///
-/// Runs on the main app: the render-world clone of each [`NoesisView`] is
-/// overwritten each frame via `ExtractComponent`, so the source of truth has to
-/// live here. The render side picks up the new size on the next frame's
-/// `ensure_scene`, which detects the mismatch and rebuilds the intermediate
-/// texture + re-calls `View::set_size`.
+/// Writes the authoritative [`NoesisView::size`]; the scene-ensure pass picks
+/// up the new size on the next frame, detects the mismatch, and rebuilds the
+/// intermediate texture + re-calls `View::set_size`.
 #[allow(clippy::needless_pass_by_value)]
 fn resize_noesis_scene(
     mut reader: MessageReader<WindowResized>,
@@ -523,14 +505,6 @@ fn resize_noesis_scene(
     }
 }
 
-/// Clear the main-app queue at the start of `PreUpdate`, before the
-/// forwarders push new events. By the time this fires, the render
-/// sub-app's extract has already copied whatever the previous frame
-/// queued; see the module-level queue-lifecycle diagram.
-fn clear_queue_before_push(mut queue: ResMut<NoesisInputQueue>) {
-    queue.events.clear();
-}
-
 // ── Plugin ─────────────────────────────────────────────────────────────────
 
 /// Installs the Bevy → Noesis input bridge. Add alongside [`NoesisPlugin`].
@@ -543,14 +517,9 @@ impl Plugin for NoesisInputPlugin {
         app.init_resource::<NoesisInputQueue>()
             .init_resource::<LastPointer>()
             .init_resource::<NoesisPointerOverUi>()
-            .add_plugins(ExtractResourcePlugin::<NoesisInputQueue>::default())
             .add_systems(
                 PreUpdate,
                 (
-                    // MUST run first: resets the queue so this frame's
-                    // pushes land in an empty buffer. See the
-                    // queue-lifecycle diagram in the module docs.
-                    clear_queue_before_push,
                     resize_noesis_scene,
                     forward_cursor_moved,
                     forward_cursor_left,

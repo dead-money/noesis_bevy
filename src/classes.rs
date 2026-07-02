@@ -14,12 +14,13 @@
 //!
 //! # Property-change threading
 //!
-//! Callbacks fire from inside Noesis's property pump. In a Bevy app that's
-//! the **render thread** (which drives the View). Handlers must be `Send`;
-//! mutations to Bevy ECS state should be queued and processed on the main
-//! thread. For purely-derived properties (e.g. `NineSlicer` computing
-//! viewbox rects from `SliceThickness`), the handler can do the math and
-//! call `Instance::set_*` inline, with no main-world hop.
+//! Callbacks fire from inside Noesis's property pump, on the **main thread**
+//! that drives the View. The handler runs while Noesis (and the
+//! `NoesisRenderState` that owns it) is borrowed, so it must not reenter the
+//! Bevy `World`; queue any ECS mutations for a later system. For purely-derived
+//! properties (e.g. `NineSlicer` computing viewbox rects from `SliceThickness`),
+//! the handler can do the math and call `Instance::set_*` inline. Handlers are
+//! `Send`-bound by the FFI.
 //!
 //! # Usage
 //!
