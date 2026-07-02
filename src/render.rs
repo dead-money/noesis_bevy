@@ -425,13 +425,22 @@ pub struct NoesisView {
     ///
     /// These URIs are merged into the one process-global dictionary the
     /// [`NoesisResources`](crate::resources::NoesisResources) bridge also
-    /// feeds: each URI is parsed and added as a merged dictionary, and any
-    /// code-built `NoesisResources` entries are layered on top as base
-    /// entries (so a code-built override wins over the theme). Reconciled in
-    /// the `Sync` phase before any scene parses. Every view's list is unioned
-    /// into that shared dictionary, so declaring the same theme on several
-    /// views is fine; declaring *different* chains merges them all (with a
-    /// warning) since the resources are process-wide.
+    /// feeds: each URI becomes a merged dictionary, and any code-built
+    /// `NoesisResources` entries are layered on top as base entries (so a
+    /// code-built override wins over the theme). Reconciled in the `Sync` phase
+    /// before any scene parses. Every view's list is unioned into that shared
+    /// dictionary, so declaring the same theme on several views is fine;
+    /// declaring *different* chains merges them all (with a warning) since the
+    /// resources are process-wide.
+    ///
+    /// A `{StaticResource}` in a later URI that references an earlier URI's key
+    /// resolves in dependency order **when no code-built `NoesisResources`
+    /// entries are present** (the chain then installs leaf-by-leaf with the
+    /// shared parent scope wired in first). If you also supply code-built
+    /// entries or `merged_xaml`, each chain leaf is re-parsed standalone and
+    /// such cross-leaf references null-resolve at parse time; keep cross-leaf
+    /// `{StaticResource}`s within a single URI (or its own nested `Source`
+    /// children) in that case.
     ///
     /// For the Noesis SDK sample themes a single-URI list such as
     /// `vec![\"NoesisTheme.DarkBlue.xaml\"]` is sufficient (the `xaml_viewer`
@@ -3924,10 +3933,15 @@ impl NoesisRenderState {
     /// every source that feeds it: the code-built `entries` and `merged_xaml` of
     /// the [`NoesisResources`](crate::resources::NoesisResources) bridge, plus
     /// the `chain_uris` collected from the views' `application_resources`. All
-    /// three are merged into one `ResourceDictionary` and installed with
-    /// `GUI::SetApplicationResources`, so opting into a theme (a URI chain) no
-    /// longer clobbers code-built brushes/values (and vice versa) — the old
-    /// two-installer design let whichever ran last in the frame win.
+    /// three feed one process-global dictionary, so opting into a theme (a URI
+    /// chain) no longer clobbers code-built brushes/values (and vice versa) — the
+    /// old two-installer design let whichever ran last in the frame win.
+    ///
+    /// Two install paths: a pure-chain config (no `entries`/`merged_xaml`) goes
+    /// through `install_app_resources_chain` so cross-leaf `{StaticResource}`s
+    /// resolve in dependency order; anything with code-built inputs is merged into
+    /// one `ResourceDictionary` (base `entries` win over merged, per WPF) and
+    /// installed with `GUI::SetApplicationResources`.
     ///
     /// Returns `Some(present)` — the declared `entries` keys confirmed resolvable
     /// through the live application resources, sorted — only when this call
@@ -3978,13 +3992,44 @@ impl NoesisRenderState {
             sources
         };
 
+        // Pure-chain config (no code-built base entries or `merged_xaml`): install
+        // via the runtime chain installer, which wires each leaf into the parent's
+        // `MergedDictionaries` *before* `SetSource` so a `{StaticResource}` in a
+        // later leaf that references an earlier leaf's key resolves at parse time.
+        // Re-parsing each leaf standalone (the merge path below) can't do that —
+        // a leaf parses with no sibling scope, null-resolving cross-leaf refs. The
+        // installer re-resolves each URI through the same provider; the byte
+        // snapshot above already gated on every URI being present, so this can't
+        // half-install. (Bytes dropped: the installer re-reads them by URI.)
+        if entries.is_empty() && merged_xaml.is_empty() {
+            if !noesis_runtime::gui::install_app_resources_chain(chain_uris) {
+                warn!(
+                    "NoesisResources: failed to install application-resources chain {chain_uris:?}"
+                );
+            }
+            self.installed_app_resources = Some(AppResourcesSnapshot {
+                entries: entries.clone(),
+                merged_xaml: merged_xaml.to_vec(),
+                chain_uris: chain_uris.to_vec(),
+            });
+            info!(
+                "Installed Noesis application resources: {} chain dicts (dependency-ordered)",
+                chain_uris.len(),
+            );
+            return Some(Vec::new());
+        }
+
         let mut dict = ResourceDictionary::new();
 
         // Merged dictionaries first (URI chain, then the bridge's `merged_xaml`);
         // code-built `entries` are added as base entries afterwards, so they win
         // on a key collision (base takes precedence over merged, per WPF). Among
         // merged dictionaries the later-added wins, so `merged_xaml` overrides the
-        // theme chain.
+        // theme chain. NOTE: with code-built `entries`/`merged_xaml` present each
+        // chain leaf is re-parsed standalone here, so a `{StaticResource}` that
+        // crosses two chain leaves won't resolve (unlike the pure-chain path
+        // above). Fixing that for mixed configs needs a runtime FFI that returns
+        // the chain parent so base entries can be injected into it.
         for (uri, xaml) in &chain_sources {
             match ResourceDictionary::parse(xaml) {
                 Some(leaf) => {
