@@ -646,7 +646,8 @@ fn nested_child_grid_diagnostic() {
 
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 async fn run_scenario(xaml: &[u8], opts: ScenarioOptions) -> (Vec<Op>, [u8; 4], [u8; 4]) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,

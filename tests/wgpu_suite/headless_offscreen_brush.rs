@@ -427,7 +427,8 @@ fn drawingbrush_tile_offscreen_trace() {
 }
 
 async fn run_scenario(xaml: &[u8], ticks: u32) -> (Vec<Op>, [u8; 4], [u8; 4]) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,

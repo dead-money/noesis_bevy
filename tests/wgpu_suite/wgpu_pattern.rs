@@ -35,7 +35,8 @@ fn path_pattern_samples_from_registered_texture() {
 
 #[allow(clippy::too_many_lines)]
 async fn run_test() {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -105,6 +106,7 @@ async fn run_test() {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         queue.submit(Some(enc.finish()));
     }
