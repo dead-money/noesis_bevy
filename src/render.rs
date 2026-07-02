@@ -418,26 +418,24 @@ pub struct NoesisView {
     ///
     /// [`RenderFlag::Ppaa`]: noesis_runtime::view::RenderFlag::Ppaa
     pub ppaa: bool,
-    /// `ResourceDictionary` URIs to install as the process-global
+    /// `ResourceDictionary` URIs to merge into the process-global
     /// application resources (styles, brushes, `ControlTemplate`s), in
     /// dependency order. Each URI must resolve via the same XAML
-    /// provider that serves `xaml_uri`. Loaded once on first scene
-    /// build; later changes are ignored.
+    /// provider that serves `xaml_uri`.
     ///
-    /// The plugin uses
-    /// [`noesis_runtime::gui::install_app_resources_chain`]: an
-    /// empty parent `ResourceDictionary` is installed up front, then
-    /// each leaf is added to `parent.MergedDictionaries` and its
-    /// `Source` assigned in order. This ensures cross-sibling
-    /// `{StaticResource Foo}` references inside one leaf can find
-    /// keys from earlier leaves (the simpler `LoadXaml +
-    /// SetApplicationResources` path silently null-resolves them).
+    /// These URIs are merged into the one process-global dictionary the
+    /// [`NoesisResources`](crate::resources::NoesisResources) bridge also
+    /// feeds: each URI is parsed and added as a merged dictionary, and any
+    /// code-built `NoesisResources` entries are layered on top as base
+    /// entries (so a code-built override wins over the theme). Reconciled in
+    /// the `Sync` phase before any scene parses. Every view's list is unioned
+    /// into that shared dictionary, so declaring the same theme on several
+    /// views is fine; declaring *different* chains merges them all (with a
+    /// warning) since the resources are process-wide.
     ///
-    /// A single-URI list works fine: it installs that one dict
-    /// as a merged child of an otherwise-empty parent. For the Noesis
-    /// SDK sample themes, that means a `vec![\"NoesisTheme.DarkBlue.xaml\"]`
-    /// is sufficient (the `xaml_viewer` example does this via
-    /// `--theme`).
+    /// For the Noesis SDK sample themes a single-URI list such as
+    /// `vec![\"NoesisTheme.DarkBlue.xaml\"]` is sufficient (the `xaml_viewer`
+    /// example does this via `--theme`).
     pub application_resources: Vec<String>,
     /// Font families Noesis falls back to when an element doesn't
     /// resolve its declared `FontFamily`. Each entry is a Noesis-style
@@ -475,6 +473,16 @@ impl Default for NoesisView {
             font_fallbacks: Vec::new(),
         }
     }
+}
+
+/// The inputs that produced the currently-installed process-global application
+/// resources. Compared field-by-field so
+/// [`NoesisRenderState::reconcile_app_resources`] reinstalls only when the
+/// code-built entries, merged XAML, or URI chain actually change.
+struct AppResourcesSnapshot {
+    entries: HashMap<String, crate::resources::ResourceEntry>,
+    merged_xaml: Vec<String>,
+    chain_uris: Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -536,12 +544,14 @@ pub(crate) struct NoesisRenderState {
     /// makes scan-time gating irrelevant: any face present here is
     /// findable by `MatchFont` regardless of when `ScanFolder` ran.
     registered_faces: HashSet<(String, String)>,
-    /// URI list already handed to
-    /// `gui::install_app_resources_chain`. Guards us against
-    /// re-installing the same chain every frame. `None` means we
-    /// haven't installed anything yet; `Some(chain)` records exactly
-    /// what we last installed.
-    loaded_app_resources_chain: Option<Vec<String>>,
+    /// Snapshot of the last process-global application resources we installed
+    /// (code-built entries + merged XAML + the views' URI chain), so
+    /// [`Self::reconcile_app_resources`] can skip a rebuild when nothing
+    /// changed. `None` until the first install. Both the
+    /// [`NoesisResources`](crate::resources::NoesisResources) bridge and the
+    /// per-view `application_resources` chain feed one merged dictionary here —
+    /// they no longer clobber each other.
+    installed_app_resources: Option<AppResourcesSnapshot>,
     /// Wall-clock origin for `View::Update(time)`. Bevy's `Time<Real>`
     /// isn't extracted to the render world by default (only
     /// `Time<Virtual>` and the generic `Time` are), so we keep our own.
@@ -1029,7 +1039,7 @@ impl NoesisRenderState {
             pointer_over_ui: false,
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
-            loaded_app_resources_chain: None,
+            installed_app_resources: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
             last_click_target: HashMap::new(),
@@ -1985,11 +1995,13 @@ impl NoesisRenderState {
         // registered above gets picked up by the scan callback.
         self.install_font_fallbacks_if_needed(&config.font_fallbacks);
 
-        // Application resources must be installed BEFORE the scene's XAML
-        // is parsed, or the scene's `<Style TargetType="Button">` can't
-        // resolve theme brushes. One-shot; re-configuring the URI later
-        // would currently require a process restart.
-        self.install_application_resources_if_needed(config);
+        // Application resources (theme chain + code-built entries) are installed
+        // by `reconcile_app_resources` in the `Sync` phase, which runs before
+        // this `Ensure` build and merges every view's `application_resources`
+        // with the `NoesisResources` bridge into one dictionary. The chain-URI
+        // readiness gate above kept us from reaching here until those URIs
+        // resolved, and `Sync` runs after the provider map is populated, so the
+        // resources are installed by now.
 
         let Some(element) = FrameworkElement::load(&config.xaml_uri) else {
             warn!(
@@ -3799,20 +3811,27 @@ impl NoesisRenderState {
         }
     }
 
-    /// Build a `ResourceDictionary` from `entries` (code-built brushes + boxed
-    /// scalar values) plus any parsed `merged_xaml` fragments, and install it as
-    /// the process-global application resources (`GUI::SetApplicationResources`).
-    /// Noesis takes its own reference, so the Rust dictionary handle drops right
-    /// after. Returns the declared `entries` keys confirmed resolvable through
-    /// the live application resources (sorted): the read-back the
-    /// [`NoesisResources`](crate::resources::NoesisResources) bridge surfaces.
-    /// Called from the `Sync` phase (before scene build) when the resource
-    /// changes, so a scene's `{StaticResource}` can resolve at parse time.
-    pub(crate) fn install_app_resources_from(
+    /// Reconcile the single process-global application resources dictionary from
+    /// every source that feeds it: the code-built `entries` and `merged_xaml` of
+    /// the [`NoesisResources`](crate::resources::NoesisResources) bridge, plus
+    /// the `chain_uris` collected from the views' `application_resources`. All
+    /// three are merged into one `ResourceDictionary` and installed with
+    /// `GUI::SetApplicationResources`, so opting into a theme (a URI chain) no
+    /// longer clobbers code-built brushes/values (and vice versa) — the old
+    /// two-installer design let whichever ran last in the frame win.
+    ///
+    /// Returns `Some(present)` — the declared `entries` keys confirmed resolvable
+    /// through the live application resources, sorted — only when this call
+    /// actually (re)installed; `None` when the merged inputs are unchanged since
+    /// the last install or when a `chain_uris` entry hasn't reached the XAML
+    /// provider yet (retried next frame). Called from the `Sync` phase (before
+    /// scene build) so a scene's `{StaticResource}` resolves at parse time.
+    pub(crate) fn reconcile_app_resources(
         &mut self,
         entries: &HashMap<String, crate::resources::ResourceEntry>,
         merged_xaml: &[String],
-    ) -> Vec<String> {
+        chain_uris: &[String],
+    ) -> Option<Vec<String>> {
         use crate::brushes::BrushSpec;
         use crate::resources::ResourceEntry;
         use noesis_runtime::brushes::{GradientStop, LinearGradientBrush, SolidColorBrush};
@@ -3820,10 +3839,55 @@ impl NoesisRenderState {
             ResourceDictionary, application_resources_contains, set_application_resources,
         };
 
+        if entries.is_empty() && merged_xaml.is_empty() && chain_uris.is_empty() {
+            return None;
+        }
+
+        // Cheap unchanged-check first: this runs every frame, so bail before
+        // locking the provider map or cloning the spec when nothing changed.
+        // (Keyed on the URI *list*, like the previous chain installer — an
+        // in-place hot-reload of a chain dictionary's bytes isn't reinstalled.)
+        if self.installed_app_resources.as_ref().is_some_and(|s| {
+            s.entries == *entries && s.merged_xaml == merged_xaml && s.chain_uris == chain_uris
+        }) {
+            return None;
+        }
+
+        // Snapshot the chain bytes up front and drop the map lock before parsing:
+        // `ResourceDictionary::parse` re-enters our XAML provider to resolve each
+        // dictionary's nested `Source="..."`, which locks the same map. Defer the
+        // whole install until every chain URI has reached the provider so the
+        // merged theme installs atomically (the scene build gates on the same
+        // URIs, so no scene parses against a half-installed chain).
+        let chain_sources: Vec<(String, String)> = {
+            let guard = self.shared_map.0.lock().expect("SharedXamlMap poisoned");
+            let mut sources = Vec::with_capacity(chain_uris.len());
+            for uri in chain_uris {
+                let bytes = guard.get(uri)?;
+                sources.push((uri.clone(), String::from_utf8_lossy(bytes).into_owned()));
+            }
+            sources
+        };
+
         let mut dict = ResourceDictionary::new();
 
-        // Merge parsed dictionaries first; own entries added afterwards win on a
-        // key collision (base entries take precedence over merged, per WPF).
+        // Merged dictionaries first (URI chain, then the bridge's `merged_xaml`);
+        // code-built `entries` are added as base entries afterwards, so they win
+        // on a key collision (base takes precedence over merged, per WPF). Among
+        // merged dictionaries the later-added wins, so `merged_xaml` overrides the
+        // theme chain.
+        for (uri, xaml) in &chain_sources {
+            match ResourceDictionary::parse(xaml) {
+                Some(leaf) => {
+                    if !dict.add_merged(&leaf) {
+                        warn!("NoesisResources: failed to merge chain dictionary {uri:?}");
+                    }
+                }
+                None => warn!(
+                    "NoesisResources: chain URI {uri:?} did not parse as a ResourceDictionary"
+                ),
+            }
+        }
         for xaml in merged_xaml {
             match ResourceDictionary::parse(xaml) {
                 Some(merged) => {
@@ -3859,6 +3923,11 @@ impl NoesisRenderState {
         }
 
         set_application_resources(&dict);
+        self.installed_app_resources = Some(AppResourcesSnapshot {
+            entries: entries.clone(),
+            merged_xaml: merged_xaml.to_vec(),
+            chain_uris: chain_uris.to_vec(),
+        });
 
         // Confirm against the live global (now our dict) so the read-back proves
         // the install took, not just that we built the spec.
@@ -3869,12 +3938,13 @@ impl NoesisRenderState {
             .collect();
         present.sort();
         info!(
-            "Installed Noesis application resources: {} entries, {} merged dicts, {} present",
+            "Installed Noesis application resources: {} entries, {} merged dicts, {} chain dicts, {} present",
             entries.len(),
             merged_xaml.len(),
+            chain_sources.len(),
             present.len(),
         );
-        present
+        Some(present)
     }
 
     /// Poll view `entity`'s named elements' live `RenderTransform`s, returning
@@ -4053,43 +4123,6 @@ impl NoesisRenderState {
         if config.scale != scene.applied_scale {
             scene.view.set_scale(config.scale);
             scene.applied_scale = config.scale;
-        }
-    }
-
-    fn install_application_resources_if_needed(&mut self, config: &NoesisView) {
-        if config.application_resources.is_empty() {
-            return;
-        }
-        if self
-            .loaded_app_resources_chain
-            .as_ref()
-            .is_some_and(|loaded| loaded == &config.application_resources)
-        {
-            return;
-        }
-        // Every URI in the chain must already be in the provider map: the
-        // chain installer's `SetSource` calls fire synchronously and resolve
-        // through the same provider.
-        {
-            let guard = self.shared_map.0.lock().expect("SharedXamlMap poisoned");
-            for uri in &config.application_resources {
-                if !guard.contains_key(uri) {
-                    return; // wait for the registry to pick it up
-                }
-            }
-        }
-        if noesis_runtime::gui::install_app_resources_chain(&config.application_resources) {
-            info!(
-                "Installed Noesis application resources chain ({} entries): {:?}",
-                config.application_resources.len(),
-                config.application_resources,
-            );
-            self.loaded_app_resources_chain = Some(config.application_resources.clone());
-        } else {
-            warn!(
-                "install_app_resources_chain returned false for {:?}",
-                config.application_resources,
-            );
         }
     }
 
@@ -4910,7 +4943,7 @@ impl BlitPipelineCache {
 /// [`BevyXamlProvider`]. Runs on the main thread (alongside the rest of the
 /// Noesis driving pipeline) directly against the main-world registry.
 #[allow(clippy::needless_pass_by_value)]
-fn sync_xaml_provider_map(
+pub(crate) fn sync_xaml_provider_map(
     registry: Option<Res<XamlRegistry>>,
     state: Option<NonSend<NoesisRenderState>>,
 ) {

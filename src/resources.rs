@@ -40,11 +40,15 @@
 //!
 //! # Relationship to `NoesisView::application_resources`
 //!
-//! `NoesisView::application_resources`
-//! installs a chain of on-disk `ResourceDictionary` *URIs* during `Ensure`. That
-//! also calls `SetApplicationResources`, so the two paths are mutually exclusive:
-//! whichever installs last wins, and `Ensure` runs after `Sync`. Use one or the
-//! other for a given app.
+//! `NoesisView::application_resources` names a chain of on-disk
+//! `ResourceDictionary` *URIs* (a theme). This bridge and that chain feed the
+//! **same** process-global application resources, and they are **merged** rather
+//! than mutually exclusive: the reconcile system builds one dictionary holding
+//! the chain URIs (as merged dictionaries), this bridge's `merged_xaml`, and the
+//! code-built [`entries`](NoesisResources::entries) as base entries. Code-built
+//! entries win over the theme on a key collision, so a `.solid()`/`.value()`
+//! override survives a theme instead of being clobbered by it. Every view's
+//! chain is unioned into that one dictionary.
 //!
 //! Everything runs on the main thread (Noesis is thread-affine and lives there).
 
@@ -54,7 +58,7 @@ use bevy::prelude::*;
 
 use crate::brushes::BrushSpec;
 use crate::dp::DpValue;
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, NoesisView, sync_xaml_provider_map};
 
 /// One application-resource entry, declarative side. Resolved into a live
 /// `Noesis::BaseComponent` only at install time (on the Noesis thread), so the
@@ -150,41 +154,88 @@ pub struct NoesisResourcesInstalled {
     pub present: Vec<String>,
 }
 
-/// Reconcile [`NoesisResources`]: when it changed, build a fresh
-/// `ResourceDictionary` and install it as the process-global application
-/// resources, then emit a [`NoesisResourcesInstalled`] read-back. Runs in
-/// [`NoesisSet::Sync`] so the install lands before the scene-build (`Ensure`)
+/// Reconcile the process-global application resources from the two sources that
+/// feed them — the code-built [`NoesisResources`] bridge and every view's
+/// [`NoesisView::application_resources`](crate::NoesisView::application_resources)
+/// URI chain — into one merged `ResourceDictionary`, then emit a
+/// [`NoesisResourcesInstalled`] read-back reflecting what actually installed.
+///
+/// Merging both sources here (rather than letting the per-view chain clobber the
+/// code-built dictionary during `Ensure`, as it used to) means opting into a
+/// theme no longer silently drops `.solid()`/`.value()` entries. Runs in
+/// [`NoesisSet::Sync`], after the XAML provider map is populated, so the chain
+/// URIs are visible and the install lands before the scene-build (`Ensure`)
 /// phase parses any `{StaticResource}`.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_resources_bridge(
     resources: Option<Res<NoesisResources>>,
+    views: Query<&NoesisView>,
     state: Option<NonSendMut<NoesisRenderState>>,
     mut installed: MessageWriter<NoesisResourcesInstalled>,
+    mut warned_conflict: Local<bool>,
 ) {
-    let Some(resources) = resources else {
-        return;
-    };
     // Gate on the render state: its existence proves `noesis_runtime::init()`
     // has run, which `GUI::SetApplicationResources` requires.
     let Some(mut state) = state else {
         return;
     };
-    if !resources.is_changed() {
-        return;
+
+    // Union the views' chains (deduped, first-seen order). With merged-dictionary
+    // semantics several views can share one global set of resources; warn once if
+    // views declare *different* chains, since the global is process-wide.
+    let mut chain_uris: Vec<String> = Vec::new();
+    let mut distinct_chains: Vec<&[String]> = Vec::new();
+    for view in &views {
+        if view.application_resources.is_empty() {
+            continue;
+        }
+        if !distinct_chains.contains(&view.application_resources.as_slice()) {
+            distinct_chains.push(&view.application_resources);
+        }
+        for uri in &view.application_resources {
+            if !chain_uris.contains(uri) {
+                chain_uris.push(uri.clone());
+            }
+        }
     }
-    let present = state.install_app_resources_from(&resources.entries, &resources.merged_xaml);
-    installed.write(NoesisResourcesInstalled { present });
+    if distinct_chains.len() > 1 && !*warned_conflict {
+        warn!(
+            "NoesisView.application_resources: views declare different chains {distinct_chains:?}; \
+             application resources are process-global, so all are merged into one dictionary"
+        );
+        *warned_conflict = true;
+    }
+
+    // The code-built side is optional; a theme-only app still installs its chain.
+    let empty = NoesisResources::default();
+    let resources = resources.as_deref().unwrap_or(&empty);
+
+    if let Some(present) =
+        state.reconcile_app_resources(&resources.entries, &resources.merged_xaml, &chain_uris)
+    {
+        // The read-back is the code-built bridge's "look up" half; only surface it
+        // when the consumer actually declared code-built resources.
+        if !resources.entries.is_empty() {
+            installed.write(NoesisResourcesInstalled { present });
+        }
+    }
 }
 
 /// Wires the app-level application-resources bridge. Added transitively by
 /// [`crate::NoesisPlugin`]. Does not insert a default [`NoesisResources`]; the
-/// bridge is opt-in (no resource ⇒ no-op).
+/// bridge is opt-in (no resource ⇒ theme chain only, or no-op).
 pub struct NoesisResourcesPlugin;
 
 impl Plugin for NoesisResourcesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NoesisResourcesInstalled>()
-            .add_systems(PostUpdate, sync_resources_bridge.in_set(NoesisSet::Sync));
+        app.add_message::<NoesisResourcesInstalled>().add_systems(
+            PostUpdate,
+            sync_resources_bridge
+                .in_set(NoesisSet::Sync)
+                // The provider map must hold the chain URIs before we read their
+                // bytes to build the merged dictionary.
+                .after(sync_xaml_provider_map),
+        );
     }
 }
 
