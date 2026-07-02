@@ -105,14 +105,19 @@ impl Plugin for NoesisDiagnosticsPlugin {
 /// wants process lifetime anyway (the same reason `log::set_logger` never
 /// uninstalls), so leaking is the correct trade, not a workaround.
 fn install_error_routing() {
-    let guard = diagnostics::set_error_handler(|file, line, message, fatal| {
-        if fatal {
-            error!(target: "noesis", "{file}:{line}: {message}");
-        } else {
-            warn!(target: "noesis", "{file}:{line}: {message}");
-        }
+    // Guard against re-install: building several `App`s in one process (tests,
+    // editors) would otherwise leak — and stack — a handler each time.
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let guard = diagnostics::set_error_handler(|file, line, message, fatal| {
+            if fatal {
+                error!(target: "noesis", "{file}:{line}: {message}");
+            } else {
+                warn!(target: "noesis", "{file}:{line}: {message}");
+            }
+        });
+        std::mem::forget(guard);
     });
-    std::mem::forget(guard);
 }
 
 /// Pull the current allocator counters, FFI-hop tally, live-scene count and last
