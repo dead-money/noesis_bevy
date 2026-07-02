@@ -7,7 +7,7 @@
 //! Unlike the per-element bridges, resources are *global*: a `{StaticResource}`
 //! is resolved when the element is parsed, walking the element's own
 //! `Resources`, then its ancestors', then the application resources installed
-//! via `GUI::SetApplicationResources`. Since a [`NoesisView`](crate::NoesisView)
+//! via `GUI::SetApplicationResources`. Since a [`NoesisView`]
 //! parses its XAML atomically in [`crate::render`]'s `Ensure` phase, the only
 //! injection point that a freshly-loaded scene's `{StaticResource}` can see is
 //! the application resources. So this bridge is an **app-level Bevy
@@ -84,7 +84,7 @@ pub enum ResourceEntry {
 
 /// App-level application-resources bridge. Insert as a Bevy [`Resource`] (not a
 /// per-entity component): the resources it installs are process-global and must
-/// be in place before any [`NoesisView`](crate::NoesisView) parses.
+/// be in place before any [`NoesisView`] parses.
 #[derive(Resource, Clone, Default, Debug)]
 pub struct NoesisResources {
     /// Code-built entries keyed by `x:Key`. Built into a `ResourceDictionary`
