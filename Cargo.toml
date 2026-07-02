@@ -135,3 +135,19 @@ path = "examples/scoreboard.rs"
 [[example]]
 name = "ecs_ui"
 path = "examples/ecs_ui.rs"
+
+# Integration tests are consolidated into three suite binaries (audit R2): one
+# Bevy+Noesis link each instead of one per file. Run them under cargo-nextest so
+# every `#[test]` still gets its own process (Noesis state is process-global and
+# thread-affine). See tests/README.md.
+[[test]]
+name = "headless_suite"
+path = "tests/headless_suite/main.rs"
+
+[[test]]
+name = "wgpu_suite"
+path = "tests/wgpu_suite/main.rs"
+
+[[test]]
+name = "render_suite"
+path = "tests/render_suite/main.rs"

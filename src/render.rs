@@ -1019,7 +1019,7 @@ fn resolve_scope_path<T>(
 }
 
 impl NoesisRenderState {
-    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub(crate) fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let shared_map = SharedXamlMap::default();
         let shared_fonts = SharedFontMap::default();
         let shared_images = SharedImageMap::default();
@@ -5554,6 +5554,58 @@ impl ViewNode for NoesisOverlayNode {
 /// one directly.
 pub struct NoesisRenderPlugin;
 
+/// Register the main-world half of the Noesis driving pipeline: the [`NoesisSet`]
+/// phase ordering, its per-frame systems (provider sync, scene ensure/teardown,
+/// input + flag apply, frame drive), and the [`NoesisApplyTimer`]. This half
+/// needs no `RenderApp`; the headless test harness ([`crate::NoesisHeadlessPlugin`])
+/// reuses it to run every bridge without `bevy_render`'s `RenderPlugin`. The real
+/// [`NoesisRenderPlugin`] adds the render-sub-app blit half on top.
+pub(crate) fn build_main_world_pipeline(app: &mut App) {
+    // All on the main thread (the one thread Bevy pins reliably), satisfying
+    // Noesis's thread-affinity contract. Bridge plugins slot their per-view
+    // apply systems into `NoesisSet::Apply`.
+    app.init_resource::<NoesisApplyTimer>();
+    app.configure_sets(
+        PostUpdate,
+        (
+            NoesisSet::Sync,
+            NoesisSet::Ensure,
+            NoesisSet::Apply,
+            NoesisSet::Drive,
+        )
+            .chain(),
+    )
+    .add_systems(
+        PostUpdate,
+        (
+            (
+                sync_xaml_provider_map,
+                sync_font_provider_map,
+                sync_texture_provider_map,
+            )
+                .in_set(NoesisSet::Sync),
+            // Reap before rebuild; timer_start at the tail of Ensure brackets
+            // the whole Apply set (the four phases are `.chain()`-ed above).
+            teardown_removed_views
+                .in_set(NoesisSet::Ensure)
+                .before(ensure_noesis_scene),
+            teardown_removed_panels
+                .in_set(NoesisSet::Ensure)
+                .before(ensure_noesis_scene),
+            ensure_noesis_scene.in_set(NoesisSet::Ensure),
+            apply_timer_start
+                .in_set(NoesisSet::Ensure)
+                .after(ensure_noesis_scene),
+            (apply_live_scene_flags, apply_noesis_input).in_set(NoesisSet::Apply),
+            // Timer end leads Drive, closing the window after every Apply system.
+            apply_timer_end
+                .in_set(NoesisSet::Drive)
+                .before(drive_noesis_frame),
+            drive_noesis_frame.in_set(NoesisSet::Drive),
+        ),
+    );
+}
+
 impl Plugin for NoesisRenderPlugin {
     fn build(&self, app: &mut App) {
         // The painted intermediate is the only Noesis data the render world sees;
@@ -5564,49 +5616,7 @@ impl Plugin for NoesisRenderPlugin {
             ExtractComponentPlugin::<NoesisCamera>::default(),
         ));
 
-        // Main-world driving pipeline: all on the main thread (the one thread
-        // Bevy pins reliably), satisfying Noesis's thread-affinity contract.
-        // Bridge plugins slot their per-view apply systems into `NoesisSet::Apply`.
-        app.init_resource::<NoesisApplyTimer>();
-        app.configure_sets(
-            PostUpdate,
-            (
-                NoesisSet::Sync,
-                NoesisSet::Ensure,
-                NoesisSet::Apply,
-                NoesisSet::Drive,
-            )
-                .chain(),
-        )
-        .add_systems(
-            PostUpdate,
-            (
-                (
-                    sync_xaml_provider_map,
-                    sync_font_provider_map,
-                    sync_texture_provider_map,
-                )
-                    .in_set(NoesisSet::Sync),
-                // Reap before rebuild; timer_start at the tail of Ensure brackets
-                // the whole Apply set (the four phases are `.chain()`-ed above).
-                teardown_removed_views
-                    .in_set(NoesisSet::Ensure)
-                    .before(ensure_noesis_scene),
-                teardown_removed_panels
-                    .in_set(NoesisSet::Ensure)
-                    .before(ensure_noesis_scene),
-                ensure_noesis_scene.in_set(NoesisSet::Ensure),
-                apply_timer_start
-                    .in_set(NoesisSet::Ensure)
-                    .after(ensure_noesis_scene),
-                (apply_live_scene_flags, apply_noesis_input).in_set(NoesisSet::Apply),
-                // Timer end leads Drive, closing the window after every Apply system.
-                apply_timer_end
-                    .in_set(NoesisSet::Drive)
-                    .before(drive_noesis_frame),
-                drive_noesis_frame.in_set(NoesisSet::Drive),
-            ),
-        );
+        build_main_world_pipeline(app);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             warn!("RenderApp not present; NoesisRenderPlugin compositing is a no-op");

@@ -1,0 +1,27 @@
+# cargo-nextest configuration.
+#
+# The consolidated integration suites (audit R2) depend on nextest's
+# process-per-test execution model: Noesis' class/resource registration is
+# process-global and thread-affine, so every `#[test]` must run in its own
+# process. That is nextest's only execution model, which is precisely why these
+# suites require it. A plain `cargo test` shares one process per binary and is
+# unsafe here; the suites detect a second Noesis init in a process and panic with
+# instructions instead of crashing. See tests/README.md.
+
+[profile.default]
+# Each test process pays a Noesis + wgpu device bring-up and teardown against the
+# real driver; keep the parallelism well under core count so concurrent GPU
+# device creation does not thrash the driver (the instability this refactor
+# exists to remove). Raise it if the host has headroom.
+test-threads = 8
+
+# GPU init/teardown per process makes a few tests genuinely slow. Warn rather
+# than kill on the first period, then terminate a truly hung test.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+# Inherit test-threads/slow-timeout from default. No retries: a flake here is a
+# real isolation or teardown regression and should fail the run, not be masked.
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
