@@ -412,12 +412,7 @@ pub(crate) fn sync_transform3d_bridge(
     for (entity, transform) in &views {
         if transform.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.apply_transforms3d_for(entity, &transform.transforms);
-            let matrices: HashMap<String, [f32; 12]> = transform
-                .matrices
-                .iter()
-                .map(|(name, spec)| (name.clone(), spec.rows))
-                .collect();
-            state.apply_matrix_transforms3d_for(entity, &matrices);
+            state.apply_matrix_transforms3d_for(entity, &transform.matrices);
         }
 
         let names: Vec<&str> = transform.transforms.keys().map(String::as_str).collect();

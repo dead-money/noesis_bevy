@@ -3731,7 +3731,7 @@ impl NoesisRenderState {
     pub(crate) fn apply_matrix_transforms3d_for(
         &mut self,
         entity: Entity,
-        desired: &HashMap<String, [f32; 12]>,
+        desired: &HashMap<String, crate::transforms3d::Matrix3DSpec>,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
@@ -3746,7 +3746,7 @@ impl NoesisRenderState {
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, matrix) in desired {
+        for (name, spec) in desired {
             let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisTransform3D(matrix): x:Name {:?} not found in scene {:?}",
@@ -3754,7 +3754,7 @@ impl NoesisRenderState {
                 );
                 continue;
             };
-            let transform = MatrixTransform3D::new(*matrix);
+            let transform = MatrixTransform3D::new(spec.rows);
             if element.set_transform3d(&transform) {
                 scene
                     .matrix_transform3d_handles
