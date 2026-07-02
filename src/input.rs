@@ -258,9 +258,10 @@ fn forward_cursor_moved(
     mut reader: MessageReader<CursorMoved>,
     mut queue: ResMut<NoesisInputQueue>,
     mut last: ResMut<LastPointer>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    window: Single<(Entity, &Window), With<PrimaryWindow>>,
     views: Query<(Entity, &NoesisView)>,
 ) {
+    let (primary_window, window) = (window.0, window.1);
     // Convert against the deterministic primary view (lowest `Entity`) and stamp
     // it onto the event, so the render side hit-tests against the same view the
     // coordinates were scaled for. `iter().next()` is query order and would let
@@ -270,7 +271,13 @@ fn forward_cursor_moved(
         return;
     };
     for ev in reader.read() {
-        if let Some((x, y)) = to_view_coords(&window, scene, ev.position.x, ev.position.y) {
+        // Only the primary window feeds the primary view; a secondary window's
+        // moves would be converted with the wrong dimensions (see P0.7's
+        // primary-view rule).
+        if ev.window != primary_window {
+            continue;
+        }
+        if let Some((x, y)) = to_view_coords(window, scene, ev.position.x, ev.position.y) {
             last.x = x;
             last.y = y;
             last.valid = true;
@@ -406,16 +413,21 @@ fn forward_keyboard(mut reader: MessageReader<KeyboardInput>, mut queue: ResMut<
 fn forward_touch(
     mut reader: MessageReader<TouchInput>,
     mut queue: ResMut<NoesisInputQueue>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    window: Single<(Entity, &Window), With<PrimaryWindow>>,
     views: Query<(Entity, &NoesisView)>,
 ) {
+    let (primary_window, window) = (window.0, window.1);
     // Same deterministic primary-view selection as the cursor forwarder.
     let Some((entity, scene)) = views.iter().min_by_key(|(entity, _)| *entity) else {
         reader.read();
         return;
     };
     for ev in reader.read() {
-        let Some((x, y)) = to_view_coords(&window, scene, ev.position.x, ev.position.y) else {
+        // Only the primary window feeds the primary view (see P0.7's rule).
+        if ev.window != primary_window {
+            continue;
+        }
+        let Some((x, y)) = to_view_coords(window, scene, ev.position.x, ev.position.y) else {
             continue;
         };
         let id = ev.id;
@@ -430,8 +442,19 @@ fn forward_touch(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn forward_focus(mut reader: MessageReader<WindowFocused>, mut queue: ResMut<NoesisInputQueue>) {
+fn forward_focus(
+    mut reader: MessageReader<WindowFocused>,
+    mut queue: ResMut<NoesisInputQueue>,
+    primary_window: Single<Entity, With<PrimaryWindow>>,
+) {
+    let primary_window = *primary_window;
     for ev in reader.read() {
+        // Ignore focus changes on secondary windows; alt-tabbing between the
+        // app's own windows would otherwise spuriously activate/deactivate the
+        // primary view (see P0.7's rule).
+        if ev.window != primary_window {
+            continue;
+        }
         queue.push(NoesisInputEvent::Focus(ev.focused));
     }
 }
@@ -449,13 +472,19 @@ fn forward_focus(mut reader: MessageReader<WindowFocused>, mut queue: ResMut<Noe
 fn resize_noesis_scene(
     mut reader: MessageReader<WindowResized>,
     mut views: Query<&mut NoesisView>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    window: Single<(Entity, &Window), With<PrimaryWindow>>,
 ) {
+    let (primary_window, window) = (window.0, window.1);
     if views.is_empty() {
         reader.read();
         return;
     }
-    for _ev in reader.read() {
+    for ev in reader.read() {
+        // Secondary-window resizes must not resize the primary view's
+        // intermediate (see P0.7's rule).
+        if ev.window != primary_window {
+            continue;
+        }
         let physical = window.physical_size();
         if physical.x > 0 && physical.y > 0 {
             for mut scene in &mut views {
