@@ -1,6 +1,6 @@
 [package]
 name = "noesis_bevy"
-version = "0.11.2"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.87"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
@@ -35,7 +35,7 @@ bevy_render = "0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
 # The derive crate ships in this repo and releases in lockstep (path for local
 # dev, version for the published crate).
-noesis_bevy_derive = { path = "./derive", version = "0.11" }
+noesis_bevy_derive = { path = "./derive", version = "0.12" }
 # The public crate from crates.io. This branch needs 0.12 (set_source and
 # clear_binding). Until 0.12 is published, a local `[patch.crates-io]` override
 # can build against the sibling checkout (see RELEASING.md).
