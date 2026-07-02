@@ -181,7 +181,7 @@ pub type ObjectRow = Vec<(String, ItemValue)>;
 ///
 /// `class_name` must be globally unique among registered Noesis classes (it is
 /// registered once, on first use, and held for the binding's lifetime).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectSource {
     /// Noesis class name registered for these item objects.
     pub class_name: String,
@@ -279,7 +279,9 @@ pub struct NoesisItems {
     /// Desired bindable **object** items per `x:Name`, for lists whose
     /// `ItemTemplate`/`DataTemplate` binds per-item properties (`{Binding Name}`,
     /// `{Binding Score}`, ...). A control should appear in either [`Self::sources`]
-    /// (primitive items) or here, not both.
+    /// (primitive items) or here, not both. If a name appears in both, the object
+    /// items take precedence: the primitive [`Self::sources`] entry is ignored and
+    /// a warning is logged.
     pub objects: HashMap<String, ObjectSource>,
 }
 
@@ -433,6 +435,14 @@ pub struct ItemsBinding {
     /// reset to the first item) on the next `GetView`.
     view: Option<CollectionView>,
     bound_for_uri: Option<String>,
+    /// Last typed source pushed via [`Self::set_typed`], so an unchanged source
+    /// on a component change is skipped instead of cleared+repushed (a clear
+    /// would reset the control's selection and scroll — "Reset is the enemy").
+    /// Invalidated (`None`) by any other mutation of `coll`.
+    applied_typed: Option<Vec<ItemValue>>,
+    /// Last object source pushed via [`Self::set_objects`], skipped when equal for
+    /// the same reason as [`Self::applied_typed`].
+    applied_objects: Option<ObjectSource>,
     /// Desired selected index from [`NoesisItems::select`] (`None` = leave the
     /// control's selection alone).
     desired_select: Option<i32>,
@@ -480,6 +490,8 @@ impl ItemsBinding {
             cvs,
             view,
             bound_for_uri: None,
+            applied_typed: None,
+            applied_objects: None,
             desired_select: None,
             applied_select: None,
             desired_nav: None,
@@ -501,15 +513,25 @@ impl ItemsBinding {
         for item in items {
             self.coll.push_string(item.as_ref());
         }
+        self.applied_typed = None;
+        self.applied_objects = None;
         self.applied_select = None;
     }
 
-    /// Replace the whole list with typed items.
+    /// Replace the whole list with typed items. No-op when `items` is unchanged
+    /// since the last call, so mutating one list in a [`NoesisItems`] component
+    /// (which re-applies every name) does not clear this one and reset its
+    /// selection and scroll.
     pub fn set_typed(&mut self, items: &[ItemValue]) {
+        if self.applied_typed.as_deref() == Some(items) {
+            return;
+        }
         self.coll.clear();
         for item in items {
             item.push_into(&mut self.coll);
         }
+        self.applied_typed = Some(items.to_vec());
+        self.applied_objects = None;
         self.applied_select = None;
     }
 
@@ -517,10 +539,15 @@ impl ItemsBinding {
     /// class on first use (schema from the first row), then rebuilds the
     /// instances and the backing collection. No-op (clears) for an empty source.
     pub(crate) fn set_objects(&mut self, src: &ObjectSource) {
+        if self.applied_objects.as_ref() == Some(src) {
+            return;
+        }
         if self.obj_registration.is_none() {
             let Some(first) = src.rows.first() else {
                 self.coll.clear();
                 self.obj_instances.clear();
+                self.applied_typed = None;
+                self.applied_objects = Some(src.clone());
                 self.applied_select = None;
                 return;
             };
@@ -563,27 +590,41 @@ impl ItemsBinding {
             self.coll.push_object(&instance);
             self.obj_instances.push(instance);
         }
+        self.applied_typed = None;
+        self.applied_objects = Some(src.clone());
         self.applied_select = None;
     }
 
     /// Append one string item.
     pub fn push(&mut self, item: &str) {
         self.coll.push_string(item);
+        self.invalidate_applied();
     }
 
     /// Append one typed item.
     pub fn push_value(&mut self, item: &ItemValue) {
         item.push_into(&mut self.coll);
+        self.invalidate_applied();
     }
 
     /// Remove the item at `index` (ignored if out of range).
     pub fn remove_at(&mut self, index: usize) {
         self.coll.remove_at(index);
+        self.invalidate_applied();
     }
 
     /// Empty the list.
     pub fn clear(&mut self) {
         self.coll.clear();
+        self.invalidate_applied();
+    }
+
+    /// Forget the last-applied source snapshots after an imperative edit, so the
+    /// next declarative [`Self::set_typed`] / [`Self::set_objects`] re-pushes even
+    /// if its value matches the pre-edit one.
+    fn invalidate_applied(&mut self) {
+        self.applied_typed = None;
+        self.applied_objects = None;
     }
 
     /// The backing collection, for handing to

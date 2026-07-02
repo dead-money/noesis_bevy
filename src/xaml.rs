@@ -135,6 +135,11 @@ pub fn update_xaml_registry(
     assets: Res<Assets<XamlAsset>>,
     asset_server: Res<AssetServer>,
     mut registry: ResMut<XamlRegistry>,
+    // `AssetId` → registry key, so removal arms can find the entry after the
+    // asset (and its path) are already gone: `get_path` returns `None` for a
+    // dropped asset, so keying off the live path here would leave stale
+    // entries and leaked byte buffers behind.
+    mut keys: Local<HashMap<AssetId<XamlAsset>, String>>,
 ) {
     for event in events.read() {
         match *event {
@@ -150,15 +155,15 @@ pub fn update_xaml_registry(
                     path,
                     asset.bytes.len(),
                 );
-                registry
-                    .entries
-                    .insert(path.to_string(), Arc::clone(&asset.bytes));
+                let key = path.to_string();
+                keys.insert(id, key.clone());
+                registry.entries.insert(key, Arc::clone(&asset.bytes));
             }
             AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
-                let Some(path) = asset_server.get_path(id) else {
+                let Some(key) = keys.remove(&id) else {
                     continue;
                 };
-                registry.entries.remove(&path.to_string());
+                registry.entries.remove(&key);
             }
             AssetEvent::LoadedWithDependencies { .. } => {}
         }

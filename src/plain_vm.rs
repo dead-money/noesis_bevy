@@ -122,7 +122,10 @@ pub trait NoesisViewModel: Send + Sync + 'static {
 pub(crate) struct PlainVmEntry {
     instance: PlainInstance,
     _class: PlainVmClass,
-    /// Registered Noesis type name, kept for `DataContext`-collision diagnostics.
+    /// Friendly Noesis type name (the `T` identifier), for
+    /// `DataContext`-collision diagnostics. Not the registered reflection name,
+    /// which is made per-entity unique so multiple views of the same `T` don't
+    /// collide in the process-global type registry (see [`Self::build`]).
     type_name: String,
     /// Property names in index order, for `set_and_notify`.
     prop_names: Vec<String>,
@@ -137,9 +140,18 @@ pub(crate) struct PlainVmEntry {
 impl PlainVmEntry {
     /// Register the reflected type, wire the `on_set` writeback to this entry's
     /// own sink, and instantiate. Main-thread only. `None` if registration is
-    /// rejected (e.g. a duplicate type name).
+    /// rejected.
+    ///
+    /// The reflection type is registered under a per-`entity` unique name
+    /// (`"{type_name}#{bits}"`) rather than the bare `type_name`: Noesis's type
+    /// registry is process-global, so two views carrying the same `T` would
+    /// otherwise fight over one name — the second `register` fails, is retried
+    /// every frame, and warns. Binding resolves properties by name on the
+    /// instance's actual type, so the mangled registration name is invisible to
+    /// XAML `{Binding …}`; only the friendly `type_name` is kept, for diagnostics.
     pub(crate) fn build(
         type_name: &str,
+        entity: Entity,
         props: &[(&'static str, PlainType)],
         target: AttachTarget,
     ) -> Option<Self> {
@@ -147,7 +159,8 @@ impl PlainVmEntry {
         let kinds: Vec<PlainType> = props.iter().map(|(_, k)| *k).collect();
         let set_sink: SetSink = Arc::new(Mutex::new(Vec::new()));
 
-        let mut builder = PlainVmBuilder::new(type_name);
+        let registered_name = format!("{type_name}#{}", entity.to_bits());
+        let mut builder = PlainVmBuilder::new(&registered_name);
         for (name, kind) in props {
             builder.add_property(name, *kind);
         }

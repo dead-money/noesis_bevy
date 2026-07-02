@@ -418,26 +418,33 @@ pub struct NoesisView {
     ///
     /// [`RenderFlag::Ppaa`]: noesis_runtime::view::RenderFlag::Ppaa
     pub ppaa: bool,
-    /// `ResourceDictionary` URIs to install as the process-global
+    /// `ResourceDictionary` URIs to merge into the process-global
     /// application resources (styles, brushes, `ControlTemplate`s), in
     /// dependency order. Each URI must resolve via the same XAML
-    /// provider that serves `xaml_uri`. Loaded once on first scene
-    /// build; later changes are ignored.
+    /// provider that serves `xaml_uri`.
     ///
-    /// The plugin uses
-    /// [`noesis_runtime::gui::install_app_resources_chain`]: an
-    /// empty parent `ResourceDictionary` is installed up front, then
-    /// each leaf is added to `parent.MergedDictionaries` and its
-    /// `Source` assigned in order. This ensures cross-sibling
-    /// `{StaticResource Foo}` references inside one leaf can find
-    /// keys from earlier leaves (the simpler `LoadXaml +
-    /// SetApplicationResources` path silently null-resolves them).
+    /// These URIs are merged into the one process-global dictionary the
+    /// [`NoesisResources`](crate::resources::NoesisResources) bridge also
+    /// feeds: each URI becomes a merged dictionary, and any code-built
+    /// `NoesisResources` entries are layered on top as base entries (so a
+    /// code-built override wins over the theme). Reconciled in the `Sync` phase
+    /// before any scene parses. Every view's list is unioned into that shared
+    /// dictionary, so declaring the same theme on several views is fine;
+    /// declaring *different* chains merges them all (with a warning) since the
+    /// resources are process-wide.
     ///
-    /// A single-URI list works fine: it installs that one dict
-    /// as a merged child of an otherwise-empty parent. For the Noesis
-    /// SDK sample themes, that means a `vec![\"NoesisTheme.DarkBlue.xaml\"]`
-    /// is sufficient (the `xaml_viewer` example does this via
-    /// `--theme`).
+    /// A `{StaticResource}` in a later URI that references an earlier URI's key
+    /// resolves in dependency order **when no code-built `NoesisResources`
+    /// entries are present** (the chain then installs leaf-by-leaf with the
+    /// shared parent scope wired in first). If you also supply code-built
+    /// entries or `merged_xaml`, each chain leaf is re-parsed standalone and
+    /// such cross-leaf references null-resolve at parse time; keep cross-leaf
+    /// `{StaticResource}`s within a single URI (or its own nested `Source`
+    /// children) in that case.
+    ///
+    /// For the Noesis SDK sample themes a single-URI list such as
+    /// `vec![\"NoesisTheme.DarkBlue.xaml\"]` is sufficient (the `xaml_viewer`
+    /// example does this via `--theme`).
     pub application_resources: Vec<String>,
     /// Font families Noesis falls back to when an element doesn't
     /// resolve its declared `FontFamily`. Each entry is a Noesis-style
@@ -475,6 +482,16 @@ impl Default for NoesisView {
             font_fallbacks: Vec::new(),
         }
     }
+}
+
+/// The inputs that produced the currently-installed process-global application
+/// resources. Compared field-by-field so
+/// [`NoesisRenderState::reconcile_app_resources`] reinstalls only when the
+/// code-built entries, merged XAML, or URI chain actually change.
+struct AppResourcesSnapshot {
+    entries: HashMap<String, crate::resources::ResourceEntry>,
+    merged_xaml: Vec<String>,
+    chain_uris: Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -536,12 +553,14 @@ pub(crate) struct NoesisRenderState {
     /// makes scan-time gating irrelevant: any face present here is
     /// findable by `MatchFont` regardless of when `ScanFolder` ran.
     registered_faces: HashSet<(String, String)>,
-    /// URI list already handed to
-    /// `gui::install_app_resources_chain`. Guards us against
-    /// re-installing the same chain every frame. `None` means we
-    /// haven't installed anything yet; `Some(chain)` records exactly
-    /// what we last installed.
-    loaded_app_resources_chain: Option<Vec<String>>,
+    /// Snapshot of the last process-global application resources we installed
+    /// (code-built entries + merged XAML + the views' URI chain), so
+    /// [`Self::reconcile_app_resources`] can skip a rebuild when nothing
+    /// changed. `None` until the first install. Both the
+    /// [`NoesisResources`](crate::resources::NoesisResources) bridge and the
+    /// per-view `application_resources` chain feed one merged dictionary here —
+    /// they no longer clobber each other.
+    installed_app_resources: Option<AppResourcesSnapshot>,
     /// Wall-clock origin for `View::Update(time)`. Bevy's `Time<Real>`
     /// isn't extracted to the render world by default (only
     /// `Time<Virtual>` and the generic `Time` are), so we keep our own.
@@ -596,6 +615,14 @@ pub(crate) struct NoesisRenderState {
     /// before the registered device. Keyed by view entity. See
     /// [`crate::commands`].
     command_hosts: HashMap<Entity, CommandEntry>,
+    /// View entities whose `NoesisVm` / `NoesisCommands` host failed to
+    /// register+instantiate, tagged by host kind (`"NoesisVm"` /
+    /// `"NoesisCommands"`), so the `warn!` fires once instead of every frame: a
+    /// failed build leaves the `view_models` / `command_hosts` slot vacant, so
+    /// [`Self::ensure_view_model`] / [`Self::ensure_commands`] retry it each
+    /// frame. Cleared on success and on teardown so a fixed/respawned host
+    /// re-warns. Mirrors [`Self::failed_fragments`].
+    warned_host_build_failures: HashSet<(Entity, &'static str)>,
     /// `(view, target)` pairs already warned about a `DataContext` collision, so
     /// each clash is reported once rather than every frame. A `NoesisVm`,
     /// `NoesisCommands`, and/or plain view models all defaulting to
@@ -1029,7 +1056,7 @@ impl NoesisRenderState {
             pointer_over_ui: false,
             fallbacks_installed: false,
             registered_faces: HashSet::new(),
-            loaded_app_resources_chain: None,
+            installed_app_resources: None,
             clock_origin: std::time::Instant::now(),
             last_keydown_swallow: HashMap::new(),
             last_click_target: HashMap::new(),
@@ -1039,6 +1066,7 @@ impl NoesisRenderState {
             items_sources: HashMap::new(),
             plain_vms: HashMap::new(),
             command_hosts: HashMap::new(),
+            warned_host_build_failures: HashSet::new(),
             warned_dc_collisions: HashSet::new(),
             binding_entries: HashMap::new(),
             panels: HashMap::new(),
@@ -1057,26 +1085,39 @@ impl NoesisRenderState {
     }
 
     /// Build view `entity`'s [`VmEntry`] on first sight (register the Noesis
-    /// class, instantiate, wire the entity-tagged change forwarder). No-op if it
-    /// already exists. Main-thread only.
+    /// class, instantiate, wire the entity-tagged change forwarder). When a
+    /// re-inserted [`NoesisVm`](crate::viewmodel::NoesisVm) carries a changed def
+    /// (class, props, or target), the stale entry is reaped — detached off the
+    /// live scene, then dropped so its class unregisters — before rebuilding, or
+    /// the fresh registration would collide with the old one under the same name.
+    /// No-op when the def is unchanged. Main-thread only.
     pub(crate) fn ensure_view_model(
         &mut self,
         entity: Entity,
         def: &ViewModelDef,
         changed: &SharedVmChangedQueue,
     ) {
-        if self.view_models.contains_key(&entity) {
-            return;
+        if let Some(existing) = self.view_models.get(&entity) {
+            if existing.matches(def) {
+                return;
+            }
+            self.reap_view_model_for(entity);
         }
         match VmEntry::build(entity, def, changed) {
             Some(entry) => {
                 self.view_models.insert(entity, entry);
+                self.warned_host_build_failures
+                    .remove(&(entity, "NoesisVm"));
                 self.warn_datacontext_collisions(entity);
             }
-            None => warn!(
-                "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
-                def.class_name(),
-            ),
+            None => {
+                if self.warned_host_build_failures.insert((entity, "NoesisVm")) {
+                    warn!(
+                        "NoesisViewModel: failed to register/instantiate class {:?} (duplicate name?)",
+                        def.class_name(),
+                    );
+                }
+            }
         }
     }
 
@@ -1133,26 +1174,42 @@ impl NoesisRenderState {
 
     /// Build view `entity`'s [`CommandEntry`] on first sight (register the Noesis
     /// command-host class, instantiate, build a `Command` per declared name tagged
-    /// with `entity` and pushing to `queue`). No-op if it already exists.
-    /// Main-thread only.
+    /// with `entity` and pushing to `queue`). When a re-inserted
+    /// [`NoesisCommands`](crate::commands::NoesisCommands) carries a changed def
+    /// (class, commands, or target), the stale host is reaped — detached off the
+    /// live scene, then dropped so its class unregisters — before rebuilding, or
+    /// the fresh registration would collide with the old one under the same name.
+    /// No-op when the def is unchanged. Main-thread only.
     pub(crate) fn ensure_commands(
         &mut self,
         entity: Entity,
         def: &CommandsDef,
         queue: &SharedCommandQueue,
     ) {
-        if self.command_hosts.contains_key(&entity) {
-            return;
+        if let Some(existing) = self.command_hosts.get(&entity) {
+            if existing.matches(def) {
+                return;
+            }
+            self.reap_commands_for(entity);
         }
         match CommandEntry::build(entity, def, queue) {
             Some(entry) => {
                 self.command_hosts.insert(entity, entry);
+                self.warned_host_build_failures
+                    .remove(&(entity, "NoesisCommands"));
                 self.warn_datacontext_collisions(entity);
             }
-            None => warn!(
-                "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
-                def.class_name(),
-            ),
+            None => {
+                if self
+                    .warned_host_build_failures
+                    .insert((entity, "NoesisCommands"))
+                {
+                    warn!(
+                        "NoesisCommands: failed to register/instantiate class {:?} (duplicate name?)",
+                        def.class_name(),
+                    );
+                }
+            }
         }
     }
 
@@ -1274,6 +1331,16 @@ impl NoesisRenderState {
                 *ent != entity || sources.contains_key(name) || objects.contains_key(name)
             });
             for (name, items) in sources {
+                // Object items take precedence over a primitive source for the
+                // same name (see `NoesisItems::objects`); skip the source so the
+                // control is not applied twice, non-deterministically.
+                if objects.contains_key(name) {
+                    warn!(
+                        "NoesisItems: x:Name {name:?} is in both sources and objects; \
+                         using the object items and ignoring the primitive source",
+                    );
+                    continue;
+                }
                 let binding = self
                     .items_sources
                     .entry((entity, name.clone()))
@@ -1488,7 +1555,8 @@ impl NoesisRenderState {
     }
 
     /// Store a freshly built binding for view `entity`'s `(element, property)`
-    /// target. Bound to its element by the next [`Self::bind_pending_for`] pass.
+    /// target, replacing any prior entry for that key. Bound to its element by
+    /// the next [`Self::bind_pending_for`] pass.
     pub(crate) fn insert_binding(
         &mut self,
         entity: Entity,
@@ -1498,6 +1566,43 @@ impl NoesisRenderState {
     ) {
         self.binding_entries
             .insert((entity, element, property), BindingEntry::new(built));
+    }
+
+    /// Reap view `entity`'s single [`NoesisBinding`](crate::binding::NoesisBinding)
+    /// target `(element, property)`: clear the live binding off the element's DP
+    /// (`ClearValue`, so it stops driving the property) before dropping the owning
+    /// entry. Mirrors [`Self::reap_items_for`]'s detach-then-drop order; the clear
+    /// is a no-op when the scene or element is gone or the binding never attached.
+    pub(crate) fn reap_binding_for(&mut self, entity: Entity, element: &str, property: &str) {
+        let key = (entity, element.to_owned(), property.to_owned());
+        if let Some(entry) = self.binding_entries.get(&key)
+            && let Some(scene) = self.scenes.get(&entity)
+            && !entry.needs_bind(&scene.built_for_uri)
+            && let Some(content) = scene.view.content()
+            && let Some(mut target) = resolve_named(&content, element)
+        {
+            target.clear_value(property);
+        }
+        self.binding_entries.remove(&key);
+    }
+
+    /// Drop (and unbind) any of view `entity`'s binding targets no longer named
+    /// by its [`NoesisBinding`]'s current `keep` set. A target removed from a
+    /// re-inserted component is unbound off its element via
+    /// [`Self::reap_binding_for`] and released here; without this a dropped
+    /// binding keeps driving its property forever.
+    pub(crate) fn prune_bindings_for(&mut self, entity: Entity, keep: &[(String, String)]) {
+        let stale: Vec<(String, String)> = self
+            .binding_entries
+            .keys()
+            .filter(|(ent, element, property)| {
+                *ent == entity && !keep.iter().any(|(ke, kp)| ke == element && kp == property)
+            })
+            .map(|(_, element, property)| (element.clone(), property.clone()))
+            .collect();
+        for (element, property) in stale {
+            self.reap_binding_for(entity, &element, &property);
+        }
     }
 
     /// Attach any of view `entity`'s not-yet-bound bindings onto their named
@@ -1552,10 +1657,8 @@ impl NoesisRenderState {
     ) -> Vec<(u32, crate::plain_vm::PlainValue)> {
         let key = (entity, type_id);
         if let std::collections::hash_map::Entry::Vacant(slot) = self.plain_vms.entry(key) {
-            let Some(entry) = PlainVmEntry::build(type_name, props, target.clone()) else {
-                warn!(
-                    "NoesisViewModel: failed to register plain VM {type_name:?} (duplicate name?)",
-                );
+            let Some(entry) = PlainVmEntry::build(type_name, entity, props, target.clone()) else {
+                warn!("NoesisViewModel: failed to register plain VM {type_name:?}");
                 return Vec::new();
             };
             slot.insert(entry);
@@ -1731,6 +1834,13 @@ impl NoesisRenderState {
             drop(entry);
         }
         self.failed_fragments.retain(|(ent, _)| *ent != entity);
+        // Panels are also valid targets for the click/keydown watches (both reap
+        // paths key into `self.panels`), so this terminal teardown must prune
+        // their dedupe snapshots just as [`Self::teardown_for`] does for views —
+        // otherwise a despawned watched panel leaks its entries forever.
+        self.last_click_target.retain(|(ent, _), _| *ent != entity);
+        self.last_keydown_swallow
+            .retain(|(ent, _), _| *ent != entity);
     }
 
     /// Poll panel `entity`'s watched fragment-scope names, returning `(name,
@@ -1906,7 +2016,13 @@ impl NoesisRenderState {
             return;
         }
 
-        self.teardown_scene(entity);
+        // Evaluate every readiness gate BEFORE tearing down the live scene. A
+        // hot-reload (`bytes_changed`) or a resize that also needs a rebuild
+        // must not destroy the current scene only to bail on an unmet gate and
+        // leave the view blank — P0.8 strips the ghost intermediate, so an early
+        // teardown blanks rather than freezing on the last frame. Teardown is
+        // deferred until all gates pass, just before the rebuild below. (The
+        // explicit `xaml_uri = ""` case above still tears down eagerly.)
 
         // Confirm the XAML is currently present; skip if not.
         let Some(current_bytes) = current_bytes else {
@@ -1960,6 +2076,10 @@ impl NoesisRenderState {
             }
         }
 
+        // All readiness gates passed: this is the first point at which the
+        // rebuild is guaranteed to proceed, so tear down the stale scene now.
+        self.teardown_scene(entity);
+
         // Eagerly register every font currently in `SharedFontMap` with
         // the C++ `CachedFontProvider` before XAML parsing runs. Noesis's
         // own lazy `ScanFolder` model fires once per folder during
@@ -1975,11 +2095,13 @@ impl NoesisRenderState {
         // registered above gets picked up by the scan callback.
         self.install_font_fallbacks_if_needed(&config.font_fallbacks);
 
-        // Application resources must be installed BEFORE the scene's XAML
-        // is parsed, or the scene's `<Style TargetType="Button">` can't
-        // resolve theme brushes. One-shot; re-configuring the URI later
-        // would currently require a process restart.
-        self.install_application_resources_if_needed(config);
+        // Application resources (theme chain + code-built entries) are installed
+        // by `reconcile_app_resources` in the `Sync` phase, which runs before
+        // this `Ensure` build and merges every view's `application_resources`
+        // with the `NoesisResources` bridge into one dictionary. The chain-URI
+        // readiness gate above kept us from reaching here until those URIs
+        // resolved, and `Sync` runs after the provider map is populated, so the
+        // resources are installed by now.
 
         let Some(element) = FrameworkElement::load(&config.xaml_uri) else {
             warn!(
@@ -3059,38 +3181,48 @@ impl NoesisRenderState {
 
     /// Apply view `entity`'s one-shot directional / tab focus moves
     /// (`UIElement::MoveFocus`). Missing names warn; a move that didn't shift
-    /// focus warns (non-traversable direction / no neighbour).
+    /// focus warns (non-traversable direction / no neighbour). Returns `false`
+    /// when the target root wasn't ready to receive the actions (scene not yet
+    /// built / no content, or panel fragment not yet mounted), so the caller can
+    /// keep the one-shots queued until the mount/build frame instead of dropping
+    /// them; an empty `moves` slice reports `true` (nothing to do).
     pub(crate) fn apply_focus_moves_for(
         &mut self,
         entity: Entity,
         moves: &[crate::focus_input::FocusMove],
-    ) {
+    ) -> bool {
         if moves.is_empty() {
-            return;
+            return true;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
             // Panel entity: resolve in the fragment's private namescope.
-            if let Some(panel) = self.panels.get(&entity) {
-                for m in moves {
-                    let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
-                        warn!(
-                            "NoesisFocusControl: move-from x:Name {:?} not found in panel fragment",
-                            m.from,
-                        );
-                        continue;
-                    };
-                    if !element.move_focus(m.direction, m.wrapped) {
-                        warn!(
-                            "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
-                            m.direction, m.wrapped, m.from,
-                        );
-                    }
+            let Some(panel) = self.panels.get(&entity) else {
+                return false;
+            };
+            if panel.mounted_for_uri.is_none() {
+                // Fragment exists but isn't in the visual tree yet; focus can't
+                // move on a detached element — retry once it mounts.
+                return false;
+            }
+            for m in moves {
+                let Some(mut element) = resolve_named(&panel.fragment, &m.from) else {
+                    warn!(
+                        "NoesisFocusControl: move-from x:Name {:?} not found in panel fragment",
+                        m.from,
+                    );
+                    continue;
+                };
+                if !element.move_focus(m.direction, m.wrapped) {
+                    warn!(
+                        "NoesisFocusControl: MoveFocus({:?}, wrapped={}) from {:?} moved nothing",
+                        m.direction, m.wrapped, m.from,
+                    );
                 }
             }
-            return;
+            return true;
         };
         let Some(content) = scene.view.content() else {
-            return;
+            return false;
         };
         for m in moves {
             let Some(mut element) = resolve_named(&content, &m.from) else {
@@ -3107,41 +3239,48 @@ impl NoesisRenderState {
                 );
             }
         }
+        true
     }
 
     /// Apply view `entity`'s one-shot focus-engagement actions
-    /// (`UIElement::Focus(engage)`).
+    /// (`UIElement::Focus(engage)`). Returns `false` when the target root wasn't
+    /// ready (see [`Self::apply_focus_moves_for`]); an empty slice reports `true`.
     pub(crate) fn apply_focus_engages_for(
         &mut self,
         entity: Entity,
         engages: &[crate::focus_input::FocusEngage],
-    ) {
+    ) -> bool {
         if engages.is_empty() {
-            return;
+            return true;
         }
         let Some(scene) = self.scenes.get_mut(&entity) else {
             // Panel entity: resolve in the fragment's private namescope.
-            if let Some(panel) = self.panels.get(&entity) {
-                for e in engages {
-                    let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
-                        warn!(
-                            "NoesisFocusControl: engage x:Name {:?} not found in panel fragment",
-                            e.name,
-                        );
-                        continue;
-                    };
-                    if !element.focus_engage(e.engage) {
-                        warn!(
-                            "NoesisFocusControl: element {:?} refused focus(engage={})",
-                            e.name, e.engage,
-                        );
-                    }
+            let Some(panel) = self.panels.get(&entity) else {
+                return false;
+            };
+            if panel.mounted_for_uri.is_none() {
+                // Not in the visual tree yet; retry once it mounts.
+                return false;
+            }
+            for e in engages {
+                let Some(mut element) = resolve_named(&panel.fragment, &e.name) else {
+                    warn!(
+                        "NoesisFocusControl: engage x:Name {:?} not found in panel fragment",
+                        e.name,
+                    );
+                    continue;
+                };
+                if !element.focus_engage(e.engage) {
+                    warn!(
+                        "NoesisFocusControl: element {:?} refused focus(engage={})",
+                        e.name, e.engage,
+                    );
                 }
             }
-            return;
+            return true;
         };
         let Some(content) = scene.view.content() else {
-            return;
+            return false;
         };
         for e in engages {
             let Some(mut element) = resolve_named(&content, &e.name) else {
@@ -3158,6 +3297,7 @@ impl NoesisRenderState {
                 );
             }
         }
+        true
     }
 
     /// Reconcile view `entity`'s `KeyBinding`s against `specs`. Each binding's
@@ -3591,7 +3731,7 @@ impl NoesisRenderState {
     pub(crate) fn apply_matrix_transforms3d_for(
         &mut self,
         entity: Entity,
-        desired: &HashMap<String, [f32; 12]>,
+        desired: &HashMap<String, crate::transforms3d::Matrix3DSpec>,
     ) {
         let Some(scene) = self.scenes.get_mut(&entity) else {
             return;
@@ -3606,7 +3746,7 @@ impl NoesisRenderState {
         let Some(content) = scene.view.content() else {
             return;
         };
-        for (name, matrix) in desired {
+        for (name, spec) in desired {
             let Some(mut element) = resolve_named(&content, name) else {
                 warn!(
                     "NoesisTransform3D(matrix): x:Name {:?} not found in scene {:?}",
@@ -3614,7 +3754,7 @@ impl NoesisRenderState {
                 );
                 continue;
             };
-            let transform = MatrixTransform3D::new(*matrix);
+            let transform = MatrixTransform3D::new(spec.rows);
             if element.set_transform3d(&transform) {
                 scene
                     .matrix_transform3d_handles
@@ -3789,20 +3929,32 @@ impl NoesisRenderState {
         }
     }
 
-    /// Build a `ResourceDictionary` from `entries` (code-built brushes + boxed
-    /// scalar values) plus any parsed `merged_xaml` fragments, and install it as
-    /// the process-global application resources (`GUI::SetApplicationResources`).
-    /// Noesis takes its own reference, so the Rust dictionary handle drops right
-    /// after. Returns the declared `entries` keys confirmed resolvable through
-    /// the live application resources (sorted): the read-back the
-    /// [`NoesisResources`](crate::resources::NoesisResources) bridge surfaces.
-    /// Called from the `Sync` phase (before scene build) when the resource
-    /// changes, so a scene's `{StaticResource}` can resolve at parse time.
-    pub(crate) fn install_app_resources_from(
+    /// Reconcile the single process-global application resources dictionary from
+    /// every source that feeds it: the code-built `entries` and `merged_xaml` of
+    /// the [`NoesisResources`](crate::resources::NoesisResources) bridge, plus
+    /// the `chain_uris` collected from the views' `application_resources`. All
+    /// three feed one process-global dictionary, so opting into a theme (a URI
+    /// chain) no longer clobbers code-built brushes/values (and vice versa) — the
+    /// old two-installer design let whichever ran last in the frame win.
+    ///
+    /// Two install paths: a pure-chain config (no `entries`/`merged_xaml`) goes
+    /// through `install_app_resources_chain` so cross-leaf `{StaticResource}`s
+    /// resolve in dependency order; anything with code-built inputs is merged into
+    /// one `ResourceDictionary` (base `entries` win over merged, per WPF) and
+    /// installed with `GUI::SetApplicationResources`.
+    ///
+    /// Returns `Some(present)` — the declared `entries` keys confirmed resolvable
+    /// through the live application resources, sorted — only when this call
+    /// actually (re)installed; `None` when the merged inputs are unchanged since
+    /// the last install or when a `chain_uris` entry hasn't reached the XAML
+    /// provider yet (retried next frame). Called from the `Sync` phase (before
+    /// scene build) so a scene's `{StaticResource}` resolves at parse time.
+    pub(crate) fn reconcile_app_resources(
         &mut self,
         entries: &HashMap<String, crate::resources::ResourceEntry>,
         merged_xaml: &[String],
-    ) -> Vec<String> {
+        chain_uris: &[String],
+    ) -> Option<Vec<String>> {
         use crate::brushes::BrushSpec;
         use crate::resources::ResourceEntry;
         use noesis_runtime::brushes::{GradientStop, LinearGradientBrush, SolidColorBrush};
@@ -3810,10 +3962,86 @@ impl NoesisRenderState {
             ResourceDictionary, application_resources_contains, set_application_resources,
         };
 
+        if entries.is_empty() && merged_xaml.is_empty() && chain_uris.is_empty() {
+            return None;
+        }
+
+        // Cheap unchanged-check first: this runs every frame, so bail before
+        // locking the provider map or cloning the spec when nothing changed.
+        // (Keyed on the URI *list*, like the previous chain installer — an
+        // in-place hot-reload of a chain dictionary's bytes isn't reinstalled.)
+        if self.installed_app_resources.as_ref().is_some_and(|s| {
+            s.entries == *entries && s.merged_xaml == merged_xaml && s.chain_uris == chain_uris
+        }) {
+            return None;
+        }
+
+        // Snapshot the chain bytes up front and drop the map lock before parsing:
+        // `ResourceDictionary::parse` re-enters our XAML provider to resolve each
+        // dictionary's nested `Source="..."`, which locks the same map. Defer the
+        // whole install until every chain URI has reached the provider so the
+        // merged theme installs atomically (the scene build gates on the same
+        // URIs, so no scene parses against a half-installed chain).
+        let chain_sources: Vec<(String, String)> = {
+            let guard = self.shared_map.0.lock().expect("SharedXamlMap poisoned");
+            let mut sources = Vec::with_capacity(chain_uris.len());
+            for uri in chain_uris {
+                let bytes = guard.get(uri)?;
+                sources.push((uri.clone(), String::from_utf8_lossy(bytes).into_owned()));
+            }
+            sources
+        };
+
+        // Pure-chain config (no code-built base entries or `merged_xaml`): install
+        // via the runtime chain installer, which wires each leaf into the parent's
+        // `MergedDictionaries` *before* `SetSource` so a `{StaticResource}` in a
+        // later leaf that references an earlier leaf's key resolves at parse time.
+        // Re-parsing each leaf standalone (the merge path below) can't do that —
+        // a leaf parses with no sibling scope, null-resolving cross-leaf refs. The
+        // installer re-resolves each URI through the same provider; the byte
+        // snapshot above already gated on every URI being present, so this can't
+        // half-install. (Bytes dropped: the installer re-reads them by URI.)
+        if entries.is_empty() && merged_xaml.is_empty() {
+            if !noesis_runtime::gui::install_app_resources_chain(chain_uris) {
+                warn!(
+                    "NoesisResources: failed to install application-resources chain {chain_uris:?}"
+                );
+            }
+            self.installed_app_resources = Some(AppResourcesSnapshot {
+                entries: entries.clone(),
+                merged_xaml: merged_xaml.to_vec(),
+                chain_uris: chain_uris.to_vec(),
+            });
+            info!(
+                "Installed Noesis application resources: {} chain dicts (dependency-ordered)",
+                chain_uris.len(),
+            );
+            return Some(Vec::new());
+        }
+
         let mut dict = ResourceDictionary::new();
 
-        // Merge parsed dictionaries first; own entries added afterwards win on a
-        // key collision (base entries take precedence over merged, per WPF).
+        // Merged dictionaries first (URI chain, then the bridge's `merged_xaml`);
+        // code-built `entries` are added as base entries afterwards, so they win
+        // on a key collision (base takes precedence over merged, per WPF). Among
+        // merged dictionaries the later-added wins, so `merged_xaml` overrides the
+        // theme chain. NOTE: with code-built `entries`/`merged_xaml` present each
+        // chain leaf is re-parsed standalone here, so a `{StaticResource}` that
+        // crosses two chain leaves won't resolve (unlike the pure-chain path
+        // above). Fixing that for mixed configs needs a runtime FFI that returns
+        // the chain parent so base entries can be injected into it.
+        for (uri, xaml) in &chain_sources {
+            match ResourceDictionary::parse(xaml) {
+                Some(leaf) => {
+                    if !dict.add_merged(&leaf) {
+                        warn!("NoesisResources: failed to merge chain dictionary {uri:?}");
+                    }
+                }
+                None => warn!(
+                    "NoesisResources: chain URI {uri:?} did not parse as a ResourceDictionary"
+                ),
+            }
+        }
         for xaml in merged_xaml {
             match ResourceDictionary::parse(xaml) {
                 Some(merged) => {
@@ -3849,6 +4077,11 @@ impl NoesisRenderState {
         }
 
         set_application_resources(&dict);
+        self.installed_app_resources = Some(AppResourcesSnapshot {
+            entries: entries.clone(),
+            merged_xaml: merged_xaml.to_vec(),
+            chain_uris: chain_uris.to_vec(),
+        });
 
         // Confirm against the live global (now our dict) so the read-back proves
         // the install took, not just that we built the spec.
@@ -3859,12 +4092,13 @@ impl NoesisRenderState {
             .collect();
         present.sort();
         info!(
-            "Installed Noesis application resources: {} entries, {} merged dicts, {} present",
+            "Installed Noesis application resources: {} entries, {} merged dicts, {} chain dicts, {} present",
             entries.len(),
             merged_xaml.len(),
+            chain_sources.len(),
             present.len(),
         );
-        present
+        Some(present)
     }
 
     /// Poll view `entity`'s named elements' live `RenderTransform`s, returning
@@ -4046,43 +4280,6 @@ impl NoesisRenderState {
         }
     }
 
-    fn install_application_resources_if_needed(&mut self, config: &NoesisView) {
-        if config.application_resources.is_empty() {
-            return;
-        }
-        if self
-            .loaded_app_resources_chain
-            .as_ref()
-            .is_some_and(|loaded| loaded == &config.application_resources)
-        {
-            return;
-        }
-        // Every URI in the chain must already be in the provider map: the
-        // chain installer's `SetSource` calls fire synchronously and resolve
-        // through the same provider.
-        {
-            let guard = self.shared_map.0.lock().expect("SharedXamlMap poisoned");
-            for uri in &config.application_resources {
-                if !guard.contains_key(uri) {
-                    return; // wait for the registry to pick it up
-                }
-            }
-        }
-        if noesis_runtime::gui::install_app_resources_chain(&config.application_resources) {
-            info!(
-                "Installed Noesis application resources chain ({} entries): {:?}",
-                config.application_resources.len(),
-                config.application_resources,
-            );
-            self.loaded_app_resources_chain = Some(config.application_resources.clone());
-        } else {
-            warn!(
-                "install_app_resources_chain returned false for {:?}",
-                config.application_resources,
-            );
-        }
-    }
-
     /// Apply a batch of queued input events onto their target View. Each event
     /// carries the view its coordinates were converted against (or `None` for
     /// the primary view); routing to that same view keeps hit-testing consistent
@@ -4096,6 +4293,11 @@ impl NoesisRenderState {
         // `values_mut().next()` is HashMap order and unstable across insertions,
         // so pick by `Entity` — the same rule the coordinate forwarders use.
         let Some(primary) = self.scenes.keys().min().copied() else {
+            // No live scenes: nothing can be under the pointer, so drop any stale
+            // "over UI" state (a view despawned while the pointer was over it must
+            // not keep suppressing 3D interaction). See also `apply_noesis_input`,
+            // which resets even on frames with no queued events.
+            self.pointer_over_ui = false;
             return;
         };
         if self.scenes.len() > 1 {
@@ -4132,7 +4334,10 @@ impl NoesisRenderState {
                     over_ui = scene.view.mouse_button_up(x, y, button);
                 }
                 E::MouseWheel { x, y, delta } => {
-                    let _ = scene.view.mouse_wheel(x, y, delta);
+                    over_ui = scene.view.mouse_wheel(x, y, delta);
+                }
+                E::MouseHWheel { x, y, delta } => {
+                    over_ui = scene.view.mouse_hwheel(x, y, delta);
                 }
                 E::Scroll {
                     x,
@@ -4140,7 +4345,7 @@ impl NoesisRenderState {
                     value,
                     horizontal: false,
                 } => {
-                    let _ = scene.view.scroll(x, y, value);
+                    over_ui = scene.view.scroll(x, y, value);
                 }
                 E::Scroll {
                     x,
@@ -4148,16 +4353,16 @@ impl NoesisRenderState {
                     value,
                     horizontal: true,
                 } => {
-                    let _ = scene.view.hscroll(x, y, value);
+                    over_ui = scene.view.hscroll(x, y, value);
                 }
                 E::TouchDown { x, y, id } => {
-                    let _ = scene.view.touch_down(x, y, id);
+                    over_ui = scene.view.touch_down(x, y, id);
                 }
                 E::TouchMove { x, y, id } => {
-                    let _ = scene.view.touch_move(x, y, id);
+                    over_ui = scene.view.touch_move(x, y, id);
                 }
                 E::TouchUp { x, y, id } => {
-                    let _ = scene.view.touch_up(x, y, id);
+                    over_ui = scene.view.touch_up(x, y, id);
                 }
                 E::KeyDown(k) => {
                     let _ = scene.view.key_down(k);
@@ -4456,6 +4661,8 @@ impl NoesisRenderState {
         self.lists.retain(|(ent, _), _| *ent != entity);
         self.plain_vms.retain(|(ent, _), _| *ent != entity);
         self.command_hosts.remove(&entity);
+        self.warned_host_build_failures
+            .retain(|(ent, _)| *ent != entity);
         self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
         self.binding_entries.retain(|(ent, _, _), _| *ent != entity);
         self.last_keydown_swallow
@@ -4522,6 +4729,8 @@ impl NoesisRenderState {
             self.clear_host_data_context(entity, entry.target());
         }
         self.view_models.remove(&entity);
+        self.warned_host_build_failures
+            .remove(&(entity, "NoesisVm"));
         self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
     }
 
@@ -4537,6 +4746,8 @@ impl NoesisRenderState {
             self.clear_host_data_context(entity, entry.target());
         }
         self.command_hosts.remove(&entity);
+        self.warned_host_build_failures
+            .remove(&(entity, "NoesisCommands"));
         self.warned_dc_collisions.retain(|(ent, _)| *ent != entity);
     }
 
@@ -4900,7 +5111,7 @@ impl BlitPipelineCache {
 /// [`BevyXamlProvider`]. Runs on the main thread (alongside the rest of the
 /// Noesis driving pipeline) directly against the main-world registry.
 #[allow(clippy::needless_pass_by_value)]
-fn sync_xaml_provider_map(
+pub(crate) fn sync_xaml_provider_map(
     registry: Option<Res<XamlRegistry>>,
     state: Option<NonSend<NoesisRenderState>>,
 ) {
@@ -5109,10 +5320,17 @@ fn apply_noesis_input(
     let (Some(queue), Some(mut state)) = (queue, state) else {
         return;
     };
-    if queue.events.is_empty() {
+    if !queue.events.is_empty() {
+        state.apply_input(&queue.events);
+    } else if state.scenes.is_empty() {
+        // No events and no scenes: a view despawned while the pointer was over
+        // it would otherwise leave `pointer_over_ui` stuck true forever, wrongly
+        // suppressing 3D interaction. `apply_input` clears it when it runs, but
+        // teardown frames carry no events, so clear it here too.
+        state.pointer_over_ui = false;
+    } else {
         return;
     }
-    state.apply_input(&queue.events);
     // Publish on change only, so idle pointer frames don't churn change detection.
     if let Some(mut over_ui) = over_ui
         && over_ui.over != state.pointer_over_ui

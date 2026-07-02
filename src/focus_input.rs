@@ -394,17 +394,30 @@ pub(crate) fn sync_focus_control(
         return;
     };
     for (entity, mut ctl) in &mut views {
-        if !ctl.is_changed() || (ctl.moves.is_empty() && ctl.engages.is_empty()) {
+        // Fire on change, or on the frame the scene (re)builds or a panel
+        // fragment mounts (so actions queued before the named element existed
+        // still land, once), but never with an empty queue.
+        if (!ctl.is_changed()
+            && !state.scene_rebuilt_this_frame(entity)
+            && !state.panel_mounted_this_frame(entity))
+            || (ctl.moves.is_empty() && ctl.engages.is_empty())
+        {
             continue;
         }
-        state.apply_focus_moves_for(entity, &ctl.moves);
-        state.apply_focus_engages_for(entity, &ctl.engages);
-        // Drain so accumulated one-shots don't replay on the next change or a
-        // rebuild. Bypass change detection so the clear doesn't re-trigger this
-        // system next frame (only this system reads the change flag).
-        let ctl = ctl.bypass_change_detection();
-        ctl.moves.clear();
-        ctl.engages.clear();
+        // Only drain once the target root was actually ready to receive the
+        // actions; a component inserted before the scene builds / fragment mounts
+        // keeps its queue for the mount frame instead of being silently dropped.
+        // Both applies gate on the same root readiness, so they agree except for
+        // an empty half (which reports ready) — no double-fire on retry. Bypass
+        // change detection so the clear doesn't re-trigger this system next frame
+        // (only this system reads the change flag).
+        let moves_applied = state.apply_focus_moves_for(entity, &ctl.moves);
+        let engages_applied = state.apply_focus_engages_for(entity, &ctl.engages);
+        if moves_applied && engages_applied {
+            let ctl = ctl.bypass_change_detection();
+            ctl.moves.clear();
+            ctl.engages.clear();
+        }
     }
 }
 
@@ -481,6 +494,10 @@ impl Plugin for NoesisFocusControlPlugin {
             // Drain last frame's fires before user systems read them (mirrors
             // the click/keydown drains).
             .add_systems(PreUpdate, drain_focus_binding_queue)
+            // After `sync_panels` so a panel's `NoesisFocusControl` acts the same
+            // frame its fragment mounts (the reconcile reads
+            // `panel_mounted_this_frame`, set by `sync_panels`); mirrors the focus
+            // bridge's ordering.
             .add_systems(
                 PostUpdate,
                 (
@@ -488,7 +505,8 @@ impl Plugin for NoesisFocusControlPlugin {
                     sync_focus_bindings,
                     poll_focus_predictions,
                 )
-                    .in_set(NoesisSet::Apply),
+                    .in_set(NoesisSet::Apply)
+                    .after(crate::panel::sync_panels),
             );
     }
 }

@@ -82,7 +82,7 @@ use crate::viewmodel::AttachTarget;
 /// Build with the chained setters, then hand to [`NoesisCommands::new`]. Each
 /// command name must be unique within the def and match the `{Binding <name>}`
 /// paths authored in the XAML's `Command="…"` attributes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandsDef {
     class_name: String,
     commands: Vec<String>,
@@ -183,6 +183,13 @@ impl NoesisCommands {
 
     pub(crate) fn def(&self) -> &CommandsDef {
         &self.def
+    }
+
+    /// Whether any enabled-state edits are queued. Read via `&self` so the
+    /// reconcile system can gate its mutable access and avoid tripping change
+    /// detection.
+    pub(crate) fn has_pending_enables(&self) -> bool {
+        !self.pending_enables.is_empty()
     }
 
     /// Take the queued enabled-state edits (called by the reconcile system).
@@ -331,9 +338,11 @@ pub(crate) struct CommandEntry {
     commands: Vec<Command>,
     /// Per-command enabled flag shared with the matching [`CommandForwarder`].
     enabled: Vec<Arc<AtomicBool>>,
-    /// Command name → dense index (DP / `commands` / `enabled` order).
-    names: Vec<String>,
-    target: AttachTarget,
+    /// The def this host was built from. Retained as the rebuild fingerprint
+    /// (class + commands + target) *and* as the name→dense-index (DP /
+    /// `commands` / `enabled` order) map: a re-inserted [`NoesisCommands`] with
+    /// a changed def rebuilds (see [`Self::matches`]).
+    def: CommandsDef,
     /// URI of the scene this host is currently attached to, or `None` when not
     /// yet attached / detached by a scene rebuild.
     attached_for_uri: Option<String>,
@@ -350,18 +359,17 @@ impl CommandEntry {
         def: &CommandsDef,
         queue: &SharedCommandQueue,
     ) -> Option<Self> {
-        let names: Vec<String> = def.commands.clone();
         let mut builder =
             ClassBuilder::new(&def.class_name, ClassBase::ContentControl, NoCommandChanges);
-        for name in &names {
+        for name in &def.commands {
             builder.add_property(name, PropType::BaseComponent);
         }
         let registration = builder.register()?;
         let instance = registration.create_instance()?;
 
-        let mut commands = Vec::with_capacity(names.len());
-        let mut enabled = Vec::with_capacity(names.len());
-        for (idx, name) in names.iter().enumerate() {
+        let mut commands = Vec::with_capacity(def.commands.len());
+        let mut enabled = Vec::with_capacity(def.commands.len());
+        for (idx, name) in def.commands.iter().enumerate() {
             let flag = Arc::new(AtomicBool::new(true));
             let forwarder =
                 CommandForwarder::new(view, name.clone(), queue.clone(), Arc::clone(&flag));
@@ -378,14 +386,20 @@ impl CommandEntry {
             _registration: registration,
             commands,
             enabled,
-            names,
-            target: def.target.clone(),
+            def: def.clone(),
             attached_for_uri: None,
         })
     }
 
+    /// Whether this host was built from an equivalent def. `false` means a
+    /// re-inserted [`NoesisCommands`] changed the class, commands, or target and
+    /// the host must be rebuilt.
+    pub(crate) fn matches(&self, def: &CommandsDef) -> bool {
+        &self.def == def
+    }
+
     pub(crate) fn target(&self) -> &AttachTarget {
-        &self.target
+        &self.def.target
     }
 
     /// Borrow the instance for `set_data_context`. Lives as long as the entry.
@@ -396,7 +410,7 @@ impl CommandEntry {
     /// Apply an enabled-state edit by command name, re-querying bound controls.
     /// `false` when the host has no such command.
     pub(crate) fn set_enabled(&self, name: &str, value: bool) -> bool {
-        let Some(idx) = self.names.iter().position(|n| n == name) else {
+        let Some(idx) = self.def.commands.iter().position(|n| n == name) else {
             return false;
         };
         self.enabled[idx].store(value, Ordering::Relaxed);
@@ -437,8 +451,10 @@ pub(crate) fn sync_commands(
     };
     for (entity, mut cmds) in &mut views {
         state.ensure_commands(entity, cmds.def(), &queue);
-        let enables = cmds.take_pending_enables();
-        if !enables.is_empty() {
+        // Only touch the component mutably when there are queued edits, so an
+        // idle frame doesn't falsely mark `NoesisCommands` changed downstream.
+        if cmds.has_pending_enables() {
+            let enables = cmds.take_pending_enables();
             state.apply_command_enables_for(entity, &enables);
         }
     }

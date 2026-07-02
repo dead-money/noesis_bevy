@@ -8,9 +8,9 @@
 //!     the `TwoWay/PropertyChanged` binding must push that back into the `DemoVm`
 //!     component via the reconcile system.
 //!
-//! Two-view routing is covered by `headless_app_bridges.rs`. A second instance of
-//! the same `#[derive(NoesisViewModel)]` type cannot be tested here: Noesis
-//! registers plain-VM classes globally by type name, so two instances collide.
+//! Two views carrying the *same* `#[derive(NoesisViewModel)]` type are covered by
+//! `headless_app_plain_vm_two_views.rs` (the bridge registers each entity's
+//! reflection type under a per-entity unique name, so they don't collide).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

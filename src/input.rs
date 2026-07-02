@@ -53,7 +53,7 @@ use bevy::input::{
     touch::{TouchInput, TouchPhase},
 };
 use bevy::prelude::*;
-use bevy::window::{CursorMoved, PrimaryWindow, WindowFocused, WindowResized};
+use bevy::window::{CursorLeft, CursorMoved, PrimaryWindow, WindowFocused, WindowResized};
 use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use noesis_runtime::view::{Key, MouseButton};
 
@@ -92,8 +92,8 @@ pub enum NoesisInputEvent {
         /// Which button changed.
         button: MouseButton,
     },
-    /// A wheel detent, in the Win32 `WHEEL_DELTA` convention Noesis expects
-    /// (120 units per notch).
+    /// A vertical wheel detent, in the Win32 `WHEEL_DELTA` convention Noesis
+    /// expects (120 units per notch).
     MouseWheel {
         /// X position in view-pixel space.
         x: i32,
@@ -102,9 +102,22 @@ pub enum NoesisInputEvent {
         /// Wheel movement in 120-units-per-notch increments.
         delta: i32,
     },
-    /// A scroll in line counts, the path Noesis's scrolling controls listen
-    /// on. Emitted alongside [`MouseWheel`](Self::MouseWheel) so controls
-    /// bound to either signal respond.
+    /// A horizontal wheel detent (tilt-wheel or trackpad swipe), same
+    /// 120-units-per-notch convention as [`MouseWheel`](Self::MouseWheel);
+    /// positive scrolls right.
+    MouseHWheel {
+        /// X position in view-pixel space.
+        x: i32,
+        /// Y position in view-pixel space.
+        y: i32,
+        /// Wheel movement in 120-units-per-notch increments.
+        delta: i32,
+    },
+    /// A scroll in line counts, the other path Noesis's scrolling controls
+    /// listen on. Reserved for an explicit scroll source (e.g. a gamepad
+    /// bridge); the mouse wheel drives [`MouseWheel`](Self::MouseWheel) /
+    /// [`MouseHWheel`](Self::MouseHWheel) only, so a `ScrollViewer` reachable
+    /// by both paths isn't scrolled twice.
     Scroll {
         /// X position in view-pixel space.
         x: i32,
@@ -258,9 +271,10 @@ fn forward_cursor_moved(
     mut reader: MessageReader<CursorMoved>,
     mut queue: ResMut<NoesisInputQueue>,
     mut last: ResMut<LastPointer>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    window: Single<(Entity, &Window), With<PrimaryWindow>>,
     views: Query<(Entity, &NoesisView)>,
 ) {
+    let (primary_window, window) = (window.0, window.1);
     // Convert against the deterministic primary view (lowest `Entity`) and stamp
     // it onto the event, so the render side hit-tests against the same view the
     // coordinates were scaled for. `iter().next()` is query order and would let
@@ -270,13 +284,44 @@ fn forward_cursor_moved(
         return;
     };
     for ev in reader.read() {
-        if let Some((x, y)) = to_view_coords(&window, scene, ev.position.x, ev.position.y) {
+        // Only the primary window feeds the primary view; a secondary window's
+        // moves would be converted with the wrong dimensions (see P0.7's
+        // primary-view rule).
+        if ev.window != primary_window {
+            continue;
+        }
+        if let Some((x, y)) = to_view_coords(window, scene, ev.position.x, ev.position.y) {
             last.x = x;
             last.y = y;
             last.valid = true;
             last.target = Some(entity);
             queue.push_to(entity, NoesisInputEvent::MouseMove { x, y });
         }
+    }
+}
+
+/// When the cursor leaves the primary window, move the Noesis pointer off-view
+/// so hover highlights clear and [`NoesisPointerOverUi`] resets — otherwise a
+/// pointer parked over UI as it exits keeps `over` true, wrongly suppressing
+/// 3D interaction. `CursorLeft` carries no position, so we send a move to a
+/// coordinate that hit-tests nothing.
+#[allow(clippy::needless_pass_by_value)]
+fn forward_cursor_left(
+    mut reader: MessageReader<CursorLeft>,
+    mut queue: ResMut<NoesisInputQueue>,
+    mut last: ResMut<LastPointer>,
+    primary_window: Single<Entity, With<PrimaryWindow>>,
+) {
+    let primary_window = *primary_window;
+    let mut left_primary = false;
+    for ev in reader.read() {
+        if ev.window == primary_window {
+            left_primary = true;
+        }
+    }
+    if left_primary {
+        queue.push_to_opt(last.target, NoesisInputEvent::MouseMove { x: -1, y: -1 });
+        last.valid = false;
     }
 }
 
@@ -320,13 +365,15 @@ fn forward_mouse_wheel(
     mut queue: ResMut<NoesisInputQueue>,
     last: Res<LastPointer>,
 ) {
-    // Emit both a Noesis MouseWheel event (Windows-style, 120 units per
-    // detent) and a Scroll event (line count) so controls listening to
-    // either get the signal. Redundant calls are cheap.
+    // Feed the wheel path only: MouseWheel (vertical) and MouseHWheel
+    // (horizontal), Windows-style 120 units per detent. The Scroll (line-count)
+    // path also drives ScrollViewers, so emitting both would scroll a control
+    // reachable by both at double rate; Scroll is reserved for an explicit
+    // scroll source (see [`NoesisInputEvent::Scroll`]).
     for ev in reader.read() {
         let (x, y) = if last.valid { (last.x, last.y) } else { (0, 0) };
-        // Convert pixel scroll to "lines" for the Scroll path: rough
-        // heuristic of 40 px/line; MouseScrollUnit::Line passes through.
+        // Convert pixel scroll to "lines": rough heuristic of 40 px/line;
+        // MouseScrollUnit::Line passes through.
         let lines_y = match ev.unit {
             MouseScrollUnit::Line => ev.y,
             MouseScrollUnit::Pixel => ev.y / 40.0,
@@ -337,6 +384,7 @@ fn forward_mouse_wheel(
         };
         // 120 units per line is the Win32 `WHEEL_DELTA` convention Noesis uses.
         let wheel_delta = (lines_y * 120.0) as i32;
+        let hwheel_delta = (lines_x * 120.0) as i32;
         // Route to the same view the last move was converted against.
         if wheel_delta != 0 {
             queue.push_to_opt(
@@ -348,25 +396,13 @@ fn forward_mouse_wheel(
                 },
             );
         }
-        if lines_y != 0.0 {
+        if hwheel_delta != 0 {
             queue.push_to_opt(
                 last.target,
-                NoesisInputEvent::Scroll {
+                NoesisInputEvent::MouseHWheel {
                     x,
                     y,
-                    value: lines_y,
-                    horizontal: false,
-                },
-            );
-        }
-        if lines_x != 0.0 {
-            queue.push_to_opt(
-                last.target,
-                NoesisInputEvent::Scroll {
-                    x,
-                    y,
-                    value: lines_x,
-                    horizontal: true,
+                    delta: hwheel_delta,
                 },
             );
         }
@@ -406,16 +442,21 @@ fn forward_keyboard(mut reader: MessageReader<KeyboardInput>, mut queue: ResMut<
 fn forward_touch(
     mut reader: MessageReader<TouchInput>,
     mut queue: ResMut<NoesisInputQueue>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    window: Single<(Entity, &Window), With<PrimaryWindow>>,
     views: Query<(Entity, &NoesisView)>,
 ) {
+    let (primary_window, window) = (window.0, window.1);
     // Same deterministic primary-view selection as the cursor forwarder.
     let Some((entity, scene)) = views.iter().min_by_key(|(entity, _)| *entity) else {
         reader.read();
         return;
     };
     for ev in reader.read() {
-        let Some((x, y)) = to_view_coords(&window, scene, ev.position.x, ev.position.y) else {
+        // Only the primary window feeds the primary view (see P0.7's rule).
+        if ev.window != primary_window {
+            continue;
+        }
+        let Some((x, y)) = to_view_coords(window, scene, ev.position.x, ev.position.y) else {
             continue;
         };
         let id = ev.id;
@@ -430,8 +471,19 @@ fn forward_touch(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn forward_focus(mut reader: MessageReader<WindowFocused>, mut queue: ResMut<NoesisInputQueue>) {
+fn forward_focus(
+    mut reader: MessageReader<WindowFocused>,
+    mut queue: ResMut<NoesisInputQueue>,
+    primary_window: Single<Entity, With<PrimaryWindow>>,
+) {
+    let primary_window = *primary_window;
     for ev in reader.read() {
+        // Ignore focus changes on secondary windows; alt-tabbing between the
+        // app's own windows would otherwise spuriously activate/deactivate the
+        // primary view (see P0.7's rule).
+        if ev.window != primary_window {
+            continue;
+        }
         queue.push(NoesisInputEvent::Focus(ev.focused));
     }
 }
@@ -449,13 +501,19 @@ fn forward_focus(mut reader: MessageReader<WindowFocused>, mut queue: ResMut<Noe
 fn resize_noesis_scene(
     mut reader: MessageReader<WindowResized>,
     mut views: Query<&mut NoesisView>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    window: Single<(Entity, &Window), With<PrimaryWindow>>,
 ) {
+    let (primary_window, window) = (window.0, window.1);
     if views.is_empty() {
         reader.read();
         return;
     }
-    for _ev in reader.read() {
+    for ev in reader.read() {
+        // Secondary-window resizes must not resize the primary view's
+        // intermediate (see P0.7's rule).
+        if ev.window != primary_window {
+            continue;
+        }
         let physical = window.physical_size();
         if physical.x > 0 && physical.y > 0 {
             for mut scene in &mut views {
@@ -495,6 +553,7 @@ impl Plugin for NoesisInputPlugin {
                     clear_queue_before_push,
                     resize_noesis_scene,
                     forward_cursor_moved,
+                    forward_cursor_left,
                     forward_mouse_buttons,
                     forward_mouse_wheel,
                     forward_keyboard,

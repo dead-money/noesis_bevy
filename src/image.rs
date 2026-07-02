@@ -233,6 +233,11 @@ pub fn update_image_registry(
     assets: Res<Assets<ImageAsset>>,
     asset_server: Res<AssetServer>,
     mut registry: ResMut<ImageRegistry>,
+    // `AssetId` → registry key, so removal arms can find the entry after the
+    // asset (and its path) are already gone: `get_path` returns `None` for a
+    // dropped asset, so keying off the live path here would leave stale
+    // entries and leaked byte buffers behind.
+    mut keys: Local<HashMap<AssetId<ImageAsset>, String>>,
 ) {
     for event in events.read() {
         match *event {
@@ -243,8 +248,10 @@ pub fn update_image_registry(
                 let Some(asset) = assets.get(id) else {
                     continue;
                 };
+                let key = path.to_string();
+                keys.insert(id, key.clone());
                 registry.entries.insert(
-                    path.to_string(),
+                    key,
                     RegisteredImage {
                         width: asset.width,
                         height: asset.height,
@@ -253,10 +260,10 @@ pub fn update_image_registry(
                 );
             }
             AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
-                let Some(path) = asset_server.get_path(id) else {
+                let Some(key) = keys.remove(&id) else {
                     continue;
                 };
-                registry.entries.remove(&path.to_string());
+                registry.entries.remove(&key);
             }
             AssetEvent::LoadedWithDependencies { .. } => {}
         }
@@ -324,14 +331,14 @@ impl TextureProvider for BevyTextureProvider {
     }
 
     fn info(&mut self, uri: &str) -> Option<TextureInfo> {
-        let guard = self.shared.0.lock().ok()?;
+        let guard = self.shared.0.lock().expect("SharedImageMap mutex poisoned");
         let img = guard.get(uri)?;
         Some(TextureInfo::new(img.width, img.height))
     }
 
     fn load(&mut self, uri: &str) -> Option<ImageData<'_>> {
         let (arc, w, h) = {
-            let guard = self.shared.0.lock().ok()?;
+            let guard = self.shared.0.lock().expect("SharedImageMap mutex poisoned");
             let img = guard.get(uri)?;
             (Arc::clone(&img.bytes), img.width, img.height)
         };

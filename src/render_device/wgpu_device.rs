@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
+use bevy::log::{warn, warn_once};
+
 use noesis_runtime::render_device::types::{
     Batch, DeviceCaps, SIZE_FOR_FORMAT, SamplerState, Shader, TextureFormat, Tile,
 };
@@ -1010,8 +1012,10 @@ const fn wgpu_format_for(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Rgba8 | TextureFormat::Rgbx8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
         // `TextureFormat` is `#[non_exhaustive]`; a format the SDK adds later
-        // defaults to RGBA8. Never panic here: this runs inside a Noesis FFI
-        // trampoline, where unwinding into C++ is UB.
+        // defaults to RGBA8. This runs inside a Noesis FFI trampoline (which
+        // would catch any unwind), but a benign default is preferable to a
+        // panic that leaves the frame half-mutated. Every raw-enum conversion
+        // on this path follows the same warn-and-default policy.
         _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
@@ -1150,7 +1154,14 @@ fn wgpu_wrap_mode(wrap_raw: u8) -> wgpu::AddressMode {
         0 | 1 => wgpu::AddressMode::ClampToEdge,
         2 => wgpu::AddressMode::Repeat,
         3..=5 => wgpu::AddressMode::MirrorRepeat,
-        other => panic!("unknown Noesis WrapMode raw value: {other}"),
+        // `WrapMode::Enum` is SDK-controlled and this runs inside a Noesis FFI
+        // trampoline; a value the SDK adds later warns and clamps rather than
+        // panics (the trampoline would contain the unwind, but leave the frame
+        // half-mutated — a benign default keeps the device alive).
+        other => {
+            warn_once!("unknown Noesis WrapMode raw value {other}; using ClampToEdge");
+            wgpu::AddressMode::ClampToEdge
+        }
     }
 }
 
@@ -1459,11 +1470,20 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn begin_offscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Idle,
-            "begin_offscreen_render while a frame phase is already active",
-        );
+        // begin_* is the frame's reset point. A contained panic in a prior
+        // frame's callback (the runtime trampolines catch_unwind, so control
+        // returns to Noesis with our phase half-mutated and an encoder possibly
+        // still open) would leave `phase` non-Idle; asserting here would re-trip
+        // every frame and wedge the device. Warn and re-sync instead — the
+        // resets below (including replacing `encoder`, which drops the stale
+        // one and its orphaned commands) restore a clean phase.
+        if self.phase != FramePhase::Idle {
+            warn!(
+                "begin_offscreen_render found phase {:?} (previous frame aborted \
+                 mid-callback); resetting",
+                self.phase,
+            );
+        }
         self.vs_ring.reset();
         self.ps_ring.reset();
         self.ps1_ring.reset();
@@ -1481,24 +1501,34 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn end_offscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Offscreen,
-            "end_offscreen_render without a matching begin_offscreen_render",
-        );
-        let encoder = self.encoder.take().expect("offscreen encoder missing");
-        self.queue.submit(Some(encoder.finish()));
+        // Submit whatever encoder is open and force Idle regardless of the
+        // incoming phase: a contained panic upstream could have skipped the
+        // matching begin, so warn rather than assert and leave the device in a
+        // clean state either way.
+        if self.phase != FramePhase::Offscreen {
+            warn!(
+                "end_offscreen_render found phase {:?}, expected Offscreen",
+                self.phase,
+            );
+        }
+        if let Some(encoder) = self.encoder.take() {
+            self.queue.submit(Some(encoder.finish()));
+        }
         self.phase = FramePhase::Idle;
         self.current_rt = None;
         self.current_tile = None;
     }
 
     fn begin_onscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Idle,
-            "begin_onscreen_render while a frame phase is already active",
-        );
+        // See `begin_offscreen_render`: re-sync a stuck phase rather than assert
+        // so one contained panic doesn't wedge the device.
+        if self.phase != FramePhase::Idle {
+            warn!(
+                "begin_onscreen_render found phase {:?} (previous frame aborted \
+                 mid-callback); resetting",
+                self.phase,
+            );
+        }
         self.vs_ring.reset();
         self.ps_ring.reset();
         self.ps1_ring.reset();
@@ -1515,13 +1545,17 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn end_onscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Onscreen,
-            "end_onscreen_render without a matching begin_onscreen_render",
-        );
-        let encoder = self.encoder.take().expect("onscreen encoder missing");
-        self.queue.submit(Some(encoder.finish()));
+        // See `end_offscreen_render`: force a clean Idle state rather than
+        // assert on a phase a contained panic may have left inconsistent.
+        if self.phase != FramePhase::Onscreen {
+            warn!(
+                "end_onscreen_render found phase {:?}, expected Onscreen",
+                self.phase,
+            );
+        }
+        if let Some(encoder) = self.encoder.take() {
+            self.queue.submit(Some(encoder.finish()));
+        }
         self.phase = FramePhase::Idle;
     }
 
