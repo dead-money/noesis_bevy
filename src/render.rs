@@ -4022,20 +4022,35 @@ impl NoesisRenderState {
         }
     }
 
-    /// Apply a batch of queued input events onto the live View. No-op when
-    /// the scene hasn't been built yet; events are lost in that case, which
-    /// is fine: pre-scene input targets nothing.
-    fn apply_input(&mut self, events: &[crate::input::NoesisInputEvent]) {
-        // Input routes to the single primary view; multi-view routing (which
-        // view owns the pointer) isn't implemented yet.
+    /// Apply a batch of queued input events onto their target View. Each event
+    /// carries the view its coordinates were converted against (or `None` for
+    /// the primary view); routing to that same view keeps hit-testing consistent
+    /// when several views coexist. No-op when the target scene hasn't been built
+    /// yet; such events are dropped, which is fine: pre-scene input targets
+    /// nothing.
+    fn apply_input(&mut self, events: &[crate::input::TargetedInput]) {
         use crate::input::NoesisInputEvent as E;
-        // Last pointer hit-test wins; seed from prior so a still cursor persists.
-        let mut over_ui = self.pointer_over_ui;
-        let Some(scene) = self.scenes.values_mut().next() else {
+        // The primary view is the deterministic fallback for untargeted events
+        // (keyboard, focus, programmatic pushes): the lowest-`Entity` live scene.
+        // `values_mut().next()` is HashMap order and unstable across insertions,
+        // so pick by `Entity` — the same rule the coordinate forwarders use.
+        let Some(primary) = self.scenes.keys().min().copied() else {
             return;
         };
-        for ev in events {
-            match *ev {
+        if self.scenes.len() > 1 {
+            bevy::log::warn_once!(
+                "Noesis input routes to the primary view (lowest Entity); per-view \
+                 pointer routing across {} views is not implemented yet",
+                self.scenes.len()
+            );
+        }
+        // Last pointer hit-test wins; seed from prior so a still cursor persists.
+        let mut over_ui = self.pointer_over_ui;
+        for targeted in events {
+            let Some(scene) = self.scenes.get_mut(&targeted.target.unwrap_or(primary)) else {
+                continue;
+            };
+            match targeted.event {
                 E::MouseMove { x, y } => {
                     over_ui = scene.view.mouse_move(x, y);
                 }
