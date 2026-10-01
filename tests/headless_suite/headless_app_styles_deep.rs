@@ -1,11 +1,11 @@
 //! Integration test for [`NoesisStyles`] deep features: `BasedOn` inheritance
 //! chains, [`DataTriggerSpec`] (binding-value driven), and [`MultiTriggerSpec`]
-//! (all-conditions-hold). Runs end-to-end through the real `NoesisPlugin`
-//! pipeline (headless). Assertions observe actual style effects via [`NoesisDp`]
-//! watches; element defaults serve as negative controls.
+//! (all-conditions-hold), run headless through the real bridge plugins.
+//! Assertions observe style effects via [`NoesisDp`] watches; element defaults
+//! serve as negative controls.
 //!
-//! Styles are applied at frame 10 rather than startup because `set_style` fires
-//! only on Bevy change-detection and a style is sealed on first apply.
+//! Styles are assigned at `SET_AT_FRAME`, after the scene is live, so the test
+//! exercises a change-driven apply rather than the scene-build re-apply.
 
 use std::sync::{Arc, Mutex};
 
@@ -128,9 +128,7 @@ fn deep_styles_apply_basedon_chain_and_triggers() {
         },
     );
 
-    // Stop once every watched property (styled effects + default-valued negative
-    // controls) has converged, rather than padding a fixed frame count. The style
-    // apply still fires at SET_AT_FRAME.
+    // Stop once every watched property, styled and negative control, has converged.
     let pred_view = Arc::clone(&view_entity);
     let pred_observed = Arc::clone(&observed);
     let converged = run_until(&mut app, 240, move |_app| {

@@ -1,5 +1,5 @@
-//! Tests that `NoesisDiagnostics` mirrors Noesis allocator counters into the
-//! resource each frame.
+//! Tests that the `NoesisDiagnostics` resource mirrors Noesis allocator counters
+//! every frame.
 //!
 //! The all-zero `Default` is the negative control: a broken or missing refresh
 //! leaves every counter at 0. Two snapshots (early and late) prove the refresh
@@ -60,9 +60,7 @@ fn diagnostics_resource_mirrors_allocator_counters() {
         },
     );
 
-    // Event-driven exit: stop once the late (frame 40) snapshot has been captured
-    // with a non-zero live allocation, which is the crux of the assertion. The
-    // early/late captures stay frame-gated so the two-sample refresh proof holds.
+    // The snapshots stay frame-gated so the early/late pair proves a per-frame refresh.
     let pred_late = Arc::clone(&late);
     let sampled = run_until(&mut app, 240, move |_app| {
         pred_late

@@ -1,11 +1,10 @@
-//! Build a `wgpu::VertexBufferLayout` from Noesis's `VertexFormat` enum +
-//! lookup tables (`ATTRIBUTES_FOR_FORMAT`, `TYPE_FOR_ATTR`, `SIZE_FOR_TYPE`,
-//! `SIZE_FOR_FORMAT` from `noesis_runtime::render_device::types`).
+//! Vertex buffer layouts for Noesis vertex formats, built from the SDK lookup
+//! tables in `noesis_runtime::render_device::types`.
 //!
-//! Each Noesis vertex format is a bitmask of [`VertexAttr`] values; the
-//! attributes appear in the buffer in `VertexAttr` enum order with no padding.
-//! `shader_location` matches the `VertexAttr` index, the convention
-//! `shaders/noesis.wgsl` uses.
+//! Each Noesis vertex format is a bitmask of [`VertexAttr`] values. The
+//! attributes are packed in `VertexAttr` order with no padding, and each
+//! attribute's `shader_location` is its `VertexAttr` index, which is what
+//! `noesis.wgsl`'s `VsIn` declares.
 //!
 //! [`VertexAttr`]: noesis_runtime::render_device::types::VertexAttr
 
@@ -13,8 +12,13 @@ use noesis_runtime::render_device::types::{
     ATTRIBUTES_FOR_FORMAT, SIZE_FOR_FORMAT, SIZE_FOR_TYPE, TYPE_FOR_ATTR, VERTEX_ATTR_COUNT,
 };
 
-/// Owned attribute list for the `format_idx` vertex format. Ordering and
-/// `shader_location` match the `noesis.wgsl` `VsIn` struct.
+/// Attribute list for the raw `VertexFormat::Enum` value `format_idx`, in
+/// buffer order.
+///
+/// # Panics
+///
+/// Panics if `format_idx` is out of range for the SDK tables or a table names
+/// an unknown attribute type.
 #[must_use]
 pub fn attributes_for_format(format_idx: u8) -> Vec<wgpu::VertexAttribute> {
     let mask = ATTRIBUTES_FOR_FORMAT[format_idx as usize];
@@ -41,6 +45,10 @@ pub fn attributes_for_format(format_idx: u8) -> Vec<wgpu::VertexAttribute> {
 }
 
 /// Byte stride of one vertex in the `format_idx` format.
+///
+/// # Panics
+///
+/// Panics if `format_idx` is out of range for the SDK tables.
 #[must_use]
 pub fn stride_for_format(format_idx: u8) -> u64 {
     u64::from(SIZE_FOR_FORMAT[format_idx as usize])

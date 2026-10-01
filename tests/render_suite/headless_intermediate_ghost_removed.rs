@@ -1,20 +1,15 @@
-//! Regression test for the stale-intermediate "frozen UI ghost" (audit P0.8),
-//! component-removal variant.
+//! Stale-intermediate "frozen UI ghost", component-removal case.
 //!
-//! The sibling `headless_intermediate_ghost.rs` covers tearing the scene down by
-//! clearing `xaml_uri`. This covers the *other* teardown path the first fix
-//! missed: the caller drops only the `NoesisView` component while keeping the
-//! entity alive (a game toggling its UI off but retaining `Camera2d`/
-//! `NoesisCamera`, rather than despawning). `RemovedComponents<NoesisView>` fires
-//! for both a despawn and a bare component drop; `teardown_for` prunes the entity
-//! out of `publish_intermediates`' sweep, so the reap system must strip the stale
-//! `NoesisIntermediate` off the survivor itself — otherwise the render world
-//! blits the last-painted frame over live content forever.
+//! The sibling `headless_intermediate_ghost.rs` tears the scene down by clearing
+//! `xaml_uri`. This one removes only the `NoesisView` component and keeps the
+//! entity alive, as a game does when it toggles its UI off but keeps `Camera2d`
+//! and `NoesisCamera`. `teardown_for` drops the entity from
+//! `publish_intermediates`' sweep, so the `RemovedComponents<NoesisView>` reap
+//! must strip the stale `NoesisIntermediate` itself. Otherwise the render world
+//! keeps extracting it and blits the last-painted frame over live content.
 //!
-//! Runs on the real render graph ([`render_app`]) because the ghost is a
-//! render-world extraction bug. One `#[test]` per file (thread-affine Noesis
-//! runtime, one app per process). Font-free XAML so the scene builds without a
-//! font folder.
+//! Runs on the real render graph ([`render_app`]) because the ghost comes from
+//! render-world extraction. The XAML has no text, so no font folder is needed.
 
 use std::sync::{Arc, Mutex};
 

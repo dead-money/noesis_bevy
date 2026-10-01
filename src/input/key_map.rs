@@ -1,28 +1,25 @@
-//! Bevy [`KeyCode`] → Noesis [`Key`] mapping.
+//! Bevy [`KeyCode`] to Noesis [`Key`] mapping.
 //!
-//! Covers the keys Bevy produces on a standard US keyboard. Anything
-//! unmapped returns [`Key::None`]. The Noesis FFI swallows those rather
-//! than routing them, so an unmapped key is a silent no-op and callers
-//! still get the matching `Char` event from `KeyboardInput::text`.
-//!
-//! If you find yourself wanting a key that's missing, add it both here
-//! AND to the explicit-discriminant enum in `noesis_runtime::view::Key` (and
-//! its matching `static_assert` in `cpp/noesis_view.cpp`).
+//! [`KeyCode`] is a physical key position, so punctuation maps to the Noesis
+//! `Oem*` key at the same position on a US layout. Keys with no Noesis
+//! equivalent (`Fn`, `Lang1`, media keys) map to [`Key::None`]; the input
+//! bridge drops those, and any text they produce still arrives as a `Char`
+//! event.
 
 use bevy::input::keyboard::KeyCode;
 use noesis_runtime::view::Key;
 
+// A new key also needs a variant in `noesis_runtime::view::Key` and its
+// `static_assert` in the runtime's `cpp/noesis_view.cpp`.
+
 /// Translates a Bevy [`KeyCode`] into the Noesis [`Key`] the view expects.
 ///
-/// The input bridge calls this on each [`KeyboardInput`](bevy::input::keyboard::KeyboardInput)
-/// before forwarding the press to the live scene. Keys outside the standard US
-/// layout return [`Key::None`], which the Noesis FFI drops; the matching `Char`
-/// event still arrives via the keyboard input's `text`.
+/// Returns [`Key::None`] for keys with no Noesis equivalent. Both `Enter` and
+/// `NumpadEnter` map to [`Key::Return`].
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn from_bevy(code: KeyCode) -> Key {
     match code {
-        // Letters.
         KeyCode::KeyA => Key::A,
         KeyCode::KeyB => Key::B,
         KeyCode::KeyC => Key::C,
@@ -50,7 +47,6 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::KeyY => Key::Y,
         KeyCode::KeyZ => Key::Z,
 
-        // Top-row digits.
         KeyCode::Digit0 => Key::D0,
         KeyCode::Digit1 => Key::D1,
         KeyCode::Digit2 => Key::D2,
@@ -62,7 +58,6 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::Digit8 => Key::D8,
         KeyCode::Digit9 => Key::D9,
 
-        // Function row.
         KeyCode::F1 => Key::F1,
         KeyCode::F2 => Key::F2,
         KeyCode::F3 => Key::F3,
@@ -88,7 +83,6 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::F23 => Key::F23,
         KeyCode::F24 => Key::F24,
 
-        // Editing cluster.
         KeyCode::Escape => Key::Escape,
         KeyCode::Enter => Key::Return,
         KeyCode::Tab => Key::Tab,
@@ -101,13 +95,11 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
 
-        // Arrows.
         KeyCode::ArrowUp => Key::Up,
         KeyCode::ArrowDown => Key::Down,
         KeyCode::ArrowLeft => Key::Left,
         KeyCode::ArrowRight => Key::Right,
 
-        // Modifiers + locks.
         KeyCode::ShiftLeft => Key::LeftShift,
         KeyCode::ShiftRight => Key::RightShift,
         KeyCode::ControlLeft => Key::LeftCtrl,
@@ -124,7 +116,6 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::PrintScreen => Key::PrintScreen,
         KeyCode::Help => Key::Help,
 
-        // Numpad.
         KeyCode::Numpad0 => Key::NumPad0,
         KeyCode::Numpad1 => Key::NumPad1,
         KeyCode::Numpad2 => Key::NumPad2,
@@ -142,7 +133,6 @@ pub fn from_bevy(code: KeyCode) -> Key {
         KeyCode::NumpadDivide => Key::Divide,
         KeyCode::NumpadEnter => Key::Return,
 
-        // Punctuation (OEM keys, US layout).
         KeyCode::Semicolon => Key::OemSemicolon,
         KeyCode::Equal => Key::OemPlus,
         KeyCode::Comma => Key::OemComma,

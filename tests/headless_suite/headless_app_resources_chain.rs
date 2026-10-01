@@ -1,15 +1,14 @@
-//! Regression test for P1.2 + P1.3 remainder: a *multi-URI*
-//! `NoesisView::application_resources` chain must resolve cross-leaf
-//! `{StaticResource}` references in dependency order.
+//! Regression test: a multi-URI `NoesisView::application_resources` chain
+//! resolves cross-leaf `{StaticResource}` references in dependency order.
 //!
-//! Two `ResourceDictionary` leaves are installed as the chain: `sizes.xaml`
-//! defines `BaseWidth`, and `styles.xaml` defines a `Style` whose `Setter`
-//! pulls `Width` from `{StaticResource BaseWidth}` — a reference that crosses
-//! from the second leaf back to the first. With no code-built `NoesisResources`
-//! present the reconcile installs the chain leaf-by-leaf (parent scope wired in
-//! first), so the cross-leaf reference resolves and `Styled.ActualWidth == 40`.
-//! If each leaf were re-parsed standalone (the merge path) `BaseWidth` would
-//! null-resolve at parse time and the Border would stretch to the grid's 64.
+//! `sizes.xaml` defines `BaseWidth`; `styles.xaml` defines a `Style` whose `Setter`
+//! takes `Width` from `{StaticResource BaseWidth}`, a reference from the second
+//! leaf back to the first. The chain installs leaf by leaf with the shared parent
+//! scope wired in first, so the reference resolves and `Styled.ActualWidth == 40`.
+//! A leaf parsed standalone would leave `BaseWidth` unresolved.
+//!
+//! `headless_app_resources_mixed.rs` covers the same chain alongside code-built
+//! `NoesisResources` entries.
 
 use std::sync::{Arc, Mutex};
 
@@ -100,7 +99,6 @@ fn multi_uri_chain_resolves_cross_leaf_static_resource() {
         },
     );
 
-    // Stop as soon as the cross-leaf reference resolves to the chained width.
     let pred_view = Arc::clone(&view_entity);
     let pred_observed = Arc::clone(&observed);
     let converged = run_until(&mut app, 240, move |_app| {
@@ -125,9 +123,6 @@ fn multi_uri_chain_resolves_cross_leaf_static_resource() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // The cross-leaf `{StaticResource BaseWidth}` (styles.xaml -> sizes.xaml)
-    // resolved: 40 is the chained value; an unresolved Setter would leave the
-    // Border to Grid-stretch to its authored 64.
     assert!(
         converged,
         "multi-URI chain never converged within 240 frames; observed {got:?}",

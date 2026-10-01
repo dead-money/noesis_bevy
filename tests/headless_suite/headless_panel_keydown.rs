@@ -1,12 +1,9 @@
-//! ECS-UI integration proof (keydown twin of `headless_panel_click`): a
-//! [`NoesisKeyDownWatch`] on a mounted [`UiPanel`] entity resolves an `x:Name`
-//! inside the panel's *own* fragment namescope (F4), and a [`NoesisFocus`] on the
-//! same entity focuses that fragment-internal element (F6). A key injected into
-//! the focused element fires a [`UiKeyDown`] targeting the panel entity, carrying
-//! the host as its `view`. Two instances of the same fragment stay isolated: only
+//! Keydown twin of `headless_panel_click`: a [`NoesisKeyDownWatch`] on a mounted
+//! [`UiPanel`] entity resolves an `x:Name` inside the panel's own fragment
+//! namescope, and a [`NoesisFocus`] on the same entity focuses that
+//! fragment-internal element. A key injected into the focused element fires a
+//! [`UiKeyDown`] targeting the panel entity, carrying the host as its `view`. Two instances of the same fragment stay isolated: only
 //! the focused panel's watch fires.
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
 
@@ -78,7 +75,7 @@ fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
                     },
                 ))
                 .id();
-            // p1: focused (F6) AND watched (F4) on its own fragment's "PanelInput".
+            // p1: focused and watched on its own fragment's "PanelInput".
             let p1 = commands
                 .spawn((
                     UiPanel::new("frag.xaml").mount_into(view, "SlotL"),
@@ -110,8 +107,7 @@ fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
         },
     );
 
-    // Exit as soon as p1's focused fragment input fires its UiKeyDown(Return).
-    // Same-drive dispatch means if p2 has not fired by then, it never will.
+    // Same-drive dispatch: if p2 has not fired by the time p1 has, it never will.
     let pred_obs = Arc::clone(&observed);
     let pred_ids = Arc::clone(&ids);
     let fired =
@@ -129,8 +125,7 @@ fn keydown_watch_on_panel_entity_resolves_fragment_internal_name() {
     eprintln!("--- observed UiKeyDown: {got:?}; view={view:?} p1={p1:?} p2={p2:?} ---");
 
     // The fragment-internal input fired: a UiKeyDown targeting its panel entity,
-    // carrying the host view and the pressed key. Before F4/F6 a keydown watch +
-    // focus on a panel entity were silently ignored (the panel isn't a `scene`).
+    // carrying the host view and the pressed key.
     assert!(
         fired,
         "expected a UiKeyDown(Return) from p1's focused fragment input targeting p1 \

@@ -21,7 +21,7 @@ This crate links against the [Noesis Native SDK](https://www.noesisengine.com/),
 
 This release targets **Noesis Native SDK 3.2.13** and is compiled against that version's headers, so a different SDK version may not link. Match it unless you've verified a newer one.
 
-Supported targets are **Linux** (`x86_64`, `aarch64`) and **Windows** (`x86_64-pc-windows-msvc`). Linux is the primary target; Windows support is newer.
+Supported targets are Linux (`x86_64`, `aarch64`) and Windows (`x86_64-pc-windows-msvc`). Linux is the primary target; Windows builds but isn't covered by CI.
 
 Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Without them the UI runs for a while, then blanks the view with a "Trial expired" message.
 
@@ -30,7 +30,7 @@ Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Withou
 ```toml
 [dependencies]
 bevy = "0.19"
-noesis_bevy = "0.13"
+noesis_bevy = "0.15"
 ```
 
 It links the Noesis SDK at build time, so you need `NOESIS_SDK_DIR` set (see above) to compile.
@@ -58,8 +58,9 @@ fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
     // asset server instead; the loader feeds the same registry.
     xaml.insert("menu.xaml", Arc::new(MENU_XAML.as_bytes().to_vec()));
 
-    // A view is a `NoesisView` component on a 2D camera tagged `NoesisCamera`.
-    // Noesis renders the scene offscreen and composites it onto that camera.
+    // A view is a `NoesisView` on a camera. Noesis renders the scene offscreen
+    // and composites it onto that camera. A Camera3d also needs `NoesisCamera`;
+    // on a Camera2d the tag is optional.
     commands.spawn((
         Camera2d,
         NoesisCamera,
@@ -76,24 +77,26 @@ fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
 
 ## How the UI fits Bevy
 
-The mental model is closer to "Bevy hosts an embedded retained-mode GUI runtime and renders its output" than "Bevy UI describes the widgets." XAML is authoritative for structure and layout; the ECS supplies data and intent across a small typed bridge surface.
+Bevy hosts Noesis as an embedded retained-mode GUI and renders its output. XAML owns structure and layout; the ECS supplies data and intent through a small set of typed bridges.
 
-- **The XAML tree lives inside Noesis, not the ECS.** Noesis parses your XAML and owns the live tree of controls (buttons, grids, text blocks), along with the visual and logical trees, the dependency-property system, styles, triggers, and animations. None of those controls are Bevy entities; there is no entity per `<Button>`.
-- **One entity per view.** The only ECS-visible part is the `NoesisView` camera entity. It renders one XAML document into the frame, and the whole tree behind it is opaque to the ECS.
-- **You reach the controls through bridges, not entities.** Instead of querying widget entities, you attach bridge components to the view entity, and reconcile systems in `NoesisSet::Apply` push values into and pull them out of the live scene: `NoesisText` for text, `NoesisDp` for dependency properties, `NoesisVm` for view models, `NoesisCommands` for commands, and so on. Read-backs arrive as `Message { view, .. }` events, not as changed components on a widget. Data binding, commands, and view models are the seam, the idiomatic XAML/WPF approach rather than immediate-mode or an entity per widget.
-- **The tradeoff.** You don't get ECS-native features like per-widget `Transform`, picking, or change detection for free. Anything you want to drive from gameplay goes through the bridge layer, or means adding to it.
+- The XAML tree lives inside Noesis. Noesis parses your XAML and owns the live controls, the visual and logical trees, dependency properties, styles, triggers, and animations. No control is a Bevy entity; there is no entity per `<Button>`.
+- Each view is one entity: the `NoesisView` camera entity. It renders one XAML document, and the tree behind it is opaque to the ECS.
+- You reach controls through bridges. Bridge components on the view entity name elements by `x:Name`, and reconcile systems in `NoesisSet::Apply` push values into the live scene and read values back: `NoesisText` for text, `NoesisDp` for dependency properties, `NoesisVm` for view models, `NoesisCommands` for commands, and so on. Read-backs arrive as messages carrying the `view` entity. Data binding, commands, and view models are the seam, as in WPF.
+- You don't get per-widget `Transform`, picking, or change detection. Anything gameplay drives goes through a bridge.
 
-On top of this base, the entity-driven API below raises whole panels and list rows to first-class entities when you want plain ECS ergonomics; the bridges stay the lower-level seam beneath it.
+The entity-driven API below builds on the bridges and makes panels and list rows into entities when you want plain ECS ergonomics.
 
 ## The entity-driven UI API
 
-When you'd rather drive the UI as plain ECS, three primitives make a Bevy entity the unit of UI. You still author the XAML; you spawn entities and write ordinary systems instead of string-keyed bridges. `examples/ecs_ui.rs` runs all three end to end.
+Three primitives make a Bevy entity the unit of UI. You still author the XAML, but you spawn entities and write ordinary systems instead of filling string-keyed bridges. `examples/ecs_ui.rs` runs all three.
 
-**Panel = entity.** A `UiPanel` mounts a sub-XAML fragment into a host slot, and the entity's bound components are its `DataContext`:
+**Panel = entity.** A `UiPanel` mounts a XAML fragment into a named `Panel` of a view's scene. The entity's bound components, registered with `add_noesis_panel_field`, form the fragment's `DataContext`:
 
 ```rust
 #[derive(Component, NoesisViewModel, Clone, Copy)]
 struct Health(f32);   // binds {Binding Health} inside the fragment
+
+app.add_noesis_panel_field::<Health>();
 
 commands.spawn((UiPanel::new("hud.xaml").mount_into(view, "Slot"), Health(100.0)));
 
@@ -102,13 +105,15 @@ fn regen(mut q: Query<&mut Health, With<UiPanel>>) {
 }
 ```
 
-Two panels of the same type bind independently. Show and hide is a `String` field bound to `Visibility` (`visibility::{VISIBLE, COLLAPSED, HIDDEN}`), with no converter.
+Two panels with the same components bind independently. A panel needs `mount_into`; without a host it never mounts. The bound components are fixed the first frame the panel reconciles, so spawn them in one bundle (or see `UiPanel::deferred_seal`). To show and hide an element, bind a `String` field to `Visibility` and set it to one of `visibility::{VISIBLE, COLLAPSED, HIDDEN}`.
 
-**List = query.** A list is its own entity naming the view it renders into; its rows are entities too. Tag an entity into a list and it appears as a row; the bound `ObservableCollection` is reconciled by `Entity`, so mutating one component updates only its row and selection survives a reorder. One view can own any number of lists:
+**List = query.** A list is its own entity naming the view it renders into, and its rows are entities too. Point an entity at a list with `ListedIn` and it appears as a row. The bound collection is reconciled by `Entity`, so changing one component updates only its row and selection survives a reorder. One view can host any number of lists:
 
 ```rust
 #[derive(Component, NoesisViewModel, Clone)]
 struct Item { name: String, qty: i32 }
+
+app.add_noesis_list::<Item>();
 
 let list = commands.spawn(UiList::new(view, "Inventory")).id();
 commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(list)));
@@ -116,7 +121,7 @@ commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(list)));
 
 The selected row carries a `Selected` marker, read back with `Query<&Item, With<Selected>>`.
 
-**Events = observers.** UI events arrive as `EntityEvent`s targeting the entity they came from, a panel or a row:
+**Events = observers.** UI events arrive as `EntityEvent`s targeting the entity they came from. Clicking a list row raises `UiClicked` on the row entity. Clicks and key presses on elements named in a `NoesisClickWatch` / `NoesisKeyDownWatch` raise `UiClicked` / `UiKeyDown` on the panel or view carrying the watch. Events are delivered the frame after they fire, so the target may already be despawned; look it up with `get`:
 
 ```rust
 fn use_item(on: On<UiClicked>, items: Query<&Item>) {
@@ -128,7 +133,9 @@ fn use_item(on: On<UiClicked>, items: Query<&Item>) {
 
 ## Driving the UI from systems
 
-Each piece of UI state (text, visibility, list contents, and more) is a bridge component on the view entity. Spawning a `NoesisView` auto-attaches every per-view bridge as a Bevy required component, each defaulting to empty at no cost, so you write to them without spawning them by hand. A write set from `Startup` or `OnEnter`, before the scene exists, lands once the scene builds. The two binding bridges `NoesisVm` and `NoesisCommands` are the exception: add those yourself, since they need a class or command name.
+Each piece of UI state (text, visibility, list contents, and more) is a bridge component on the view entity. Spawning a `NoesisView` attaches every per-view bridge as a required component, empty by default, so you write to them without inserting them first. A write made in `Startup` or `OnEnter`, before the scene exists, lands once the scene builds. `NoesisVm` and `NoesisCommands` are not auto-attached; add them yourself, since they need a class or command name.
+
+Most bridge maps are write-through: removing an entry leaves the element at its last value. To reset an element, write the value you want.
 
 For an app with a single view, `NoesisUi` finds it for you so a system doesn't spell out the query:
 
@@ -147,7 +154,7 @@ fn update_score(score: Res<Score>, mut ui: NoesisUi<&mut NoesisText>) {
 
 ## Custom controls and markup extensions
 
-Write a control or a `{Binding}`-style markup extension in Rust, register it from a `Startup` system, and XAML can use it by name:
+Write a control or a `{Binding}`-style markup extension in Rust, register it from a `Startup` system before any XAML that uses it loads, and XAML can use it by name:
 
 ```rust
 use bevy::prelude::*;
@@ -158,12 +165,12 @@ use noesis_bevy::classes::{
 
 struct NineSlicerHandler { source_idx: u32 /* ... */ }
 impl PropertyChangeHandler for NineSlicerHandler {
-    fn on_changed(&mut self, instance: Instance, idx: u32, value: PropertyValue<'_>) {
+    fn on_changed(&self, instance: Instance, idx: u32, value: PropertyValue<'_>) {
         // Recompute derived properties and write them back via instance.set_*().
     }
 }
 
-fn register(mut registry: ResMut<NoesisClassRegistry>) {
+fn register(mut registry: NonSendMut<NoesisClassRegistry>) {
     let mut b = ClassBuilder::new("MyNs.NineSlicer", ClassBase::ContentControl,
                                   NineSlicerHandler { source_idx: 0 });
     b.add_property("Source", PropType::ImageSource);
@@ -172,17 +179,17 @@ fn register(mut registry: ResMut<NoesisClassRegistry>) {
 }
 ```
 
-`MarkupExtensionRegistration` works the same way via `NoesisMarkupExtensionRegistry`. See the `noesis_runtime` README for the FFI-level details.
+Handlers run on the main thread inside Noesis's property system while the crate holds its Noesis state borrowed, so they must not touch the Bevy `World`; queue ECS changes for a later system. `on_changed` takes `&self` because it can re-enter, so keep mutable state behind a `Cell`, `RefCell`, or `Mutex`. `MarkupExtensionRegistration` works the same way through `NonSendMut<NoesisMarkupExtensionRegistry>`. See the `noesis_runtime` docs for the FFI-level details.
 
 ## Data binding
 
-Bind a plain Bevy `Resource` to XAML `{Binding field_name}`: derive `NoesisViewModel`, register it, and each field is reflected to the binding engine by name, two-way.
+Bind a plain struct to XAML `{Binding field_name}`: derive `Component` and `NoesisViewModel`, register the type, and insert it on the view entity. Each field binds by name, two-way.
 
 ```rust
 use bevy::prelude::*;
 use noesis_bevy::{NoesisPlugin, NoesisViewModel, NoesisViewModelAppExt};
 
-#[derive(Resource, NoesisViewModel)]
+#[derive(Component, NoesisViewModel)]
 struct SettingsVm {
     volume: f32,   // <Slider Value="{Binding volume, Mode=TwoWay}"/>
     muted: bool,   // <CheckBox IsChecked="{Binding muted}"/>
@@ -191,11 +198,13 @@ struct SettingsVm {
 
 App::new()
     .add_plugins((DefaultPlugins, NoesisPlugin::default()))
-    .insert_resource(SettingsVm { volume: 0.8, muted: false, quality: 2 })
-    .add_noesis_view_model::<SettingsVm>(); // attach as the view-root DataContext
+    .add_noesis_view_model::<SettingsVm>(); // binds as the view root's DataContext
+
+// Then, on the view entity:
+commands.entity(view).insert(SettingsVm { volume: 0.8, muted: false, quality: 2 });
 ```
 
-Mutating the resource updates the bound controls (Bevy change detection drives `INotifyPropertyChanged`); a control edit writes back into the resource. Supported field types are `f32`/`f64`, `i32`/`u32`, `bool`, and `String`; mark other fields `#[noesis(skip)]`.
+Changing the component updates the bound controls; a `TwoWay` control edit writes back into the component on the next frame. Supported field types are `f32`/`f64`, `i32`/`u32`, `bool`, and `String`; mark other fields `#[noesis(skip)]`, or use `#[noesis(rename = "Name")]` to bind under a different name. Use `add_noesis_view_model_at` to bind to a named element instead of the root.
 
 For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view model built one property at a time), `NoesisItems` (fill a list or dropdown from a Rust collection), and `NoesisDp` (get, set, or watch any property on a named element directly, no binding required).
 
@@ -203,13 +212,11 @@ For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view 
 
 | Bevy | noesis_bevy |
 |------|-------------|
-| 0.19 | 0.13        |
+| 0.19 | 0.13 – 0.15 |
 | 0.18 | 0.10 – 0.12 |
 
-`noesis_bevy` tracks Bevy: each Bevy minor gets a fresh `noesis_bevy` minor, and
-patch releases stay on the row's Bevy version. Pin `wgpu` to the same version
-Bevy's renderer uses (the crate does this for you) so render-device types stay
-interchangeable.
+Each Bevy minor gets a new `noesis_bevy` minor. The crate pins `wgpu` to the
+version Bevy's renderer uses, so the render-device types are interchangeable.
 
 ## Setup
 
@@ -233,18 +240,16 @@ export NOESIS_LICENSE_NAME=...
 export NOESIS_LICENSE_KEY=...
 ```
 
-Then build and run:
+Then run the viewer and the tests. The integration tests need [cargo-nextest](https://nexte.st); see [`tests/README.md`](./tests/README.md).
 
 ```sh
-cargo test
 cargo run --example xaml_viewer
+cargo nextest run
 ```
 
-## Licensing
+## License
 
-Source in this repository is © 2026 Dead Money under the [MIT License](./LICENSE). Everything under `src/`, `tests/`, `examples/`, and `assets/` is original work; no Noesis SDK code is vendored.
-
-The Noesis Native SDK is not redistributed here. You obtain it from Noesis Technologies under their EULA, and `noesis_runtime`'s `build.rs` links it from `NOESIS_SDK_DIR` at compile time. Use and distribution of binaries you build that link the SDK are governed by the Noesis EULA, not by the MIT License above.
+MIT; see [LICENSE](./LICENSE). No Noesis SDK code is included. Binaries that link the SDK are covered by the Noesis EULA.
 
 ## Acknowledgements
 

@@ -1,13 +1,12 @@
-//! Per-view plain-struct `ViewModel` bridge: bind a plain Bevy `Component` to a
-//! view's XAML `{Binding field_name}` by field name, two-way.
+//! Bind a plain Rust struct, as a Bevy component, to a view's XAML
+//! `{Binding field_name}`, two-way.
 //!
-//! Where [`crate::viewmodel`] binds a `DependencyObject`-backed view model with
-//! explicitly-declared dependency properties, this binds an *ordinary* Rust
-//! struct: derive [`NoesisViewModel`] on it, make it a `Component`, register the
-//! type, and add the component to a [`NoesisView`](crate::NoesisView) entity. The
-//! runtime's reflected plain-VM (`noesis_runtime::plain_vm`) exposes each field
-//! to that view's binding engine by name, including `TwoWay` writeback and
-//! `INotifyPropertyChanged`.
+//! Derive [`NoesisViewModel`] and `Component` on the struct, register it with
+//! [`NoesisViewModelAppExt::add_noesis_view_model`], and insert it on a
+//! [`NoesisView`](crate::NoesisView) entity. Each field becomes a property of a
+//! reflected Noesis type that the view's binding engine resolves by name. For a
+//! view model with explicitly declared dependency properties, use
+//! [`crate::viewmodel`] instead.
 //!
 //! ```ignore
 //! use bevy::prelude::*;
@@ -23,7 +22,7 @@
 //! fn main() {
 //!     App::new()
 //!         .add_plugins((DefaultPlugins, noesis_bevy::NoesisPlugin::default()))
-//!         .add_noesis_view_model::<SettingsVm>() // register the type once
+//!         .add_noesis_view_model::<SettingsVm>()
 //!         .run();
 //! }
 //!
@@ -33,24 +32,28 @@
 //!
 //! # How the data flows
 //!
-//! - **Rust → UI.** When the `Component` is mutated (Bevy change detection), the
-//!   reconcile system snapshots its fields and pushes them into that view's
-//!   plain-VM instance with `set_and_notify`; the bound controls update on the
-//!   next `View::update`.
-//! - **UI → Rust.** A `TwoWay` edit fires the runtime's `on_set` hook (on the
-//!   main thread, where the `View` lives); the bridge converts the boxed value to
-//!   an owned [`PlainValue`] and pushes it onto the entry's per-view writeback
-//!   sink. The same reconcile system drains the sink and applies each edit back
-//!   into the `Component` via [`NoesisViewModel::noesis_apply`].
+//! - **Rust to UI.** When the component changes (Bevy change detection), the
+//!   sync system in [`NoesisSet::Apply`] pushes every field to the view and
+//!   raises property-changed for each, so bound controls update on the view's
+//!   next update.
+//! - **UI to Rust.** A `TwoWay` edit is queued and applied to the component by
+//!   the same system on its next run, through
+//!   [`NoesisViewModel::noesis_apply`]. The component is only marked changed
+//!   when an edit lands.
 //!
-//! # Threading & lifetime
+//! Each view gets its own instance per type, so several views can carry the
+//! same `T`. The instance attaches once the view's scene exists and reattaches
+//! after a rebuild. Removing the component detaches it and releases the
+//! instance.
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there).
-//! The plain-VM instance is created and owned per `(view entity, type)` in
-//! [`NoesisRenderState`](crate::render), released before
-//! `noesis_runtime::shutdown`. The `Component` stays in the ECS; only owned
-//! [`PlainValue`]s cross into Noesis, so no Noesis handle is ever touched off the
-//! main thread.
+//! A view's `DataContext` holds one object per element. If a [`NoesisVm`],
+//! a [`NoesisCommands`] or another plain view model attaches to the same
+//! element, the last attach wins and a warning is logged; register with
+//! [`add_noesis_view_model_at`](NoesisViewModelAppExt::add_noesis_view_model_at)
+//! to target a different element.
+//!
+//! [`NoesisVm`]: crate::NoesisVm
+//! [`NoesisCommands`]: crate::NoesisCommands
 
 use std::sync::{Arc, Mutex};
 
@@ -65,13 +68,12 @@ pub use noesis_runtime::plain_vm::{
 use crate::render::{NoesisRenderState, NoesisSet, add_reap_system};
 use crate::viewmodel::AttachTarget;
 
-/// The UI→Rust writeback sink shared between the (main-thread) `on_set` hook and
-/// the reconcile drain. `(prop_index, value)` pairs. Owned per-entry so each
-/// view's writebacks stay isolated.
+/// `(prop_index, value)` UI edits queued by the `on_set` hook and drained by
+/// the sync system. One per instance.
 pub(crate) type SetSink = Arc<Mutex<Vec<(u32, PlainValue)>>>;
 
-/// Convert the boxed `TwoWay` writeback value to an owned [`PlainValue`],
-/// decoding it as the property's declared [`PlainType`].
+/// Decodes a `TwoWay` edit as the property's declared [`PlainType`];
+/// [`PlainValue::Null`] when it is null or doesn't decode.
 pub(crate) fn unbox(kind: PlainType, value: &PlainValueRef) -> PlainValue {
     if value.is_none() {
         return PlainValue::Null;
@@ -87,68 +89,58 @@ pub(crate) fn unbox(kind: PlainType, value: &PlainValueRef) -> PlainValue {
     decoded.unwrap_or(PlainValue::Null)
 }
 
-/// Implemented by `#[derive(NoesisViewModel)]` (re-exported from the crate
-/// root). The derive maps each struct field to a reflected Noesis property and
-/// generates the snapshot (Rust→UI) and writeback (UI→Rust) glue. Hand-impl
-/// only if you need control the derive doesn't offer.
+/// A struct whose fields bind to XAML as reflected Noesis properties. Used by
+/// the plain view model bridge ([`NoesisViewModelAppExt`]), panels
+/// ([`crate::panel`]) and lists ([`crate::list`]).
 ///
-/// `noesis_snapshot` / `noesis_apply` work in owned [`PlainValue`]s and never
-/// touch a Noesis handle, so they run main-world; the bridge does the
-/// `set_and_notify` / `on_set` plumbing.
+/// Derive it with `#[derive(NoesisViewModel)]`, re-exported from the crate
+/// root; the `noesis_bevy_derive` crate docs list the supported field types
+/// and attributes. Implement it by hand only for control the derive doesn't
+/// offer. The methods work on owned [`PlainValue`]s and never touch Noesis.
 pub trait NoesisViewModel: Send + Sync + 'static {
-    /// Unique Noesis type name for the reflected plain-VM (defaults to the
-    /// struct identifier).
+    /// Name for the reflected Noesis type, shown in diagnostics. The derive
+    /// defaults it to the struct identifier. It need not be unique: the plain
+    /// view model bridge registers a per-view name derived from it.
     fn noesis_type_name() -> &'static str
     where
         Self: Sized;
 
-    /// Ordered `(field_name, type)` metadata. The index into this slice is the
-    /// `prop_index` used by [`Self::noesis_apply`].
+    /// `(property_name, type)` for each bound property. The index into this
+    /// slice is the `prop_index` passed to [`Self::noesis_apply`].
     fn noesis_properties() -> &'static [(&'static str, PlainType)]
     where
         Self: Sized;
 
-    /// Current field values, one per [`Self::noesis_properties`] entry, in
-    /// order. Pushed into the bound controls (Rust→UI).
+    /// Current values, one per [`Self::noesis_properties`] entry, in order.
     fn noesis_snapshot(&self) -> Vec<PlainValue>;
 
-    /// Write a UI edit back into the field at `prop_index` (UI→Rust). A value
-    /// whose variant doesn't match the field is ignored.
+    /// Writes a UI edit into the property at `prop_index`. Ignore an
+    /// out-of-range index or a value whose variant doesn't match the property.
     fn noesis_apply(&mut self, prop_index: u32, value: &PlainValue);
 }
 
-/// One live plain view model owned per `(view entity, type)` by
-/// [`NoesisRenderState`]. Field order matters: `instance` drops before `class`.
+/// Field order matters: `instance` drops before `_class`.
 pub(crate) struct PlainVmEntry {
     instance: PlainInstance,
     _class: PlainVmClass,
-    /// Friendly Noesis type name (the `T` identifier), for
-    /// `DataContext`-collision diagnostics. Not the registered reflection name,
-    /// which is made per-entity unique so multiple views of the same `T` don't
-    /// collide in the process-global type registry (see [`Self::build`]).
+    /// Unmangled name, for diagnostics; the registered name is per-entity (see
+    /// [`Self::build`]).
     type_name: String,
-    /// Property names in index order, for `set_and_notify`.
     prop_names: Vec<String>,
     target: AttachTarget,
     attached_for_uri: Option<String>,
-    /// UI→Rust writeback sink: the `on_set` hook pushes `(prop_index, value)`
-    /// here; [`Self::drain_writebacks`] empties it into the owning component.
-    /// Owned by the entry so each view's writebacks are isolated.
     set_sink: SetSink,
 }
 
 impl PlainVmEntry {
-    /// Register the reflected type, wire the `on_set` writeback to this entry's
-    /// own sink, and instantiate. Main-thread only. `None` if registration is
-    /// rejected.
+    /// Registers the reflected type, wires `on_set` to this entry's sink, and
+    /// instantiates. Main thread only. `None` if registration or instantiation
+    /// fails.
     ///
-    /// The reflection type is registered under a per-`entity` unique name
-    /// (`"{type_name}#{bits}"`) rather than the bare `type_name`: Noesis's type
-    /// registry is process-global, so two views carrying the same `T` would
-    /// otherwise fight over one name — the second `register` fails, is retried
-    /// every frame, and warns. Binding resolves properties by name on the
-    /// instance's actual type, so the mangled registration name is invisible to
-    /// XAML `{Binding …}`; only the friendly `type_name` is kept, for diagnostics.
+    /// Registers as `"{type_name}#{entity bits}"`: Noesis's type registry is
+    /// process-global, so a second view with the same `T` would otherwise fail
+    /// to register. Bindings resolve properties on the instance, so XAML never
+    /// sees the mangled name.
     pub(crate) fn build(
         type_name: &str,
         entity: Entity,
@@ -189,7 +181,7 @@ impl PlainVmEntry {
         })
     }
 
-    /// Push a full field snapshot into the instance (Rust→UI).
+    /// Sets every property in `snapshot` and raises property-changed for each.
     pub(crate) fn apply_snapshot(&self, snapshot: &[PlainValue]) {
         for (idx, value) in snapshot.iter().enumerate() {
             if let Some(name) = self.prop_names.get(idx) {
@@ -200,8 +192,7 @@ impl PlainVmEntry {
         }
     }
 
-    /// Take the pending UI→Rust writebacks (drained each frame by the reconcile
-    /// system into the owning component).
+    /// Takes the queued UI edits.
     pub(crate) fn drain_writebacks(&self) -> Vec<(u32, PlainValue)> {
         let mut guard = self.set_sink.lock().expect("plain VM set sink poisoned");
         if guard.is_empty() {
@@ -215,12 +206,11 @@ impl PlainVmEntry {
         self.attached_for_uri = None;
     }
 
-    /// Borrow the attach target for the render-side bind pass.
     pub(crate) fn target(&self) -> &AttachTarget {
         &self.target
     }
 
-    /// The registered Noesis type name, for `DataContext`-collision diagnostics.
+    /// The unmangled type name, for diagnostics.
     pub(crate) fn type_name(&self) -> &str {
         &self.type_name
     }
@@ -229,7 +219,7 @@ impl PlainVmEntry {
         self.attached_for_uri.as_deref() != Some(uri)
     }
 
-    /// Attach the instance to `element` as its `DataContext`; records the URI on
+    /// Sets the instance as `element`'s `DataContext` and records `uri` on
     /// success.
     pub(crate) fn attach_to(
         &mut self,
@@ -245,19 +235,15 @@ impl PlainVmEntry {
     }
 }
 
-/// Per-type config: where to attach the VM as `DataContext`. Set once at
-/// registration; applies to every view entity carrying a `T` component. Plain
-/// main-world resource (no extraction; the whole bridge runs main-world).
+/// Where view model type `T` attaches as `DataContext` in every view that
+/// carries it. Inserted by [`NoesisViewModelAppExt`].
 #[derive(Resource)]
 pub struct PlainVmConfig<T: Send + Sync + 'static> {
     target: AttachTarget,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
-/// Reconcile every view's `T` plain view model: build/attach its render-side
-/// entry, snapshot the component into the instance when it changed (Rust→UI),
-/// and apply any queued two-way edits back into the component (UI→Rust). No-op
-/// (state retained) until [`NoesisRenderState`] exists.
+/// No-op until [`NoesisRenderState`] exists.
 #[allow(clippy::needless_pass_by_value)]
 fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
     mut views: Query<(Entity, &mut T)>,
@@ -268,8 +254,7 @@ fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
         return;
     };
     for (entity, mut vm) in &mut views {
-        // Snapshot only on a real change (covers the initial insert via
-        // `is_added`); reading `&self` never trips change detection.
+        // `is_changed` covers the initial insert.
         let snapshot = vm.is_changed().then(|| vm.noesis_snapshot());
         let writebacks = state.sync_plain_vm(
             entity,
@@ -279,21 +264,17 @@ fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
             &config.target,
             snapshot,
         );
-        // Only touch the component mutably when there's an actual edit, so an
-        // idle frame doesn't falsely mark it changed (which would re-snapshot).
+        // Deref-mut only on a real edit; an idle frame must not mark it changed.
         for (index, value) in writebacks {
             vm.noesis_apply(index, &value);
         }
     }
 }
 
-/// Reap view `entity`'s `T` plain view model when the `T` component is removed
-/// while its view stays live. Without it the entry's `set_sink` keeps
-/// accumulating UI writebacks that nobody drains (unbounded growth as the user
-/// interacts) and the instance stays attached as `DataContext`. Plain VMs are
-/// keyed `(entity, TypeId)`, so this cannot ride the [`crate::render::ReapOnRemove`]
-/// trait (one impl per component, but here the component *is* the generic `T`);
-/// it wires through [`add_reap_system`] like the trait-driven bridges do.
+/// Without this reap, a removed `T` leaves its instance attached and its sink
+/// filling with UI edits nobody drains. Wired directly through
+/// [`add_reap_system`] because `ReapOnRemove` is one impl per concrete
+/// component, and here the component is the generic `T`.
 #[allow(clippy::needless_pass_by_value)]
 fn reap_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
     mut removed: RemovedComponents<T>,
@@ -307,17 +288,19 @@ fn reap_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
     }
 }
 
-/// `App` methods to register a plain-struct view model type. Add
-/// [`crate::NoesisPlugin`] first, then register the type; attach the `T`
-/// component to a [`NoesisView`](crate::NoesisView) entity to bind it.
+/// Registers plain view model types. Add [`crate::NoesisPlugin`] first, then
+/// insert the `T` component on a [`NoesisView`](crate::NoesisView) entity to
+/// bind it. Register each type once.
 pub trait NoesisViewModelAppExt {
-    /// Bind `T` as each carrying view's **root** `DataContext`.
+    /// Binds `T` as the root element's `DataContext` in every view that
+    /// carries it.
     fn add_noesis_view_model<T: NoesisViewModel + Component<Mutability = Mutable>>(
         &mut self,
     ) -> &mut Self;
 
-    /// Bind `T` as the `DataContext` of the element named `x_name` within each
-    /// carrying view.
+    /// Binds `T` as the `DataContext` of the element named `x_name` (may be
+    /// scope-qualified, `"Host/Leaf"`) in every view that carries it. If the
+    /// element isn't found, a warning is logged each frame.
     fn add_noesis_view_model_at<T: NoesisViewModel + Component<Mutability = Mutable>>(
         &mut self,
         x_name: impl Into<String>,

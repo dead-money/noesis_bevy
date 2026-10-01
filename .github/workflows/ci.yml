@@ -8,9 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Opt in to Node 24 for any JS-based actions. Node 20 is deprecated and will be
-  # forced off by GitHub in June 2026; this flips the switch early so we run on
-  # the same Node they'll default to.
+  # Run JS-based actions on Node 24; Node 20 is deprecated.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -57,17 +55,15 @@ jobs:
       - name: cargo doc
         run: cargo doc --no-deps
 
-  # build / clippy / test need the closed-source Noesis SDK, which only lives on
-  # our self-hosted runner. Never run untrusted fork-PR code there: skip any PR
-  # whose head is a fork. Same-repo branch PRs and pushes to main/tags are fine.
+  # Needs the Noesis SDK, which only the self-hosted runner has. Never run
+  # fork-PR code there.
   build-test:
     name: build • clippy • test
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, noesis-sdk]
     env:
-      # The runner service has no login session; winit's Wayland probe errors
-      # without it. Any writable existing path satisfies the check (the runner
-      # context is not available in job-level env, so a literal path).
+      # The runner service has no login session, and winit's Wayland probe
+      # errors without XDG_RUNTIME_DIR. Any writable path works.
       XDG_RUNTIME_DIR: /tmp
     steps:
       - name: Checkout
@@ -79,14 +75,11 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # Keeps the non-test targets (examples, benches) compiling; the suites
-      # themselves are built and run by nextest below.
+      # Keeps the examples compiling; nextest builds and runs the suites.
       - name: cargo build
         run: cargo build --all-targets --all-features
 
-      # The integration suites are three binaries that must run process-per-test
-      # (Noesis state is process-global and thread-affine); nextest is that model.
-      # See tests/README.md. Cached by the persistent target/ (clean: false).
+      # The suites need process-per-test isolation; see tests/README.md.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:

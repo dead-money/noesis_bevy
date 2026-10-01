@@ -1,16 +1,12 @@
-//! Regression for P1.13: [`NoesisPointerOverUi`] must not stay stuck `true`
-//! after the view under the pointer despawns.
+//! [`NoesisPointerOverUi`] must not stay stuck `true` after the view under the
+//! pointer despawns; a stuck flag suppresses game-world interaction forever.
 //!
 //! Drives a full-bleed, hit-test-visible Button, moves the Noesis pointer onto
-//! it (so `over` latches `true`), then despawns the view. Before the fix,
-//! `apply_input` bailed out on the now-empty scene map without clearing the
-//! flag, so `over` stayed `true` forever — exactly the state that wrongly
-//! suppresses 3D-world interaction. After the fix it drains back to `false`.
+//! it (so `over` latches `true`), then despawns the view and asserts the flag
+//! drains back to `false`.
 //!
-//! Uses [`NoesisInputQueue::push`] directly (no window needed) so the render
-//! side hit-tests and mirrors the flag through the real pipeline.
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
+//! Uses [`NoesisInputQueue::push`] directly (no window needed), so the input
+//! bridge hit-tests and sets the flag through the real pipeline.
 
 use std::sync::{Arc, Mutex};
 
@@ -28,11 +24,8 @@ const XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/2006/xa
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>"##;
 
-// Press/release the pointer every frame across this window so the events land
-// after the scene has built (build takes a handful of frames), not before it
-// exists. Each press latches the "over UI" flag. These sequence the scenario;
-// the run's exit is the terminal predicate (post-despawn sample captured), not a
-// fixed frame count.
+// Press/release the pointer every frame from MOVE_FROM so the events land after
+// the scene has built. Each press latches the "over UI" flag.
 const MOVE_FROM: usize = 15;
 const DESPAWN_AT: usize = 35;
 const CAPTURE_POST_AT: usize = 55;
@@ -101,7 +94,6 @@ fn pointer_over_ui_resets_when_view_despawns() {
         },
     );
 
-    // Exit once the post-despawn sample has been taken; assert its value after.
     let pred_post = Arc::clone(&over_after_despawn);
     let captured = run_until(&mut app, 120, move |_app| {
         pred_post.lock().unwrap().is_some()

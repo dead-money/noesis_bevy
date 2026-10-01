@@ -1,11 +1,13 @@
-//! Wraps `WgpuRenderDevice` with a `RecordingDevice` and drives tile-brush
-//! and clipping scenes, logging the full op sequence Noesis emits.
+//! Diagnostic trace for tile-brush and clipping scenes. Wraps
+//! `WgpuRenderDevice` in a `RecordingDevice` and prints the device op sequence
+//! Noesis emits for each scenario. It makes no assertions beyond not crashing.
 //!
-//! `DrawingBrush` is not implemented by Noesis (no `DrawingBrush.h`); XAML
-//! that uses it silently skips the fill. The drawingbrush scenario is a
-//! negative reference confirming this, not a device bug.
+//! Noesis has no `DrawingBrush` (no `DrawingBrush.h`), and XAML that uses one
+//! skips the fill without an error. The `drawingbrush-unsupported` scenario is
+//! a negative reference for that, not a device bug.
 //!
-//! Run with `cargo test -- --nocapture` to print the trace to stderr.
+//! Print the trace with
+//! `cargo nextest run -E 'test(drawingbrush_tile_offscreen_trace)' --no-capture`.
 
 #![allow(clippy::too_many_lines)]
 
@@ -335,7 +337,6 @@ fn drawingbrush_tile_offscreen_trace() {
             </Grid>"##,
             1,
         ),
-        // Noesis has no DrawingBrush.h; XAML silently skips the fill. Negative reference.
         (
             "drawingbrush-unsupported",
             br##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -357,7 +358,7 @@ fn drawingbrush_tile_offscreen_trace() {
             </Grid>"##,
             1,
         ),
-        // VisualBrush should round-trip into an offscreen RT and pattern draw.
+        // VisualBrush: expect an offscreen RT render followed by a pattern draw.
         (
             "visualbrush-rectangle",
             br##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -377,7 +378,7 @@ fn drawingbrush_tile_offscreen_trace() {
             </Grid>"##,
             1,
         ),
-        // No theme: ScrollViewer template resolves to nothing, so no clip-induced offscreen expected.
+        // No theme, so the ScrollViewer template is empty and no clip offscreen is expected.
         (
             "scrollviewer-no-theme",
             br##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

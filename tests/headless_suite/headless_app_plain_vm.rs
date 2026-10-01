@@ -1,16 +1,15 @@
 //! End-to-end test of the per-entity plain-struct view model bridge
 //! (`#[derive(Component, NoesisViewModel)]` + `add_noesis_view_model::<T>()`).
 //!
-//! Two assertion directions:
-//!   * **Rust→UI.** `DemoVm.title = "Hello"` binds to a `<TextBox>` via
+//! Two directions:
+//!   * Rust to UI: `DemoVm.title = "Hello"` binds to a `<TextBox>` via
 //!     `{Binding title}`; a [`NoesisText`] watch confirms the control sees it.
-//!   * **UI→Rust.** A [`NoesisDp`] write sets the `TextBox`'s `Text` to `"World"`;
-//!     the `TwoWay/PropertyChanged` binding must push that back into the `DemoVm`
-//!     component via the reconcile system.
+//!   * UI to Rust: a [`NoesisDp`] write sets the `TextBox`'s `Text` to `"World"`,
+//!     and the `TwoWay`/`PropertyChanged` binding must write it back into the
+//!     `DemoVm` component.
 //!
-//! Two views carrying the *same* `#[derive(NoesisViewModel)]` type are covered by
-//! `headless_app_plain_vm_two_views.rs` (the bridge registers each entity's
-//! reflection type under a per-entity unique name, so they don't collide).
+//! `headless_app_plain_vm_two_views.rs` covers two views with the same view model
+//! type.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,8 +24,6 @@ use crate::common::{headless_app, run_until};
 
 const SEED: &str = "Hello";
 const EDIT: &str = "World";
-// Frame-gated stimulus: simulate the user edit once the scene exists. Frames are
-// instant under run_until; the exit predicate is the round-trip, not this count.
 const EDIT_AT_FRAME: usize = 14;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -36,7 +33,7 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
            Text="{Binding title, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
 </Grid>"##;
 
-/// Bridge attaches this as the view-root `DataContext`.
+/// Attached by the bridge as the view root's `DataContext`.
 #[derive(Component, NoesisViewModel)]
 struct DemoVm {
     title: String,
@@ -45,7 +42,6 @@ struct DemoVm {
 #[test]
 fn plain_vm_component_round_trips_two_way() {
     let titles: Arc<Mutex<HashMap<Entity, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    // Rust→UI proof: Box text from the NoesisText watch
     let text_changes: Arc<Mutex<Vec<(Entity, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
@@ -85,19 +81,17 @@ fn plain_vm_component_round_trips_two_way() {
               mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
 
-            // UI→Rust readback
             {
                 let mut snap = titles_sys.lock().unwrap();
                 for (e, vm) in &vms {
                     snap.insert(e, vm.title.clone());
                 }
             }
-            // Rust→UI readback
             for ev in changes.read() {
                 text_sys.lock().unwrap().push((ev.view, ev.text.clone()));
             }
 
-            // simulate user edit via DP; TwoWay/PropertyChanged must push back to DemoVm
+            // Stands in for a user edit.
             if *frame == EDIT_AT_FRAME {
                 for mut dp in &mut dps {
                     *dp = NoesisDp::new().set_string("Box", "Text", EDIT);
@@ -106,8 +100,6 @@ fn plain_vm_component_round_trips_two_way() {
         },
     );
 
-    // Exit once both directions have landed: the seed reached the TextBox (Rust→UI)
-    // and the DP edit wrote back into the DemoVm component (UI→Rust).
     let pred_titles = Arc::clone(&titles);
     let pred_texts = Arc::clone(&text_changes);
     let pred_view = Arc::clone(&view_entity);

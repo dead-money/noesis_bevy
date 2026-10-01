@@ -1,16 +1,16 @@
-//! Opt-in loader for Noesis's shipped control theme.
+//! Loads the control theme that ships with the Noesis SDK.
 //!
-//! Without a `ControlTemplate`, Noesis paints controls magenta ("no style").
-//! The Native SDK ships a full theme (control templates, brushes, fonts) under
-//! `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`, in color variants
-//! (`DarkBlue`, `DarkEmerald`, `LightOrange`, …). This plugin stages one variant
-//! into the XAML + font registries and installs it as the scene's application
-//! resources, so a consumer gets styled `Button` / `TextBox` / `ScrollViewer`
-//! without hand-authoring templates.
+//! Without a `ControlTemplate`, Noesis paints controls magenta. The SDK ships a
+//! full theme (templates, brushes, fonts) under
+//! `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/` in color variants
+//! (`DarkBlue`, `DarkEmerald`, `LightOrange`, ...). [`NoesisDefaultThemePlugin`]
+//! reads one variant from there at startup, so `Button`, `TextBox`, and
+//! `ScrollViewer` are styled without hand-written templates.
 //!
-//! It's deliberately **opt-in** (a separate plugin from [`crate::NoesisPlugin`]):
-//! the theme is SDK content that can't be embedded, so it's only loaded when a
-//! consumer asks and `NOESIS_SDK_DIR` is set.
+//! The theme is SDK content that can't be embedded in this crate, so the plugin
+//! is opt-in and separate from [`crate::NoesisPlugin`], which it requires. When
+//! `NOESIS_SDK_DIR` is unset or the theme directory is missing, it warns and
+//! controls render unstyled.
 //!
 //! ```ignore
 //! app.add_plugins((NoesisPlugin::default(), NoesisDefaultThemePlugin::default()));
@@ -18,8 +18,12 @@
 //! app.add_plugins(NoesisDefaultThemePlugin { theme: "DarkEmerald".into() });
 //! ```
 //!
-//! Add it **after** [`crate::NoesisPlugin`] (it uses the registries that plugin
-//! installs) and insert your `NoesisScene` as usual; the theme patches it in.
+//! Each [`NoesisView`] gets the theme when it is spawned: the plugin puts the
+//! theme dictionary first in
+//! [`application_resources`](NoesisView::application_resources), adds the
+//! theme fonts to the view's font waits, and appends the theme's font as a
+//! fallback. [`NoesisResources`](crate::resources::NoesisResources) entries
+//! override theme keys.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,21 +34,20 @@ use crate::font::FontRegistry;
 use crate::render::{NoesisSet, NoesisView};
 use crate::xaml::XamlRegistry;
 
-/// The theme's default font family. Every Noesis color variant shares it
-/// (`NoesisTheme.Fonts.xaml`'s `Font.Family.Default`), so it's a safe fallback
-/// for unstyled text once the theme fonts are staged.
+/// `Font.Family.Default` in `NoesisTheme.Fonts.xaml`, shared by every variant.
 const THEME_FONT_FALLBACK: &str = "Fonts/#PT Root UI";
 
-/// Loads a shipped Noesis control theme from the SDK. See the module docs.
+/// Loads a Noesis SDK control theme. Requires [`crate::NoesisPlugin`] and
+/// `NOESIS_SDK_DIR`; see the [module docs](self).
 pub struct NoesisDefaultThemePlugin {
-    /// Variant name, e.g. `"DarkBlue"`. Loads `NoesisTheme.{theme}.xaml` and
-    /// its sibling dictionaries from the SDK theme directory.
+    /// Variant name, such as `"DarkBlue"` (the default). Loads
+    /// `NoesisTheme.{theme}.xaml` and its sibling dictionaries.
     pub theme: String,
 }
 
 impl Default for NoesisDefaultThemePlugin {
     fn default() -> Self {
-        // DarkBlue is the variant Noesis's own samples default to.
+        // The variant Noesis's own samples use.
         Self {
             theme: "DarkBlue".into(),
         }
@@ -63,9 +66,8 @@ impl Plugin for NoesisDefaultThemePlugin {
         }
         app.insert_resource(staged)
             .add_systems(Startup, inject_theme_registries)
-            // Patch each view before the Noesis pipeline reads it: the resources
-            // bridge (Sync) unions the view's `application_resources` chain and
-            // the scene build (Ensure) reads its font gates.
+            // Before Sync: the resources bridge reads the patched chain there,
+            // and scene build (Ensure) reads the font waits.
             .add_systems(PostUpdate, apply_theme_to_scene.before(NoesisSet::Sync));
     }
 }
@@ -81,9 +83,7 @@ struct StagedTheme {
     fonts: Vec<(String, String, PathBuf)>,
 }
 
-/// Discover the theme's XAML + font files under the SDK. Returns an empty set
-/// (and logs) when the SDK or theme directory is missing, so the plugin
-/// degrades to "unstyled" rather than panicking.
+/// Empty (with a warning) when the SDK or theme directory is missing.
 fn stage_theme(theme: &str) -> StagedTheme {
     let mut staged = StagedTheme {
         name: theme.to_string(),
@@ -144,9 +144,8 @@ fn stage_theme(theme: &str) -> StagedTheme {
     staged
 }
 
-/// Read the staged theme files into the XAML + font registries. Theme fonts are
-/// read straight from the SDK (not through the asset server), so they land in
-/// `FontRegistry` before the view's one-shot `scan_folder("Fonts")` fires.
+/// Theme fonts are read straight from disk, not through the asset server, so
+/// they are in `FontRegistry` before a view's `scan_folder("Fonts")`.
 #[allow(clippy::needless_pass_by_value)]
 fn inject_theme_registries(
     staged: Res<StagedTheme>,
@@ -171,20 +170,13 @@ fn inject_theme_registries(
     }
 }
 
-/// Patch each newly-added [`NoesisView`] to load the theme: merge it into the
-/// view's application resources and gate the view's build on the theme fonts.
-///
-/// Keyed on `Added<NoesisView>` (not a one-shot `Local`), so a view spawned
-/// after the first batch — including one spawned via `Commands` earlier the same
-/// frame — is patched before its scene ever parses. A view's XAML is parsed once
-/// (scene build is one-shot), so a view that misses this patch would render
-/// unthemed forever.
+/// `Added<NoesisView>` rather than a one-shot `Local`: a view spawned later,
+/// even earlier the same frame, is patched before its scene parses.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_theme_to_scene(
     staged: Res<StagedTheme>,
     mut views: Query<&mut NoesisView, Added<NoesisView>>,
 ) {
-    // Nothing staged → nothing to apply.
     if staged.xamls.is_empty() {
         return;
     }
@@ -192,7 +184,7 @@ fn apply_theme_to_scene(
     let theme_uri = format!("NoesisTheme.{}.xaml", staged.name);
     for mut scene in &mut views {
         if !scene.application_resources.contains(&theme_uri) {
-            // Theme first, so any app-level resources can build on its styles.
+            // Theme first, so later chain entries can build on its styles.
             scene.application_resources.insert(0, theme_uri.clone());
         }
         if !scene.wait_for_fonts.iter().any(|f| f == "Fonts") {

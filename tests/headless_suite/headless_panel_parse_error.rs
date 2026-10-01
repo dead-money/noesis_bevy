@@ -1,17 +1,17 @@
-//! F5 regression: a [`UiPanel`] whose fragment fails to load degrades gracefully.
+//! A [`UiPanel`] whose fragment fails to load degrades gracefully.
 //! It never mounts, the app does not panic, and a sibling panel with a valid
 //! fragment is unaffected.
 //!
 //! The reliable hard failure is a missing / unregistered fragment URI (a typo'd
-//! registration key): `FrameworkElement::load` returns `None`, which F5 surfaces
-//! as a deduped Bevy `error!`. Noesis's XAML parser is lenient about *malformed*
-//! markup (an unbalanced or mismatched tag still returns a partial element, with
-//! only a Noesis-side parser warning), so this test exercises the missing-URI path.
+//! registration key): `FrameworkElement::load` returns `None`, which the panel
+//! mount surfaces as a deduped Bevy `error!`. Noesis's XAML parser is lenient
+//! about malformed markup (an unbalanced or mismatched tag still returns a
+//! partial element, with only a parser warning; see `headless_panel_parse_warning`),
+//! so this test exercises the missing-URI path.
 //!
 //! What this asserts: no panic, `live_panels == 1` (only the good fragment built a
 //! `PanelEntry`; the missing one's build returned `None`), and the good panel's
-//! binding still reaches the UI. It does NOT assert the `error!` fired (tracing
-//! capture is fiddly headless); the loud log is verified by inspection.
+//! binding still reaches the UI. It does not assert the `error!` fired.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -95,8 +95,7 @@ fn broken_fragment_degrades_gracefully_without_blocking_siblings() {
         },
     );
 
-    // Event-driven exit: the good panel bound its text through the UI. Completing
-    // without panic is itself part of the assertion.
+    // Completing without panic is part of the assertion.
     let pred_captured = Arc::clone(&captured);
     let bound = run_until(&mut app, 240, move |_app| {
         pred_captured

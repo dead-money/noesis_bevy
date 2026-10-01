@@ -1,15 +1,12 @@
-//! Integration test for *application-resources / theme* hot-reload through the
-//! real `NoesisPlugin` pipeline.
+//! Integration test for application-resources (theme) hot-reload on the headless
+//! harness.
 //!
-//! A theme dictionary pulled via `NoesisView.application_resources` installs
-//! into the process-global resource dictionary through `reconcile_app_resources`
-//! (Sync phase), whose unchanged-check was keyed on the URI *list*, not bytes —
-//! so editing the theme in place used to be a no-op. This asserts the
-//! byte-keyed reinstall + `app_resources_epoch` rebuild: editing the theme file
-//! restyles the live view.
+//! A dictionary listed in `NoesisView::application_resources` installs into the
+//! process-global application resources. Editing its bytes in place, with the URI
+//! list unchanged, must reinstall it and rebuild the live view.
 //!
-//! The theme defines a `Style` whose setter drives a named `TextBlock`'s `Text`,
-//! read via `NoesisText` — no glyph rendering, so no font setup needed.
+//! The theme's `Style` setter drives a named `TextBlock`'s `Text`, read via
+//! `NoesisText`. No glyph rendering, so no font setup.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +19,6 @@ const VIEW_URI: &str = "themed.xaml";
 const THEME_URI: &str = "theme.xaml";
 const RELOAD_AT_FRAME: usize = 25;
 
-// The view applies a themed style by key; its own bytes never change.
 const VIEW: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="64" Height="32">
@@ -83,8 +79,6 @@ fn theme_reload_restyles_live_view() {
               mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
 
-            // Edit only the theme dictionary; the view's own bytes and the URI
-            // list are unchanged — only the byte-keyed check catches this.
             if *frame == RELOAD_AT_FRAME {
                 reg.insert(
                     THEME_URI.to_string(),

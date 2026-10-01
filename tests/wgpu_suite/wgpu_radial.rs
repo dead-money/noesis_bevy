@@ -1,9 +1,9 @@
-//! Verifies `PATH_RADIAL` and `PATH_AA_RADIAL`: both compile, bind the ramps texture
-//! at group(2), and compute `u = sqrt(uv0.x² + uv0.y²)` correctly.
+//! `PATH_RADIAL` and `PATH_AA_RADIAL`: both compile, bind the ramps texture at
+//! group(2), and compute `u = sqrt(uv0.x² + uv0.y²)`.
 //!
-//! Drives `WgpuRenderDevice` directly. A full-screen quad copies clip-space `pos` into
-//! `uv0`; a 256×1 ramp has texel R equal to its index, so output R encodes `u * 255`
-//! and the pixel assertions can be exact.
+//! Drives `WgpuRenderDevice` directly. A full-screen quad copies clip-space `pos`
+//! into `uv0`, and a 256×1 ramp stores each texel's index in R, so output R reads
+//! back as `u * 255` (clamped).
 
 use std::ffi::c_void;
 
@@ -106,7 +106,7 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // NEAREST sampling at u ∈ [0,1] picks texel floor(u * 256), so output R ≈ round(u * 255); clamped beyond.
+    // NEAREST picks texel floor(u * 256), so R ≈ u * 255, clamped to 255 past u = 1.
     let mut ramp_texels = Vec::with_capacity(RAMP_W as usize * 4);
     for i in 0..RAMP_W {
         ramp_texels.push(i as u8);
@@ -136,8 +136,7 @@ async fn run_test() {
     assert_eq!(vb.len(), 64); // 4 verts × 16 bytes
 
     // PosTex0Coverage layout: pos.xy (F32x2, 8B) + tex0.xy (F32x2, 8B) + cov (F32, 4B) = 20B.
-    // Place the AA quad inside a small corner of the target; coverage = 1.0
-    // so it behaves as a fully-covered path.
+    // A small corner quad; coverage 1.0 makes it a fully covered path.
     let aa_quad: [f32; 4 * 5] = [
         -0.9, -0.9, -0.9, -0.9, 1.0, -0.7, -0.9, -0.7, -0.9, 1.0, -0.9, -0.7, -0.9, -0.7, 1.0,
         -0.7, -0.7, -0.7, -0.7, 1.0,
@@ -155,7 +154,6 @@ async fn run_test() {
         }
     }
 
-    // Identity projection: pos.xy → clip.xy (wgpu's internal clip space).
     let identity_mat: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
@@ -272,7 +270,7 @@ async fn run_test() {
     //   uv0 = clip  (by our vertex setup)
     //   u   = sqrt(uv0.x² + uv0.y²)
     //
-    // Ramp R ≈ round(u * 255), clamped.
+    // Ramp R ≈ u * 255, clamped.
 
     // Centre pixel → u ≈ 0 → R ≈ 0 (also G = B = 0 from the ramp).
     let c = pixel(TARGET_W / 2, TARGET_H / 2);
@@ -297,11 +295,9 @@ async fn run_test() {
     );
     assert_eq!(corner[3], 255, "alpha passthrough from ramp");
 
-    // PATH_AA_RADIAL quad covers pixel range roughly corresponding to clip
-    // [-0.9, -0.7] × [-0.9, -0.7]. Picking a point inside: pixel (9, 112).
-    // uv0 ≈ (-0.86, -0.86), u ≈ 1.21 → clamped → R = 255. Confirms the AA
-    // variant compiled, bound group(2), and interpolated coverage=1.0 without
-    // killing the paint.
+    // The PATH_AA_RADIAL quad covers clip [-0.9, -0.7]². Pixel (9, 112) is inside:
+    // uv0 ≈ (-0.85, -0.76), u ≈ 1.14 → clamped → R = 255. Confirms the AA variant
+    // compiled, bound group(2), and applied coverage 1.0 without killing the paint.
     let aa = pixel(9, 112);
     assert_eq!(
         aa[0], 255,
@@ -334,9 +330,8 @@ fn make_radial_batch(
         start_index,
         num_indices,
         pattern: std::ptr::null_mut(),
-        // Non-null so any accidental null-check fires loudly; handle
-        // resolution goes through `test_set_forced_pattern` and never
-        // dereferences this pointer.
+        // Never dereferenced: `test_set_forced_pattern` replaces the paint
+        // texture, ramps included.
         ramps: std::ptr::dangling_mut(),
         image: std::ptr::null_mut(),
         glyphs: std::ptr::null_mut(),

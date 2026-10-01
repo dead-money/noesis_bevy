@@ -1,4 +1,5 @@
-//! Headless bridge suite (audit R2): `MinimalPlugins` + `NoesisHeadlessPlugin` bridge tests, plus the direct-Noesis unit tests.
+//! Headless bridge suite: `MinimalPlugins` + `NoesisHeadlessPlugin` bridge tests,
+//! plus direct-Noesis unit tests.
 //!
 //! Each source file in this directory is one `#[test]` module. The suite
 //! links Bevy + Noesis once for all of them instead of once per file, and

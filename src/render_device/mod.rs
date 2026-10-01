@@ -1,14 +1,28 @@
-//! wgpu-backed render device for Noesis. This module pulls in no Bevy types, so
-//! you can drive it with a hand-built wgpu instance in tests.
+//! The wgpu-backed Noesis render device.
+//!
+//! [`WgpuRenderDevice`] implements Noesis's `RenderDevice` on top of a
+//! `wgpu::Device` / `wgpu::Queue` pair. [`NoesisRenderPlugin`] builds one
+//! against Bevy's shared device and registers it with Noesis, so most apps
+//! never touch this module. Reach for it directly to render Noesis without
+//! the plugin, for example from a test with a hand-built wgpu instance: this
+//! module uses no Bevy types beyond logging.
+//!
+//! The device is driven from inside Noesis's render calls, on whichever
+//! thread owns the Noesis `View` and `Renderer` (the main world, under the
+//! plugin). It renders into `Rgba8Unorm` targets only.
 //!
 //! Submodules:
 //!
-//! - [`wgpu_device`]: the `RenderDevice` trait impl on top of wgpu.
-//! - [`pipeline`]: pipeline cache keyed on `(shader, render_state, vertex_format)`.
-//! - [`vertex_layout`]: builds a `wgpu::VertexBufferLayout` from a Noesis
-//!   `VertexFormat` index.
-//! - [`shader_defines`]: `Shader::Enum` to WGSL preprocessor define set.
-//! - [`shader_preproc`]: minimal `#ifdef` stripper for `noesis.wgsl`.
+//! - [`wgpu_device`]: the device itself.
+//! - [`pipeline`]: lazy pipeline cache keyed on shader, render state, vertex
+//!   format, and stencil presence.
+//! - [`vertex_layout`]: `wgpu::VertexBufferLayout` attributes for a Noesis
+//!   vertex format.
+//! - [`shader_defines`]: the WGSL define set for each Noesis shader.
+//! - [`shader_preproc`]: the `#ifdef` stripper that turns `noesis.wgsl` into
+//!   one shader variant.
+//!
+//! [`NoesisRenderPlugin`]: crate::render::NoesisRenderPlugin
 
 pub mod pipeline;
 pub mod shader_defines;

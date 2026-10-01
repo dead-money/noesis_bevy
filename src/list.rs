@@ -1,69 +1,66 @@
-//! **Primitive 2: list = query.** The rows of a XAML list control *are* Bevy
-//! entities: spawn an entity carrying a row-data component and a [`ListedIn`]
-//! membership, and it appears as a row; despawn it and the row leaves. The bound
-//! `ObservableCollection` is reconciled from the query keyed by [`Entity`],
-//! emitting the **minimal** Add / Remove / Update / Move op sequence (never a
-//! `Clear`/`Reset` in steady state), so a control's selection and scroll position
-//! survive every edit.
+//! List controls whose rows are Bevy entities.
 //!
-//! ```ignore
+//! Spawn a [`UiList`] entity naming a list control in a
+//! [`NoesisView`]'s scene, then spawn row entities carrying a registered row
+//! component and a [`ListedIn`] pointing at the list. Each row appears in the
+//! control; despawn it and the row leaves. The bridge diffs the rows against
+//! the bound collection every frame and applies only Add, Remove, Update and
+//! Move operations, never a reset, so the control keeps its selection and
+//! scroll position through edits.
+//!
+//! ```no_run
 //! use bevy::prelude::*;
-//! use noesis_bevy::{NoesisViewModel, NoesisListAppExt, UiList, ListedIn, Selected};
+//! use noesis_bevy::{ListedIn, NoesisListAppExt, NoesisViewModel, UiList};
 //!
-//! // The row's bound fields: `{Binding name}` / `{Binding qty}` in the item template.
+//! // Bound in the item template as `{Binding name}` and `{Binding qty}`.
 //! #[derive(Component, NoesisViewModel)]
 //! struct Item { name: String, qty: i32 }
 //!
-//! fn setup(app: &mut App) {
-//!     app.add_noesis_list::<Item>(); // register the row type once
-//! }
-//!
-//! // …with a NoesisView entity `view` whose scene has an `x:Name="Inventory"` ListBox:
-//! // let list = commands.spawn(UiList::new(view, "Inventory")).id();
-//! // commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(list)));
-//! // commands.spawn((Item { name: "Sword".into(),  qty: 1 }, ListedIn(list)));
+//! # fn register(app: &mut App) {
+//! app.add_noesis_list::<Item>();
+//! # }
+//! # fn spawn(mut commands: Commands, view: Entity) {
+//! // `view` is a NoesisView whose scene has a ListBox with x:Name="Inventory".
+//! let list = commands.spawn(UiList::new(view, "Inventory")).id();
+//! commands.spawn((Item { name: "Potion".into(), qty: 3 }, ListedIn(list)));
+//! commands.spawn((Item { name: "Sword".into(), qty: 1 }, ListedIn(list)));
+//! # }
 //! ```
 //!
-//! # The contract
+//! # Rows
 //!
-//! - **[`Entity`] is the stable key.** A row is identified by its entity, not its
-//!   position or its field values. Mutating a row's component updates *only* that
-//!   row's existing realized container (an in-place DP write, no collection op);
-//!   adding / removing entities touches only the affected rows.
-//! - **Row order = membership order.** Rows appear in the order their [`ListedIn`]
-//!   was inserted (the [`ListRows`] relationship target preserves insertion order,
-//!   with despawned rows compacted out), optionally re-ordered by a Rust-side
-//!   [`UiList::sorted_by`] key. For the usual append-as-you-spawn pattern this is
-//!   spawn order. There is *no* live
-//!   Noesis sort/filter (the SDK exposes none); ordering is entirely Rust-side and
-//!   reconciled with `Move` ops, so a reorder keeps the moved container (and its
-//!   selection) alive. "Reset is the enemy."
-//! - **The control's selection *is* the selection.** The bound `Selector` /
-//!   `ListBox`'s own `SelectedItem` is the single source of truth (no parallel
-//!   channel, no separate `CollectionView`). A UI selection surfaces as a
-//!   [`Selected`] marker on the row entity (and a [`NoesisListSelection`] message);
-//!   setting / clearing [`Selected`] from a system drives the control's
-//!   `SelectedIndex` the other way. Within a frame the **UI wins**
-//!   (record-then-apply), so the two authorities never oscillate. A `Move`/reorder
-//!   needs no special handling: a `ListBox` tracks the selected *item*, not the
-//!   slot, so selection rides the `Move`.
+//! - A row is keyed by its [`Entity`]. Changing a row component writes only
+//!   the changed fields onto that row's existing item.
+//! - Rows appear in the order their [`ListedIn`] was inserted, unless the list
+//!   has a [`UiList::sorted_by`] key. Noesis-side sorting and filtering are not
+//!   available.
+//! - A pure reorder moves the fewest rows needed. When rows are added in the
+//!   same frame, more rows may move than strictly necessary.
+//! - Left-clicking a row raises [`UiClicked`](crate::UiClicked) targeting the
+//!   row entity, with the list's `x:Name`.
 //!
-//! # Threading & lifetime
+//! # Selection
 //!
-//! Mirrors [`crate::reconcile`]: a parallel `PostUpdate` diff system
-//! ([`NoesisListSet::Diff`]) builds the desired ordered `Vec` of `(Entity, field
-//! snapshot)` into a plain `Send` `ListDesired` component (no Noesis handles in
-//! sight), and the single serial `sync_lists` system in
-//! [`NoesisSet::Apply`] drains it through FFI against the
-//! view's live `ObservableCollection`, which is owned by
-//! [`NoesisRenderState`](crate::render) (thread-affine to the `View`) and released
-//! before `noesis_runtime::shutdown`.
+//! For a `Selector` control (`ListBox`, `ComboBox`, ...), the [`Selected`]
+//! marker on a row entity mirrors the control's selected item:
 //!
-//! Each [`UiList`] is its own entity naming one control in a
-//! [`NoesisView`]'s scene, of one registered row type ("one
-//! instance = one entity", the same stance as [`crate::panel`]). A view can own any
-//! number of lists (one list entity per `ListBox`), since the list identity no
-//! longer rides on the view entity.
+//! - When the user selects a row, the bridge moves [`Selected`] to it and
+//!   writes a [`NoesisListSelection`] message and a [`NoesisRowSelected`]
+//!   event. Removing the selected row also reports a cleared selection.
+//! - When you insert or remove [`Selected`], the bridge sets the control's
+//!   `SelectedIndex` to match, without echoing a message.
+//! - If both change in the same frame, the user's selection wins.
+//!
+//! For a plain `ItemsControl`, [`Selected`] is yours alone; the bridge never
+//! sets or reads it.
+//!
+//! # Scheduling
+//!
+//! Each registered row type gets a diff system in [`NoesisListSet::Diff`] that
+//! touches no Noesis state, so it isn't pinned to the main thread. One system in
+//! [`NoesisSet::Apply`] then applies the result to Noesis. A list's binding
+//! is released when its [`UiList`] is removed or despawned, and list entities
+//! are despawned with their view.
 
 use std::collections::HashSet;
 use std::os::raw::c_void;
@@ -83,26 +80,16 @@ use noesis_runtime::view::FrameworkElement;
 use crate::plain_vm::{NoesisViewModel, PlainType, PlainValue};
 use crate::render::{NoesisRenderState, NoesisSet, NoesisView, ReapOnRemove, add_bridge_reap};
 
-/// Name of the hidden trailing `u64` row property that stores each row's stable
-/// [`Entity`] bits (via [`Entity::to_bits`]). The per-row click handler recovers
-/// the originating row from a clicked element's `DataContext` through this field
-/// (see [`NoesisRenderState::install_row_click_sub`](crate::render)).
+/// Hidden trailing `u64` row property holding [`Entity::to_bits`]; the row
+/// click handler reads it back from the clicked element's `DataContext`.
 pub(crate) const ENTITY_FIELD: &str = "__entity";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public components & messages
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Row membership: tags an entity into the list owned by the [`UiList`] entity it
-/// points at (not the view). Spawn it alongside a registered row-data component to
-/// make the entity a row; despawn the entity (or remove this component) and the row
-/// leaves the list next frame.
+/// Makes this entity a row of the [`UiList`] entity it points at (not the view).
 ///
-/// This is a Bevy [relationship](https://docs.rs/bevy/latest/bevy/ecs/relationship):
-/// the matching [`ListRows`] relationship target on the [`UiList`] entity tracks its
-/// rows automatically, so despawning a row (or clearing `ListedIn`) removes it from
-/// the list's membership with no bookkeeping. The list reconcile iterates that
-/// membership directly rather than scanning every row entity.
+/// Insert it together with a row component registered with
+/// [`add_noesis_list`](NoesisListAppExt::add_noesis_list). Despawn the entity
+/// or remove this component and the row leaves the list. This is a Bevy
+/// relationship; [`ListRows`] on the list entity is its target.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 #[relationship(relationship_target = ListRows)]
 pub struct ListedIn(
@@ -111,89 +98,71 @@ pub struct ListedIn(
     pub Entity,
 );
 
-/// Relationship target on a [`UiList`] entity: the rows currently [`ListedIn`] it,
-/// in [`ListedIn`]-insertion order (despawned rows compacted out). Maintained
-/// automatically by Bevy's relationship machinery; **do not mutate directly** —
-/// edit the [`ListedIn`] components on the row entities instead. Despawning the
-/// list entity does *not* despawn its rows (they are app-owned game entities); they
-/// simply keep a now-dangling `ListedIn` and go inert.
+/// The rows [`ListedIn`] a [`UiList`] entity, in insertion order. Bevy
+/// maintains it; edit [`ListedIn`] on the rows instead.
+///
+/// Despawning the list entity doesn't despawn its rows; Bevy removes their
+/// [`ListedIn`].
 #[derive(Component, Default, Debug)]
 #[relationship_target(relationship = ListedIn)]
 pub struct ListRows(Vec<Entity>);
 
-/// Marker placed on the row entity that is currently selected in the bound
-/// control. **Currency is selection**: the bridge sets / clears this from a UI
-/// selection change, and an app may set / clear it to drive the selection the
-/// other way (the current item moves to that row). At most one row per list
-/// carries it in steady state.
+/// Marks the selected row of a [`UiList`]. Insert or remove it to drive the
+/// control's selection; the bridge moves it when the user selects. See
+/// [Selection](self#selection).
+///
+/// If several rows of one list carry it, the lowest `Entity` wins and a
+/// warning is logged.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Selected;
 
-/// A Rust-side row ordering key for a [`UiList`]: sort by the row component's
-/// field at `field` (its index in [`NoesisViewModel::noesis_properties`]),
-/// ascending or `descending`. This is the *only* sanctioned reordering (Noesis
-/// exposes no programmatic sort/filter), and it reconciles with `Move` ops, so the
-/// selected row survives the reorder.
+/// Sort key for a [`UiList`], set with [`UiList::sorted_by`].
+///
+/// The sort is stable, so equal keys keep insertion order. Values of
+/// different types, `Null`s and NaNs compare equal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ListSort {
-    /// Property index (into [`NoesisViewModel::noesis_properties`]) to sort on.
+    /// Index into the row type's [`NoesisViewModel::noesis_properties`]. An
+    /// out-of-range index leaves the order unchanged.
     pub field: u32,
     /// Sort descending instead of ascending.
     pub descending: bool,
 }
 
-/// Process-global counter handing each [`UiList`] a unique row-class name. Noesis
-/// registers reflected classes globally by name, so every list (even two of the
-/// same row type on two views) needs a distinct class; an auto-generated token
-/// guarantees that without the user inventing one. The render path realizes rows
-/// via the control's `ItemTemplate` / `{Binding <field>}` regardless of the class
-/// name; the name only has to be unique, never meaningful (see [`UiList::with_class`]).
+// Noesis class names are process-global, so every list needs its own.
 static LIST_CLASS_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// One list declaration: binds the `ObservableCollection` of entity-rows to the
-/// `ItemsControl` / `ListBox` named `name` (`x:Name`) in `view`'s scene. A list is
-/// its own entity, not a component on the view. Spawn one per `ListBox` and point
-/// its rows at that entity via [`ListedIn`], so a single
-/// [`NoesisView`] can own any number of lists, each with its own
-/// row type. The binding is reaped when `view` is torn down (or the [`UiList`] is
-/// removed).
+/// Binds the `ItemsControl` named `name` in `view`'s scene to the rows
+/// [`ListedIn`] this entity.
 ///
-/// Each list auto-generates a unique Noesis `class` for its row objects (so two
-/// lists of the same row type "just work", no hand-picked names); the class is
-/// registered once on first reconcile and held for the binding's lifetime. Its
-/// properties are the row type's [`NoesisViewModel::noesis_properties`]; bind an
-/// item `DataTemplate` against them with `{Binding <field>}`. Override the name
-/// with [`with_class`](Self::with_class) only for a typed `DataTemplate` keyed on
-/// a specific class.
+/// Spawn one `UiList` entity per control; a view can host any number of them.
+/// It works only on a [`NoesisView`], not a [`UiPanel`](crate::UiPanel). The
+/// list despawns with its view. An unknown name or a control that isn't an
+/// `ItemsControl` logs a warning.
 ///
-/// A list binds **one** row component type (the `T` you registered with
-/// [`add_noesis_list`](crate::NoesisListAppExt::add_noesis_list)); having two
-/// different `T`s target the same list entity via [`ListedIn`] is unsupported
-/// (caught with a debug-assert / warn-once). Selection is reported only on a
-/// *genuine* change: the default current item a fresh list starts with is adopted
-/// silently, not surfaced as a [`NoesisListSelection`].
+/// The row objects are instances of a generated Noesis class whose properties
+/// are the row type's [`NoesisViewModel::noesis_properties`], so an item
+/// template binds them with `{Binding <field>}`. The class is registered once,
+/// when the first row appears, and its name and layout are fixed from then on.
+///
+/// A list holds one row type. Rows of two different registered types in one
+/// list are unsupported: a debug build panics and a release build warns once.
 #[derive(Component, Clone, Debug)]
 #[require(ListDesired)]
 pub struct UiList {
-    /// The [`NoesisView`] entity whose scene hosts the bound
-    /// control. Rows still attach to *this list entity* via [`ListedIn`], not `view`.
+    /// The [`NoesisView`] entity whose scene hosts the control.
     pub view: Entity,
-    /// `x:Name` of the list control to bind in `view`'s scene.
+    /// `x:Name` of the list control.
     pub name: String,
-    /// Noesis class name the row objects register under. Auto-generated unique by
-    /// [`new`](Self::new); override via [`with_class`](Self::with_class).
+    /// Noesis class name for the row objects. See [`with_class`](Self::with_class).
     pub class: String,
-    /// Optional Rust-side row ordering (default: ECS query order).
+    /// Row order, or `None` for [`ListedIn`] insertion order.
     pub sort: Option<ListSort>,
 }
 
 impl UiList {
-    /// Declare a list bound to the `x:Name` control `name` in `view`'s scene. Spawn
-    /// this on its own entity and point rows at *that* entity with [`ListedIn`]. The
-    /// row-object class is auto-generated unique (`DmList.{seq}`), so nothing has to
-    /// be globally hand-named. Rows appear in [`ListedIn`]-insertion order; add
-    /// [`sorted_by`](Self::sorted_by) for a Rust-side order, or
-    /// [`with_class`](Self::with_class) to bind a typed `DataTemplate`.
+    /// A list bound to the control `name` in `view`'s scene, with a unique
+    /// generated row class name (`DmList.{n}`).
     #[must_use]
     pub fn new(view: Entity, name: impl Into<String>) -> Self {
         let seq = LIST_CLASS_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -205,19 +174,18 @@ impl UiList {
         }
     }
 
-    /// Override the auto-generated row-object class name. Only needed when the
-    /// scene's `ItemTemplate` is a typed `DataTemplate` keyed on a specific class
-    /// (`DataType="local:Foo"`); the default `{Binding <field>}` templates don't
-    /// care about the name, only its uniqueness. The override must still be unique
-    /// among registered Noesis classes.
+    /// Replaces the generated row class name, for a `DataTemplate` keyed on a
+    /// specific `DataType`. The name must be unique among registered Noesis
+    /// classes; on a collision an error is logged and no rows appear.
     #[must_use]
     pub fn with_class(mut self, class: impl Into<String>) -> Self {
         self.class = class.into();
         self
     }
 
-    /// Order rows by the row component's field at `field` (its index in
-    /// [`NoesisViewModel::noesis_properties`]), `descending` or ascending.
+    /// Orders rows by the field at index `field` of the row type's
+    /// [`NoesisViewModel::noesis_properties`]. Reorders move the affected rows
+    /// without resetting the list, so the selection survives.
     #[must_use]
     pub fn sorted_by(mut self, field: u32, descending: bool) -> Self {
         self.sort = Some(ListSort { field, descending });
@@ -225,124 +193,89 @@ impl UiList {
     }
 }
 
-/// Emitted when a bound list's selection (its `ICollectionView` current item)
-/// changes **from the UI side**: the user clicked a row, or the cursor moved off
-/// the ends. The bridge has already reconciled the [`Selected`] marker to match;
-/// read this to react to a selection. App-driven selection (setting [`Selected`])
-/// does *not* echo a message; it is the cause, not an effect.
+/// A list's selection changed on the UI side: the user selected a row, or the
+/// selected row was removed. [`Selected`] already matches when you read it.
+/// Changing [`Selected`] yourself doesn't produce one.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisListSelection {
-    /// The list-owning [`NoesisView`] entity.
+    /// The [`NoesisView`] entity hosting the list.
     pub view: Entity,
     /// `x:Name` of the list control.
     pub list: String,
-    /// The newly-selected row entity, or `None` when the selection cleared.
+    /// The newly selected row entity, or `None` when the selection cleared.
     pub selected: Option<Entity>,
 }
 
-/// Observer-facing twin of [`NoesisListSelection`]: a UI-side selection surfaced as
-/// an `EntityEvent` **targeting the newly-selected row entity**, so a
-/// `commands.observe`-style consumer (or a global `add_observer`) can react to "this
-/// row was selected" straight from `On::event_target()`. Fired via
-/// `commands.trigger` alongside the buffered [`NoesisListSelection`] message (both
-/// per genuine UI selection). Only fired when a row *becomes* selected; a cleared
-/// selection (`None`) has no row to target and surfaces only as the message.
+/// Entity event targeting the row the user selected, triggered alongside
+/// [`NoesisListSelection`]. Observe it on the row entity or globally. A cleared
+/// selection has no row to target and produces only the message.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct NoesisRowSelected {
-    /// Trigger target: the newly-selected row entity.
+    /// The selected row entity (the event target).
     pub entity: Entity,
-    /// The list-owning [`NoesisView`] entity.
+    /// The [`NoesisView`] entity hosting the list.
     pub view: Entity,
     /// `x:Name` of the list control.
     pub list: String,
 }
 
-/// Emitted each frame a list's reconcile actually touched the collection, with the
-/// minimal op tally for that frame. There is deliberately no "reset" field; the
-/// reconciler has no `Clear` path in steady state. Primarily a test / diagnostic
-/// surface (assert `moves > 0` on a reorder, `adds`/`removes` on membership
-/// change, and that a pure field edit produces only `updates`).
+/// Counts of the collection operations a list applied this frame, written only
+/// when at least one is non-zero. Mostly useful in tests and diagnostics.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisListOps {
-    /// The list-owning [`NoesisView`] entity.
+    /// The [`NoesisView`] entity hosting the list.
     pub view: Entity,
     /// `x:Name` of the list control.
     pub list: String,
-    /// Rows realized + inserted this frame (`Add`).
+    /// Rows inserted this frame (`Add`).
     pub adds: usize,
-    /// Rows removed + released this frame (`Remove`).
+    /// Rows removed this frame (`Remove`).
     pub removes: usize,
-    /// Surviving rows whose fields changed in place this frame (`Update`).
+    /// Existing rows with at least one field rewritten this frame (`Update`).
     pub updates: usize,
-    /// Surviving rows relocated this frame (`Move`).
+    /// Existing rows moved this frame (`Move`).
     pub moves: usize,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Send-side desired state (the parallel "diff" half)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One desired row computed by the parallel diff: its stable [`Entity`] key and
-/// the field snapshot to push (the row type's [`NoesisViewModel::noesis_snapshot`],
-/// with the entity's 64-bit identity appended as the hidden trailing field).
+/// `fields` is the row's [`NoesisViewModel::noesis_snapshot`] plus the
+/// trailing [`ENTITY_FIELD`] value.
 #[derive(Clone, Debug)]
 pub(crate) struct DesiredRow {
     pub(crate) entity: Entity,
     pub(crate) fields: Vec<PlainValue>,
 }
 
-/// The parallel→serial hand-off for one view's list: the desired ordered rows,
-/// the row schema, and which row (if any) the app marked [`Selected`]. A plain
-/// `Send` component (auto-required by [`UiList`]); holds no Noesis handles. Rebuilt
-/// every frame by [`diff_list`] and drained by `sync_lists`.
+/// Written by [`diff_list`] each frame and read by [`sync_lists`]; holds no
+/// Noesis handles so the diff can run in parallel.
 #[derive(Component, Default)]
 pub(crate) struct ListDesired {
-    /// Desired rows in final order (query order, optionally sorted Rust-side).
     pub(crate) rows: Vec<DesiredRow>,
-    /// Row property schema (`(name, type)`), set from the row type's metadata. The
-    /// reconciler appends a hidden `u64` entity-identity field after these.
     pub(crate) schema: &'static [(&'static str, PlainType)],
-    /// The row currently carrying [`Selected`] (app-side selection authority).
     pub(crate) selected: Option<Entity>,
-    /// [`TypeId`](core::any::TypeId) of the row component type that last populated
-    /// this slot. A [`UiList`] supports exactly one row type; if a second
-    /// `T: NoesisViewModel` also targets this list entity via [`ListedIn`], the two
-    /// per-type [`diff_list`] systems race to last-writer-wins here. We stamp this
-    /// to catch that (debug-assert + warn-once) instead of failing silently.
+    /// Row type that owns this slot. Two types targeting one list race here, so
+    /// it is stamped to detect that.
     pub(crate) row_type: Option<core::any::TypeId>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Render-side binding (the serial "push" half, NonSend)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// No-op property-change handler for row objects: their dependency properties are
-/// written from Rust (never edited UI-side back into the field; selection rides
-/// currency, not a DP writeback), so changes need no forwarding.
+/// Row properties are only written from Rust, so changes need no forwarding.
 struct NoopRowHandler;
 
 impl PropertyChangeHandler for NoopRowHandler {
     fn on_changed(&self, _instance: Instance, _prop_index: u32, _value: PropertyValue<'_>) {}
 }
 
-/// One realized row: its owning [`ClassInstance`] (`+1` ref) and the last field
-/// values pushed onto it, so an unchanged field skips its DP write.
 struct RowSlot {
     instance: ClassInstance,
     last_fields: Vec<PlainValue>,
 }
 
-/// What a selection poll concluded for one frame.
 pub(crate) enum SelectionOutcome {
-    /// No UI-side selection change to report (selection idle, or it was the app
-    /// driving currency this frame).
+    /// No UI-side change; the app may have driven the selection.
     Unchanged,
-    /// The UI moved the current item this frame; reconcile [`Selected`] to this
-    /// row (or clear it for `None`) and emit a [`NoesisListSelection`].
+    /// The UI changed the selection; mirror it onto [`Selected`].
     UiSelected(Option<Entity>),
 }
 
-/// The minimal op tally a single reconcile produced (see [`NoesisListOps`]).
 #[derive(Default, Clone, Copy)]
 pub(crate) struct ListOps {
     pub(crate) adds: usize,
@@ -357,51 +290,26 @@ impl ListOps {
     }
 }
 
-/// One list's Rust-owned, entity-keyed `ObservableCollection`, owned per `(view,
-/// x:Name)` by [`NoesisRenderState`](crate::render). Maintains an
-/// insertion-ordered [`IndexMap<Entity, RowSlot>`] whose order mirrors the live
-/// collection, and reconciles it against the desired rows with minimal ops.
+/// One `(view, x:Name)` list's collection. `rows` is kept in the same order as
+/// `coll`.
 ///
-/// **Field/drop order matters.** `coll` drops first (releasing the collection's
-/// refs to the row instances), then `rows` (releasing our `+1` per instance),
-/// and `registration` **last** (unregistering the class only once every instance
-/// of it is gone). The Noesis refcount rule mirrored from
-/// [`crate::items::ItemsBinding`].
+/// Field order is drop order: `coll`, then `rows`, then `registration`, so the
+/// class unregisters only after every instance is released.
 pub(crate) struct ListBinding {
-    /// Backing collection bound as the control's `ItemsSource`.
     coll: ObservableCollection,
-    /// A `+1` handle on the bound list control (a `Selector` / `ListBox`), resolved
-    /// by `x:Name` when the `ItemsSource` binds and refreshed on a scene rebuild.
-    /// Selection is read (`selected_item`) and driven (`set_selected_index`)
-    /// directly on this control; the control's own selection is the single source
-    /// of truth, so there is no separate `CollectionView` to keep in sync. `None`
-    /// until the control is resolved.
+    /// Resolved when the `ItemsSource` binds; selection is read and driven on it.
     control: Option<FrameworkElement>,
-    /// Whether the bound control is a `Selector` (has a selection). A plain
-    /// `ItemsControl` is not, so the control→[`Selected`] reconcile is skipped and
-    /// selection is left entirely to the app (e.g. a per-row click observer).
+    /// `false` for a plain `ItemsControl`: [`Selected`] is then left to the app.
     is_selector: bool,
-    /// Realized rows in collection order. Drops after `coll`, before
-    /// `registration`.
     rows: IndexMap<Entity, RowSlot>,
-    /// The URI of the scene we last bound the `ItemsSource` into (`None` until
-    /// bound; reset on a scene rebuild to force a re-bind).
     bound_for_uri: Option<String>,
-    /// DP index of the hidden trailing `u64` entity-identity field.
     entity_field_index: u32,
-    /// Whether [`Self::ensure_class`] has run (success or permanent failure).
+    /// Set after the first registration attempt, even a failed one.
     class_ready: bool,
-    /// Last currency we observed/drove, as a row entity: the record half of the
-    /// record-then-apply selection authority.
+    /// Control selection as of the last poll or drive.
     last_currency: Option<Entity>,
-    /// Whether the first selection poll has run. The first poll adopts the
-    /// control's initial selection as the baseline silently (a fresh `ListBox` has
-    /// none), so an unsolicited default selection is never reported as a *UI
-    /// selection*. Only a genuine later change marks [`Selected`] / emits a
-    /// [`NoesisListSelection`].
+    /// The first poll adopts the control's initial selection without reporting it.
     selection_primed: bool,
-    /// The row-object class registration. **Last field**: drops after every
-    /// instance, so the class outlives its instances.
     registration: Option<ClassRegistration>,
 }
 
@@ -412,7 +320,6 @@ impl Default for ListBinding {
 }
 
 impl ListBinding {
-    /// A fresh, empty, unbound list (with its collection view over it).
     pub(crate) fn new() -> Self {
         Self {
             coll: ObservableCollection::new(),
@@ -428,9 +335,8 @@ impl ListBinding {
         }
     }
 
-    /// Register the row-object class once, from the row `schema` plus an appended
-    /// hidden `u64` entity-identity field. Idempotent: a no-op after the first
-    /// call (successful or not).
+    /// Registers the row class from `schema` plus [`ENTITY_FIELD`]. Only the
+    /// first call does anything, even if it failed.
     fn ensure_class(&mut self, class_name: &str, schema: &[(&'static str, PlainType)]) {
         if self.class_ready {
             return;
@@ -440,15 +346,11 @@ impl ListBinding {
         for (name, kind) in schema {
             builder.add_property(name, plain_to_prop_type(*kind));
         }
-        // Hidden trailing field: the row's stable Entity bits, so a per-row event
-        // can recover the originating Entity.
         self.entity_field_index = schema.len() as u32;
         builder.add_property(ENTITY_FIELD, PropType::UInt64);
         match builder.register() {
             Some(reg) => self.registration = Some(reg),
-            // Auto-generated names never collide; reaching here means an explicit
-            // `with_class` override duplicated a registered name (rows silently
-            // won't realize), so error! rather than a swallowable warn!.
+            // Generated names never collide, so this is a duplicate `with_class`.
             None => error!(
                 "UiList: failed to register row class {class_name:?} \
                  (duplicate `with_class` name?); rows will not realize",
@@ -456,8 +358,6 @@ impl ListBinding {
         }
     }
 
-    /// Ensure the row class, then reconcile to `desired`, the single entry point
-    /// the render state drives each frame.
     pub(crate) fn reconcile_into(
         &mut self,
         class_name: &str,
@@ -468,8 +368,7 @@ impl ListBinding {
         self.reconcile(desired)
     }
 
-    /// Reconcile the live collection to `desired`, emitting the minimal op
-    /// sequence (Remove → Update → Add/Move) keyed by [`Entity`]. Never clears.
+    /// Applies Remove, then Update, then Add/Move to match `desired`. Never clears.
     fn reconcile(&mut self, desired: &[DesiredRow]) -> ListOps {
         let mut ops = ListOps::default();
         if self.registration.is_none() {
@@ -477,8 +376,8 @@ impl ListBinding {
         }
         let desired_set: HashSet<Entity> = desired.iter().map(|d| d.entity).collect();
 
-        // Remove rows no longer desired, high index first so earlier indices stay
-        // valid. Dropping the RowSlot releases our +1 after the collection's own.
+        // High index first so earlier indices stay valid. The collection releases
+        // its ref before the slot drops ours.
         let stale: Vec<usize> = self
             .rows
             .keys()
@@ -492,8 +391,6 @@ impl ListBinding {
             ops.removes += 1;
         }
 
-        // Update survivors in place: write only changed fields onto the existing
-        // instance, no new instance and no collection op.
         for dr in desired {
             if let Some(slot) = self.rows.get_mut(&dr.entity) {
                 let handle = slot.instance.handle();
@@ -515,10 +412,8 @@ impl ListBinding {
             }
         }
 
-        // Bring order in line with `desired`, inserting new rows. With no adds, a
-        // keyed LIS pass moves only rows that must move (minimal Move set, so
-        // anchored containers and their selection never relocate). With adds, a
-        // left-to-right placement pass keeps the prefix correct as it inserts.
+        // Only the no-add path is a minimal Move set; with adds, rows may move
+        // more than strictly needed.
         let has_adds = desired.iter().any(|d| !self.rows.contains_key(&d.entity));
         if has_adds {
             self.place_with_adds(desired, &mut ops);
@@ -528,9 +423,8 @@ impl ListBinding {
         ops
     }
 
-    /// Left-to-right placement: at each target index, insert a new row or move an
-    /// existing one into position. Maintains the invariant that `rows[0..t]`
-    /// already equals `desired[0..t]`, so each step is a single insert or move.
+    /// Invariant: `rows[0..t]` equals `desired[0..t]` before step `t`, so each
+    /// step is one insert or one move.
     fn place_with_adds(&mut self, desired: &[DesiredRow], ops: &mut ListOps) {
         for (t, dr) in desired.iter().enumerate() {
             if let Some(cur) = self.rows.get_index_of(&dr.entity) {
@@ -547,15 +441,9 @@ impl ListBinding {
         }
     }
 
-    /// Pure reorder of a fixed row set: keep the longest run already in the right
-    /// relative order (the LIS) anchored, and move only the rest into place. The
-    /// minimal `Move` set: anchored containers (and their selection / scroll)
-    /// never relocate.
-    ///
-    /// Processed **right-to-left** so that, at each step, the suffix is already
-    /// correct and the row being placed lives somewhere in the unfixed prefix: a
-    /// single `move_item(cur, target)` lands it without disturbing the settled
-    /// tail.
+    /// Reorders a fixed row set with the fewest moves: rows on the longest
+    /// increasing subsequence stay put. Right-to-left, so the suffix is settled
+    /// and each unanchored row is in the prefix, landing with one move.
     fn reorder_minimal(&mut self, desired: &[DesiredRow], ops: &mut ListOps) {
         let n = desired.len();
         if n < 2 {
@@ -585,9 +473,7 @@ impl ListBinding {
         }
     }
 
-    /// Realize a new row: create an instance and write all of its fields (the
-    /// visible schema plus the hidden entity-identity field). `None` if the class
-    /// failed to instantiate.
+    /// `None` if the class isn't registered or instantiation failed.
     fn realize(&self, dr: &DesiredRow) -> Option<RowSlot> {
         let reg = self.registration.as_ref()?;
         let instance = reg.create_instance()?;
@@ -601,7 +487,6 @@ impl ListBinding {
         })
     }
 
-    /// The backing collection, for binding as a control's `ItemsSource`.
     pub(crate) fn collection(&self) -> &ObservableCollection {
         &self.coll
     }
@@ -614,9 +499,8 @@ impl ListBinding {
         self.bound_for_uri = Some(uri.to_owned());
     }
 
-    /// Detach (logically) so the next bind pass re-binds against a rebuilt scene.
-    /// The cached control handle points into the old scene, so drop it and re-prime
-    /// selection: the next bind re-resolves the control and re-baselines against it.
+    /// Called on scene rebuild: the cached control belongs to the old scene, so
+    /// the next bind re-resolves it and re-baselines selection.
     pub(crate) fn reset_bind(&mut self) {
         self.bound_for_uri = None;
         self.control = None;
@@ -625,28 +509,22 @@ impl ListBinding {
         self.selection_primed = false;
     }
 
-    /// Clear the bound control's `ItemsSource` so it stops rendering our rows,
-    /// releasing its ref to the backing collection before this binding (and its
-    /// row `ClassRegistration`) drop on a component-removal reap. No-op until the
-    /// control is resolved.
+    /// Clears the control's `ItemsSource` so it releases the collection before
+    /// this binding's `ClassRegistration` drops.
     pub(crate) fn detach(&mut self) {
         if let Some(control) = self.control.as_mut() {
             control.clear_items_source();
         }
     }
 
-    /// Stash a `+1` handle on the bound control so selection is read and driven on
-    /// it directly. Called when the `ItemsSource` binds (and on each rebind). Probes
-    /// whether the control is a `Selector`: `selected_index()` is `Some` iff it
-    /// `DynamicCast`s to one (a plain `ItemsControl` returns `None`), which gates the
-    /// control→[`Selected`] reconcile in [`Self::poll_selection`].
+    /// `selected_index()` is `Some` only for a `Selector`, which is how a plain
+    /// `ItemsControl` is detected.
     pub(crate) fn set_control(&mut self, control: FrameworkElement) {
         self.is_selector = control.selected_index().is_some();
         self.control = Some(control);
     }
 
-    /// The row entity matching the control's selected item by pointer identity, or
-    /// `None` when nothing is selected.
+    /// Matches the control's selected item to a row by pointer identity.
     fn current_entity(&self) -> Option<Entity> {
         let ptr: *mut c_void = self.control.as_ref()?.selected_item()?.as_ptr();
         self.rows
@@ -655,27 +533,16 @@ impl ListBinding {
             .map(|(e, _)| *e)
     }
 
-    /// Reconcile selection against the control's own `SelectedItem`. **UI wins
-    /// within a frame**: if the control's selection changed since the last poll,
-    /// report it (the caller sets [`Selected`]). Otherwise, if the app's
-    /// [`Selected`] differs from the control's selection, drive the control's
-    /// `SelectedIndex` to it (record-then-apply). See the module docs.
-    ///
-    /// No structural-change handling is needed: a `ListBox` tracks the selected
-    /// *item*, not the slot, so its selection rides an Add / Remove / `Move`
-    /// natively: the moved row stays selected, a removed selected row clears.
+    /// A control-side change since the last poll is reported and wins; otherwise
+    /// the control is driven to `desired_selected`. A `Selector` tracks the
+    /// selected item, not its index, so Add, Remove and Move need no handling.
     pub(crate) fn poll_selection(&mut self, desired_selected: Option<Entity>) -> SelectionOutcome {
-        // Non-Selector (plain ItemsControl) has no selection to be the source of
-        // truth; leave Selected to the app and never clear it.
         if !self.is_selector {
             return SelectionOutcome::Unchanged;
         }
         let current = self.current_entity();
         if !self.selection_primed {
-            // First poll: adopt the control's initial selection (a fresh ListBox
-            // has none) as the baseline without reporting it; an unsolicited
-            // default isn't a UI event. Fall through so an app-set desired_selected
-            // is still honored this frame.
+            // Falls through so an app-set selection still applies this frame.
             self.selection_primed = true;
             self.last_currency = current;
         } else if current != self.last_currency {
@@ -688,23 +555,17 @@ impl ListBinding {
                 None => -1,
             };
             if let Some(control) = self.control.as_mut() {
-                // Best-effort: a false return (bad index / read-only) is non-fatal.
                 let _ = control.set_selected_index(index);
             }
-            // Record what the control *actually* holds now, not what we asked for:
-            // a rejected drive (bad index / read-only) or a desired row absent from
-            // the collection leaves the control unchanged, and recording
-            // `desired_selected` here would make next frame's poll misread the
-            // mismatch as a phantom UI selection.
+            // Read back, not `desired_selected`: a rejected drive would otherwise
+            // look like a UI change next poll.
             self.last_currency = self.current_entity();
         }
         SelectionOutcome::Unchanged
     }
 }
 
-/// Longest strictly-increasing subsequence of `seq`, returned as the list of
-/// **positions** in `seq` (ascending). Used to anchor the rows already in correct
-/// relative order during a reorder, so only the rest move.
+/// Longest strictly increasing subsequence, as ascending positions in `seq`.
 fn longest_increasing_subsequence(seq: &[usize]) -> Vec<usize> {
     let n = seq.len();
     if n == 0 {
@@ -715,7 +576,6 @@ fn longest_increasing_subsequence(seq: &[usize]) -> Vec<usize> {
     let mut tails: Vec<usize> = Vec::new();
     let mut prev = vec![usize::MAX; n];
     for i in 0..n {
-        // Binary search for the first tail whose value is >= seq[i] (strict LIS).
         let mut lo = 0usize;
         let mut hi = tails.len();
         while lo < hi {
@@ -748,8 +608,6 @@ fn longest_increasing_subsequence(seq: &[usize]) -> Vec<usize> {
     out
 }
 
-/// Map a plain-VM field type to the dependency-property type backing it on a row
-/// object.
 fn plain_to_prop_type(kind: PlainType) -> PropType {
     match kind {
         PlainType::Int32 => PropType::Int32,
@@ -761,8 +619,7 @@ fn plain_to_prop_type(kind: PlainType) -> PropType {
     }
 }
 
-/// Write one snapshot value into a row instance's dependency property. `Null`
-/// leaves the property untouched (rows have no clear semantics).
+/// `Null` leaves the property untouched.
 fn set_field(handle: Instance, index: u32, value: &PlainValue) {
     match value {
         PlainValue::Int32(v) => handle.set_int32(index, *v),
@@ -774,15 +631,11 @@ fn set_field(handle: Instance, index: u32, value: &PlainValue) {
     }
 }
 
-/// Whether two snapshot values are equal (for the per-row change cache;
-/// [`PlainValue`] isn't `PartialEq` across the crate boundary). Differing variants
-/// are unequal; `Null` equals only `Null`.
+/// Change-cache equality; [`PlainValue`] isn't `PartialEq`.
 fn values_eq(a: &PlainValue, b: &PlainValue) -> bool {
     match (a, b) {
         (PlainValue::Int32(x), PlainValue::Int32(y)) => x == y,
-        // NaN-aware: `NaN == NaN` is false, so a plain `==` would treat an
-        // unchanged NaN field as changed every frame and re-push an `Update`
-        // forever. Two NaNs are "equal" for the change cache.
+        // NaN equals NaN here, or an unchanged NaN field would Update every frame.
         (PlainValue::Double(x), PlainValue::Double(y)) => x == y || (x.is_nan() && y.is_nan()),
         (PlainValue::Bool(x), PlainValue::Bool(y)) => x == y,
         (PlainValue::String(x), PlainValue::String(y)) => x == y,
@@ -792,9 +645,7 @@ fn values_eq(a: &PlainValue, b: &PlainValue) -> bool {
     }
 }
 
-/// Compare two snapshot values for the optional Rust-side sort. Mixed / `Null`
-/// variants compare equal (the row type is homogeneous, so this only bites on a
-/// `Null` field, which then keeps query order).
+/// Mixed variants, `Null` and NaN compare equal.
 fn compare_values(a: &PlainValue, b: &PlainValue) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
@@ -809,23 +660,15 @@ fn compare_values(a: &PlainValue, b: &PlainValue) -> std::cmp::Ordering {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Ordering for the list diff system relative to the serial push.
+/// System set for the per-row-type list diff systems.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NoesisListSet {
-    /// Per-row-type desired-order diff (parallel); runs before [`NoesisSet::Apply`].
+    /// Reads rows into each list's desired state. Runs in `PostUpdate` before
+    /// [`NoesisSet::Apply`], so row changes made before then show the same frame.
     Diff,
 }
 
-/// Build the desired ordered rows for each list whose row type is `T`: walk each
-/// list entity's [`ListRows`] membership directly, keep the rows that carry `T`,
-/// snapshot them (appending the entity identity), apply the optional Rust-side sort,
-/// and record which row is [`Selected`]. Pure ECS, no Noesis state; parallelizes
-/// freely. Iterating the relationship target visits only *this* list's rows (no
-/// per-list scan of every `ListedIn` entity in the world).
+/// Snapshots each list's `T` rows in order and records its [`Selected`] row.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn diff_list<T: NoesisViewModel + Component>(
     lists: Query<(Entity, &UiList, Option<&ListRows>)>,
@@ -837,8 +680,7 @@ fn diff_list<T: NoesisViewModel + Component>(
             continue;
         };
 
-        // A list with no rows currently has no `ListRows` component (Bevy removes an
-        // emptied relationship target), so treat its absence as the empty membership.
+        // Bevy removes an emptied `ListRows`.
         let mut gathered: Vec<(Entity, Vec<PlainValue>, bool)> = list_rows
             .into_iter()
             .flat_map(RelationshipTarget::iter)
@@ -850,14 +692,8 @@ fn diff_list<T: NoesisViewModel + Component>(
             })
             .collect();
 
-        // One row type per list. Only the owning type may write the slot: a type
-        // that contributed no rows here and does not already own this list must
-        // leave `schema` / `rows` / `selected` / `row_type` untouched, or its empty
-        // result would clobber the owning type's live list (these per-type systems
-        // run in nondeterministic order against the same slot when two `T`s target
-        // the same list entity) and its schema could freeze the row class with the
-        // wrong field layout. A type that already owns the slot keeps writing even
-        // when it drains to empty.
+        // Every registered `T` visits every list; a non-owning type with no rows
+        // here must not clobber the owner's slot or freeze the class with its schema.
         let this = core::any::TypeId::of::<T>();
         if gathered.is_empty() && slot.row_type != Some(this) {
             continue;
@@ -874,10 +710,7 @@ fn diff_list<T: NoesisViewModel + Component>(
             });
         }
 
-        // Reaching here means T owns the slot; a *different* recorded type means two
-        // types both hold rows for this list entity (genuine misconfiguration,
-        // last-writer-wins), not the benign registered-but-unused case the bail above
-        // absorbs.
+        // A different recorded type here means two types both hold rows in this list.
         if let Some(prev) = slot.row_type
             && prev != this
         {
@@ -892,15 +725,11 @@ fn diff_list<T: NoesisViewModel + Component>(
             );
         }
 
-        // Stamp schema + row_type together so the class is registered from the
-        // owning type's layout (ensure_class in sync_lists is gated on
-        // `row_type.is_some()`).
+        // Stamped together: `sync_lists` registers the class once `row_type` is set.
         slot.schema = T::noesis_properties();
         slot.row_type = Some(this);
 
-        // Selection is single-row. If the app marked several rows Selected, picking
-        // the first in query order would let the winner flip frame to frame; choose
-        // deterministically (lowest entity) and warn on the misconfiguration.
+        // Lowest entity, not first found, so the winner doesn't flip between frames.
         let selected: Vec<Entity> = gathered
             .iter()
             .filter(|(_, _, selected)| *selected)
@@ -921,11 +750,7 @@ fn diff_list<T: NoesisViewModel + Component>(
     }
 }
 
-/// Serial push: drain each list entity's `ListDesired` through the reconciler,
-/// bind the `ItemsSource` once the control exists, reconcile the [`Selected`]
-/// marker to any UI-driven selection, and emit [`NoesisListOps`] /
-/// [`NoesisListSelection`] (plus a [`NoesisRowSelected`] observer event). The only
-/// list system that touches Noesis state.
+/// The only list system that touches Noesis.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn sync_lists(
     lists: Query<(Entity, &UiList, &ListDesired)>,
@@ -941,21 +766,15 @@ fn sync_lists(
         return;
     };
     for (list_ent, list, desired) in &lists {
-        // No row type has claimed this list yet (no rows have ever appeared), so
-        // `schema` is still the default empty slice. Skip until a type owns it,
-        // else `ensure_class` would freeze the row class with an empty layout.
+        // No rows yet: registering now would freeze an empty class layout.
         if desired.row_type.is_none() {
             continue;
         }
-        // Skip a list whose view is gone: its (view, name) binding was already
-        // reaped by the view's teardown, and `apply_list_for` would recreate it
-        // (`entry().or_default()`). `despawn_orphan_lists` will take this list entity
-        // with the view next; until it flushes, do not resurrect the binding.
+        // View teardown already reaped the binding; `apply_list_for` would recreate
+        // it before `despawn_orphan_lists` takes this entity.
         if alive_views.get(list.view).is_err() {
             continue;
         }
-        // The render binding + scene are keyed by the view entity; rows and the
-        // `Selected` marker are keyed by this list entity.
         let (ops, selection) = state.apply_list_for(
             list_ent,
             list.view,
@@ -977,9 +796,7 @@ fn sync_lists(
             });
         }
         if let SelectionOutcome::UiSelected(selected) = selection {
-            // UI authority: clear every Selected in this list, then mark the new
-            // one (deferred commands apply in order, so a re-select nets out to
-            // the row staying marked).
+            // Commands apply in order, so re-selecting the same row leaves it marked.
             for (entity, listed) in &selected_rows {
                 if listed.0 == list_ent {
                     commands.entity(entity).remove::<Selected>();
@@ -987,8 +804,6 @@ fn sync_lists(
             }
             if let Some(entity) = selected {
                 commands.entity(entity).insert(Selected);
-                // Observer-facing twin: target the newly-selected row so a
-                // `commands.observe`-style consumer reacts straight off the target.
                 commands.trigger(NoesisRowSelected {
                     entity,
                     view: list.view,
@@ -1004,12 +819,8 @@ fn sync_lists(
     }
 }
 
-/// Despawn list entities whose view was removed, so a despawned (or
-/// `NoesisView`-stripped) view takes its lists with it instead of leaving orphans
-/// that [`sync_lists`] would keep skipping. The view's own teardown already reaped
-/// each `(view, name)` binding; despawning the list entity fires its `UiList`
-/// removal reap, which no-ops against the already-drained binding (idempotent).
-/// Runs at the head of [`NoesisSet::Ensure`], alongside the view/panel teardowns.
+/// Despawns lists whose [`NoesisView`] was removed. The view teardown already
+/// reaped their bindings, so the `UiList` removal reap is a no-op.
 #[allow(clippy::needless_pass_by_value)]
 fn despawn_orphan_lists(
     mut removed: RemovedComponents<NoesisView>,
@@ -1027,17 +838,11 @@ fn despawn_orphan_lists(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// App extension & plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `App` methods to register a list row type. Add [`crate::NoesisPlugin`] first,
-/// then register each row component; spawn a [`UiList`] entity and spawn rows with
-/// [`ListedIn`] pointing at it to populate it.
+/// Registers list row types on an [`App`].
 pub trait NoesisListAppExt {
-    /// Register `T` as a list row type: its [`NoesisViewModel`] fields become the
-    /// bound row-object properties, and `T` rows tagged with [`ListedIn`] are
-    /// reconciled into the [`UiList`] entity they point at.
+    /// Registers `T` as a row type: entities with `T` and [`ListedIn`] become
+    /// rows, and `T`'s [`NoesisViewModel`] fields become the row properties.
+    /// Call it once per type.
     fn add_noesis_list<T: NoesisViewModel + Component<Mutability = Mutable>>(
         &mut self,
     ) -> &mut Self;
@@ -1054,15 +859,12 @@ impl NoesisListAppExt for App {
 
 impl ReapOnRemove for UiList {
     fn reap(state: &mut NoesisRenderState, entity: Entity) {
-        // `entity` is the list entity that lost its `UiList`; the render state maps
-        // it back to the `(view, name)` binding it owned and reaps just that one.
         state.reap_list_for(entity);
     }
 }
 
-/// Installs the entity-keyed list reconcile pipeline: orders the parallel
-/// [`NoesisListSet::Diff`] before [`NoesisSet::Apply`] and adds the serial
-/// `sync_lists` push. Added by [`crate::NoesisPlugin`]; register row types with
+/// Runs the [`UiList`] bridge and registers its messages.
+/// [`NoesisPlugin`](crate::NoesisPlugin) adds it; register row types with
 /// [`NoesisListAppExt::add_noesis_list`].
 #[derive(Default)]
 pub struct NoesisListPlugin;

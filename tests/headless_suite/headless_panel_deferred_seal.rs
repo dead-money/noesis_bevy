@@ -1,12 +1,9 @@
-//! ECS-UI integration proof, **F8 (deferred panel seal)**: a
-//! `UiPanel::deferred_seal()` panel holds its `DataContext` freeze until a
-//! `SealPanel` marker, so a bound component contributed a frame later (the
-//! cross-module race) still joins the binding instead of being dropped. Asserted
-//! against the [`ecs_ui`] example's HUD fragment (`{Binding Health}` /
-//! `{Binding Score}`), so a late field that fails to bind reads back as absent.
-//!
-//! One `#[test]` per file: each headless Noesis app owns the thread-affine runtime
-//! for its whole process, so the integration tests never share a binary.
+//! Deferred panel seal: a `UiPanel::deferred_seal()` panel holds its
+//! `DataContext` freeze until a `SealPanel` marker, so a bound component
+//! contributed later (for example by another plugin) still joins the binding
+//! instead of being dropped. Asserted against the `ecs_ui` example's HUD fragment
+//! (`{Binding Health}` / `{Binding Score}`), so a late field that fails to bind
+//! reads back as absent.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -52,9 +49,8 @@ fn deferred_seal_binds_a_late_added_field() {
                     },
                 ))
                 .id();
-            // Spawn with ONLY Health; Score is contributed late (the cross-module
-            // case). `deferred_seal` keeps the panel from freezing on first sight,
-            // so the late Score still joins the DataContext once we seal.
+            // Spawn with only Health; Score is contributed late. `deferred_seal`
+            // keeps the panel from freezing on first sight.
             let p = commands
                 .spawn((
                     UiPanel::new(crate::ecs_ui::HUD_URI)
@@ -95,9 +91,7 @@ fn deferred_seal_binds_a_late_added_field() {
         },
     );
 
-    // Exit once BOTH the spawn-time Health and the late-added Score have bound and
-    // read back through the panel. A broken deferred seal would freeze on Health
-    // alone and Score would never arrive, timing this out.
+    // A broken deferred seal freezes on Health alone and Score never arrives.
     let pred_captured = Arc::clone(&captured);
     let bound = run_until(&mut app, 240, move |_app| {
         let snap = pred_captured.lock().unwrap();
@@ -113,15 +107,13 @@ fn deferred_seal_binds_a_late_added_field() {
         "deferred panel never bound both Health and the late-added Score within \
          240 frames; reads {snap:?}",
     );
-    // The component present at spawn binds.
     assert_eq!(
         snap.get(crate::ecs_ui::HUD_HEALTH_VALUE)
             .map(String::as_str),
         Some("100"),
         "deferred panel's Health never bound; reads {snap:?}",
     );
-    // And the LATE-added Score binds too. Without `deferred_seal`, the panel would
-    // freeze with Health only and this would be empty/absent.
+    // Without `deferred_seal`, the panel would freeze with Health only.
     assert_eq!(
         snap.get(crate::ecs_ui::HUD_SCORE_VALUE).map(String::as_str),
         Some("7"),

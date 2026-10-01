@@ -1,19 +1,14 @@
-//! App-level application-resources bridge. Registers Rust-built resources
-//! (code-built brushes, scalar values) and merged `<ResourceDictionary>` XAML
-//! into the process-global application resources, so XAML
-//! `{StaticResource Key}` references resolve them without authoring a theme
-//! file on disk.
+//! Application resources built in Rust: brushes, scalar values, and
+//! `<ResourceDictionary>` XAML fragments that XAML `{StaticResource Key}`
+//! references resolve without a theme file on disk.
 //!
-//! Unlike the per-element bridges, resources are *global*: a `{StaticResource}`
-//! is resolved when the element is parsed, walking the element's own
-//! `Resources`, then its ancestors', then the application resources installed
-//! via `GUI::SetApplicationResources`. Since a [`NoesisView`]
-//! parses its XAML atomically in [`crate::render`]'s `Ensure` phase, the only
-//! injection point that a freshly-loaded scene's `{StaticResource}` can see is
-//! the application resources. So this bridge is an **app-level Bevy
-//! [`Resource`]**, not a per-entity component, and its reconcile system runs in
-//! [`NoesisSet::Sync`] (before `Ensure`) so the resources are installed
-//! before any view parses.
+//! `{StaticResource}` resolves at parse time, walking the element's own
+//! `Resources`, its ancestors', and then the process-global application
+//! resources. A [`NoesisView`] parses its XAML in one go, so the application
+//! resources are the only place a fresh scene can find Rust-built keys. That is
+//! why [`NoesisResources`] is an app-level Bevy [`Resource`] rather than a
+//! component on the view, and why its reconcile system runs in
+//! [`NoesisSet::Sync`], before views are built.
 //!
 //! ```ignore
 //! app.insert_resource(
@@ -21,36 +16,38 @@
 //!         .solid("AccentBrush", [1.0, 0.0, 0.0, 1.0])
 //!         .value("PanelWidth", DpValue::F32(40.0)),
 //! );
-//! // ...then in XAML:  Background="{StaticResource AccentBrush}"
-//! //                   Width="{StaticResource PanelWidth}"
+//! // In XAML:  Background="{StaticResource AccentBrush}"
+//! //           Width="{StaticResource PanelWidth}"
 //! ```
 //!
-//! The bridge builds a fresh `Noesis::ResourceDictionary` from the spec whenever
-//! the [`NoesisResources`] resource changes (Bevy change detection) and installs
-//! it with `GUI::SetApplicationResources` (Noesis takes its own reference, so the
-//! Rust handle drops right after). Re-applying replaces the global dictionary;
-//! already-parsed scenes keep the `{StaticResource}` values they resolved at
-//! parse time (`StaticResource` is a one-shot parse-time lookup), so a change is
-//! only seen by views built afterwards.
+//! Each frame the system compares the declared inputs with what it last
+//! installed. When anything differs (the code-built entries, `merged_xaml`, the
+//! views' theme URIs, or the bytes behind those URIs), it builds a new
+//! dictionary and installs it with `GUI::SetApplicationResources`. A reinstall
+//! rebuilds every already-built scene so its `{StaticResource}` lookups
+//! re-resolve; expect any scene state that is not held in components to reset.
+//! The install waits until every theme URI and every font the views list in
+//! `wait_for_fonts` / `wait_for_font_files` has reached the providers.
 //!
-//! After installing, it confirms which declared keys are resolvable through the
-//! live application resources (`GUI::GetApplicationResources` ➜ `contains`) and
-//! emits a [`NoesisResourcesInstalled`] message listing them: the "look up"
-//! half of register/look-up.
+//! After an install, a [`NoesisResourcesInstalled`] message lists which declared
+//! keys the live application resources actually contain.
 //!
 //! # Relationship to `NoesisView::application_resources`
 //!
-//! `NoesisView::application_resources` names a chain of on-disk
-//! `ResourceDictionary` *URIs* (a theme). This bridge and that chain feed the
-//! **same** process-global application resources, and they are **merged** rather
-//! than mutually exclusive: the reconcile system builds one dictionary holding
-//! the chain URIs (as merged dictionaries), this bridge's `merged_xaml`, and the
-//! code-built [`entries`](NoesisResources::entries) as base entries. Code-built
-//! entries win over the theme on a key collision, so a `.solid()`/`.value()`
-//! override survives a theme instead of being clobbered by it. Every view's
-//! chain is unioned into that one dictionary.
+//! [`NoesisView::application_resources`] names a chain of on-disk
+//! `ResourceDictionary` URIs (a theme). The chain and this resource feed one
+//! process-global dictionary: the chain URIs and [`merged_xaml`] become merged
+//! dictionaries (in that order, so `merged_xaml` overrides the theme), and
+//! [`entries`] become base entries, which win over everything merged. A
+//! `.solid()` or `.value()` override therefore survives a theme. The chains of
+//! all views are unioned, with a one-time warning if views declare different
+//! chains.
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there).
+//! Removing [`NoesisResources`] while no view declares a theme leaves the last
+//! install in place.
+//!
+//! [`merged_xaml`]: NoesisResources::merged_xaml
+//! [`entries`]: NoesisResources::entries
 
 use std::collections::HashMap;
 
@@ -62,9 +59,8 @@ use crate::render::{
     NoesisRenderState, NoesisSet, NoesisView, sync_font_provider_map, sync_xaml_provider_map,
 };
 
-/// One application-resource entry, declarative side. Resolved into a live
-/// `Noesis::BaseComponent` only at install time (on the Noesis thread), so the
-/// resource stays plain data.
+/// One application-resource value. Plain data; the live Noesis object is built
+/// at install time.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceEntry {
     /// A code-built brush ([`SolidColorBrush`] / [`LinearGradientBrush`]).
@@ -74,28 +70,26 @@ pub enum ResourceEntry {
     /// [`SolidColorBrush`]: noesis_runtime::brushes::SolidColorBrush
     /// [`LinearGradientBrush`]: noesis_runtime::brushes::LinearGradientBrush
     Brush(BrushSpec),
-    /// A boxed scalar value (string / number / bool). Resolves a
-    /// `{StaticResource Key}` used where a plain value is expected (e.g. a
-    /// `Single` `Width`, a `String` `Text`). The boxed variant must match the
-    /// target property's runtime type exactly (a `Double` won't satisfy a
-    /// `Single` `Width`), exactly as for
-    /// [`DpValue`] writes (see the `dp` module docs on `f32`
-    /// vs `f64`).
+    /// A boxed scalar value (string, number, bool). Resolves a
+    /// `{StaticResource Key}` used where a plain value is expected (a `Single`
+    /// `Width`, a `String` `Text`). The variant must match the target
+    /// property's runtime type exactly: a `Double` won't satisfy a `Single`
+    /// `Width`. See the [`dp`](crate::dp) module on `f32` vs `f64`.
     Value(DpValue),
 }
 
-/// App-level application-resources bridge. Insert as a Bevy [`Resource`] (not a
-/// per-entity component): the resources it installs are process-global and must
-/// be in place before any [`NoesisView`] parses.
+/// Rust-built application resources. Insert as a Bevy [`Resource`], not on a
+/// view: the dictionary it installs is process-global. See the
+/// [module docs](self) for install timing and precedence.
 #[derive(Resource, Clone, Default, Debug)]
 pub struct NoesisResources {
-    /// Code-built entries keyed by `x:Key`. Built into a `ResourceDictionary`
-    /// and installed as the application resources whenever this resource changes.
+    /// Code-built entries keyed by `x:Key`. They win over every merged
+    /// dictionary and over the views' theme chain on a key collision.
     pub entries: HashMap<String, ResourceEntry>,
-    /// Bare `<ResourceDictionary>` XAML fragments, each parsed via
-    /// `GUI::ParseXaml` and added to the installed dictionary's
-    /// `MergedDictionaries`. Entries in [`entries`](Self::entries) take
-    /// precedence over merged keys on collision (WPF/Noesis merge semantics).
+    /// Bare `<ResourceDictionary>` XAML fragments, each parsed and added to the
+    /// installed dictionary's `MergedDictionaries` after the theme chain, so
+    /// they override it. A fragment that fails to parse is skipped with a
+    /// warning.
     pub merged_xaml: Vec<String>,
 }
 
@@ -121,8 +115,8 @@ impl NoesisResources {
         self.entry(key, ResourceEntry::Brush(spec))
     }
 
-    /// Builder: register a flat `SolidColorBrush` of `[r, g, b, a]` (each
-    /// `0..=1`) under `key`.
+    /// Builder: register a `SolidColorBrush` of `[r, g, b, a]` (each `0..=1`)
+    /// under `key`.
     #[must_use]
     pub fn solid(self, key: impl Into<String>, rgba: [f32; 4]) -> Self {
         self.brush(key, BrushSpec::Solid(rgba))
@@ -143,31 +137,18 @@ impl NoesisResources {
     }
 }
 
-/// Emitted after the bridge (re)installs the application resources, listing the
-/// declared [`entries`](NoesisResources::entries) keys confirmed resolvable
-/// through the live application resources (`GUI::GetApplicationResources` ➜
-/// `contains`). A key missing from `present` failed to install (e.g. a null
-/// brush, or a `key` that collided away). Read with
-/// `MessageReader<NoesisResourcesInstalled>`.
+/// Emitted after each install of the application resources, when
+/// [`NoesisResources::entries`] is non-empty. A declared key missing from
+/// `present` failed to install.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisResourcesInstalled {
-    /// Declared own keys confirmed present in the installed application
+    /// Keys of [`NoesisResources::entries`] found in the live application
     /// resources, sorted.
     pub present: Vec<String>,
 }
 
-/// Reconcile the process-global application resources from the two sources that
-/// feed them — the code-built [`NoesisResources`] bridge and every view's
-/// [`NoesisView::application_resources`](crate::NoesisView::application_resources)
-/// URI chain — into one merged `ResourceDictionary`, then emit a
-/// [`NoesisResourcesInstalled`] read-back reflecting what actually installed.
-///
-/// Merging both sources here (rather than letting the per-view chain clobber the
-/// code-built dictionary during `Ensure`, as it used to) means opting into a
-/// theme no longer silently drops `.solid()`/`.value()` entries. Runs in
-/// [`NoesisSet::Sync`], after the XAML provider map is populated, so the chain
-/// URIs are visible and the install lands before the scene-build (`Ensure`)
-/// phase parses any `{StaticResource}`.
+/// Merge [`NoesisResources`] and every view's theme chain into one installed
+/// dictionary, then emit [`NoesisResourcesInstalled`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_resources_bridge(
     resources: Option<Res<NoesisResources>>,
@@ -176,17 +157,14 @@ pub(crate) fn sync_resources_bridge(
     mut installed: MessageWriter<NoesisResourcesInstalled>,
     mut warned_conflict: Local<bool>,
 ) {
-    // Gate on the render state: its existence proves `noesis_runtime::init()`
-    // has run, which `GUI::SetApplicationResources` requires.
+    // Render state exists only after `noesis_runtime::init()`, which
+    // `GUI::SetApplicationResources` requires.
     let Some(mut state) = state else {
         return;
     };
 
-    // Union the views' chains (deduped, first-seen order). With merged-dictionary
-    // semantics several views can share one global set of resources; warn once if
-    // views declare *different* chains, since the global is process-wide. The font
-    // waits are unioned alongside — the install honors the same gates as scene
-    // build (see `reconcile_app_resources`).
+    // Font waits are unioned too: the install honors the same gates as scene
+    // build, since chain dictionaries resolve `FontFamily` at parse time.
     let mut chain_uris: Vec<String> = Vec::new();
     let mut distinct_chains: Vec<&[String]> = Vec::new();
     let mut wait_fonts: Vec<String> = Vec::new();
@@ -222,7 +200,6 @@ pub(crate) fn sync_resources_bridge(
         *warned_conflict = true;
     }
 
-    // The code-built side is optional; a theme-only app still installs its chain.
     let empty = NoesisResources::default();
     let resources = resources.as_deref().unwrap_or(&empty);
 
@@ -233,17 +210,15 @@ pub(crate) fn sync_resources_bridge(
         &wait_fonts,
         &wait_font_files,
     ) {
-        // The read-back is the code-built bridge's "look up" half; only surface it
-        // when the consumer actually declared code-built resources.
         if !resources.entries.is_empty() {
             installed.write(NoesisResourcesInstalled { present });
         }
     }
 }
 
-/// Wires the app-level application-resources bridge. Added transitively by
-/// [`crate::NoesisPlugin`]. Does not insert a default [`NoesisResources`]; the
-/// bridge is opt-in (no resource ⇒ theme chain only, or no-op).
+/// Registers the application-resources system. Added by
+/// [`crate::NoesisPlugin`]. It does not insert a [`NoesisResources`]; without
+/// one, only the views' theme chains are installed.
 pub struct NoesisResourcesPlugin;
 
 impl Plugin for NoesisResourcesPlugin {
@@ -252,12 +227,9 @@ impl Plugin for NoesisResourcesPlugin {
             PostUpdate,
             sync_resources_bridge
                 .in_set(NoesisSet::Sync)
-                // The provider map must hold the chain URIs before we read their
-                // bytes to build the merged dictionary.
                 .after(sync_xaml_provider_map)
-                // And the frame's fonts must reach the C++ provider first —
-                // unordered, a rebuild can flip the two Sync systems and
-                // install the theme against an empty font cache.
+                // Unordered, a rebuild can flip the two Sync systems and install
+                // the theme against an empty font cache.
                 .after(sync_font_provider_map),
         );
     }

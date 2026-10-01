@@ -1,14 +1,14 @@
-//! Exercises `PATH_PATTERN_CLAMP` (`PosTex0Rect`) and `PATH_PATTERN_REPEAT`
-//! (`PosTex0RectTile`) in a single frame.
+//! `PATH_PATTERN_CLAMP` (`PosTex0Rect`) and `PATH_PATTERN_REPEAT`
+//! (`PosTex0RectTile`) in one frame.
 //!
-//! Left half: clamped quad with an inner `rect`; fragments inside sample the
-//! pattern, outside collapse to transparent black. Right half: repeated quad
-//! with `uv0 ∈ [0, 2]` and `tile = (0, 0, 1, 1)`, wrapping the 2×2 pattern
-//! into two horizontal tiles.
+//! Left half: a clamped quad with an inner `rect`. Fragments inside it sample
+//! the pattern; fragments outside are transparent black. Right half: a
+//! repeating quad with `uv0 ∈ [0, 2]` and `tile = (0, 0, 1, 1)`, which wraps
+//! the 2×2 pattern into two horizontal tiles.
 //!
-//! Asserts: CLAMP inside-rect pixel matches expected texel, outside collapses
-//! to zero; REPEAT two x-positions at the same v map to the same texel
-//! (confirming `fract()` wrap).
+//! Asserts that CLAMP samples the expected texels inside the rect and zero
+//! outside it, and that two REPEAT pixels at the same tile-local coordinate
+//! read the same texel (the `fract()` wrap).
 
 use std::ffi::c_void;
 
@@ -22,8 +22,8 @@ use noesis_runtime::render_device::{RenderDevice, TextureDesc};
 const TARGET_W: u32 = 32;
 const TARGET_H: u32 = 32;
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-// COPY_BYTES_PER_ROW_ALIGNMENT requires 256; TARGET_W*4=128 would break
-// copy_texture_to_buffer, so pad to 256 and skip trailing bytes in pixel().
+// TARGET_W * 4 = 128 is below COPY_BYTES_PER_ROW_ALIGNMENT (256), so rows are
+// padded and pixel() skips the padding.
 const BYTES_PER_ROW: u32 = 256;
 
 const CLEAR: [u8; 4] = [0, 0, 64, 255];
@@ -402,8 +402,7 @@ fn make_pattern_batch(
         num_vertices,
         start_index,
         num_indices,
-        // Non-null so any accidental null-check fires loudly; handle
-        // resolution goes through `test_set_forced_pattern` instead.
+        // Never dereferenced: `test_set_forced_pattern` replaces it.
         pattern: std::ptr::dangling_mut(),
         ramps: std::ptr::null_mut(),
         image: std::ptr::null_mut(),

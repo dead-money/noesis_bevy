@@ -1,23 +1,14 @@
-//! Per-view typography bridge: restyle the `TextElement` font properties
-//! (size, family, weight, style, stretch) of named XAML elements on a
-//! single [`NoesisView`](crate::NoesisView).
+//! Sets and watches the font properties (size, family, weight, style,
+//! stretch) of named text elements in a [`NoesisView`](crate::NoesisView).
 //!
-//! `TextBlock.FontSize`, `Run.FontWeight`, and friends are ordinary
-//! `TextElement` attached dependency properties; the generic [`NoesisDp`](crate::dp)
-//! bridge can already poke the scalar ones (`FontSize` is a plain `f32` DP). This
-//! bridge is the *typed, font-shaped* front for them: one [`NoesisTypography`]
-//! component carries a per-`x:Name` [`FontStyling`] block, so a single change can
-//! restyle a label's size, family, and weight together without spelling out DP
-//! names or worrying that `FontWeight`/`FontStyle`/`FontStretch` are enums rather
-//! than bare ints.
+//! These are `TextElement` dependency properties. `FontWeight`, `FontStyle`,
+//! and `FontStretch` are enums that the generic [`NoesisDp`](crate::dp::NoesisDp)
+//! bridge can't read or write, so this bridge offers typed access to all five.
 //!
-//! Add a [`NoesisTypography`] component to the view's camera entity. Its `set` map
-//! is the desired [`FontStyling`] per `x:Name`, applied to the view's elements
-//! whenever the component changes (Bevy change detection). It is **write-only**:
-//! each block's `Some` fields are pushed into the live element; `None` fields are
-//! left untouched, so two blocks for the same name compose last-write-wins per
-//! field. Read the resulting values back through a [`NoesisDp`](crate::dp) watch
-//! (`FontSize` is a readable `f32` DP) when you need observation.
+//! Add a [`NoesisTypography`] to the view's camera entity.
+//! [`set`](NoesisTypography::set) holds a [`FontStyling`] per `x:Name`;
+//! [`watch`](NoesisTypography::watch) lists properties to report through
+//! [`NoesisTypographyChanged`].
 //!
 //! ```ignore
 //! use noesis_bevy::{NoesisTypography, FontWeight};
@@ -30,9 +21,11 @@
 //! );
 //! ```
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the writes against
-//! that view's live scene; no cross-world queues.
+//! Whenever the component changes or the view's scene is rebuilt, every
+//! [`FontStyling`] in `set` is written again: its `Some` fields are set and its
+//! `None` fields are left alone. Removing an entry does not restore the
+//! element's previous font. Writes made through `set` are reported by any
+//! matching watch, like any other change.
 
 use std::collections::HashMap;
 
@@ -40,30 +33,26 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-// Re-export the runtime's typed font enums so callers don't reach across crates.
 pub use noesis_runtime::typography::{FontStretch, FontStyle, FontWeight};
 
-/// The desired `TextElement` font properties for one element. Every field is
-/// optional: `Some` is written to the live element on apply, `None` leaves the
-/// element's current value untouched (so partial restyles compose).
+/// Font properties to write on one element. `Some` fields are written; `None`
+/// fields leave the element's current value alone.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FontStyling {
-    /// `TextElement.FontSize`, in device-independent pixels.
+    /// `FontSize`, in DIPs.
     pub font_size: Option<f32>,
-    /// `TextElement.FontFamily` *source* string (e.g. `"Arial"`, `"#PT Root UI"`,
-    /// or a comma-separated fallback list). A fresh Noesis `FontFamily` is built
-    /// from it on each apply; Noesis takes its own reference.
+    /// `FontFamily` source string, as written in XAML: `"Arial"`,
+    /// `"Fonts/#PT Root UI"`, or a comma-separated fallback list.
     pub font_family: Option<String>,
-    /// `TextElement.FontWeight`.
+    /// `FontWeight`.
     pub font_weight: Option<FontWeight>,
-    /// `TextElement.FontStyle`.
+    /// `FontStyle`.
     pub font_style: Option<FontStyle>,
-    /// `TextElement.FontStretch`.
+    /// `FontStretch`.
     pub font_stretch: Option<FontStretch>,
 }
 
 impl FontStyling {
-    /// True when no field is set. Apply skips empty blocks to avoid needless FFI hops.
     pub(crate) fn is_empty(&self) -> bool {
         self.font_size.is_none()
             && self.font_family.is_none()
@@ -73,98 +62,92 @@ impl FontStyling {
     }
 }
 
-/// Which typed font property to read back on a watched element. Selects the
-/// runtime's *typed* getter.
-///
-/// `FontWeight` / `FontStyle` / `FontStretch` are Noesis **enum** dependency
-/// properties, so they are not reachable through the generic
-/// [`NoesisDp`](crate::dp) `i32` read path (a `GetValue<int>` against an enum DP
-/// type-mismatches, the same way `Visibility` does); they round-trip only
-/// through these dedicated typed getters. This is the typography bridge's own
-/// observation surface, exclusive of `NoesisDp`.
+/// A font property to watch. Each reports through the matching
+/// [`TypographyValue`] variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypographyField {
-    /// `TextElement.FontSize`, read back as a [`TypographyValue::FontSize`] `f32`.
+    /// `FontSize`.
     FontSize,
-    /// `TextElement.FontFamily`, read back as the source string.
+    /// `FontFamily`, as its source string.
     FontFamily,
-    /// `TextElement.FontWeight`, read back as a typed [`FontWeight`].
+    /// `FontWeight`.
     FontWeight,
-    /// `TextElement.FontStyle`, read back as a typed [`FontStyle`].
+    /// `FontStyle`.
     FontStyle,
-    /// `TextElement.FontStretch`, read back as a typed [`FontStretch`].
+    /// `FontStretch`.
     FontStretch,
 }
 
-/// A typed font value read back from a live element by a [`TypographyWatch`].
+/// A font property value read from a live element. The variant names the
+/// property.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypographyValue {
-    /// `FontSize` in device-independent pixels.
+    /// `FontSize` in DIPs.
     FontSize(f32),
-    /// `FontFamily` *source* string (`None` when the element has a family object
-    /// but no source string set).
+    /// `FontFamily` source string; `None` when the family has no source.
     FontFamily(Option<String>),
-    /// Typed `FontWeight` enum.
+    /// `FontWeight`.
     FontWeight(FontWeight),
-    /// Typed `FontStyle` enum.
+    /// `FontStyle`.
     FontStyle(FontStyle),
-    /// Typed `FontStretch` enum.
+    /// `FontStretch`.
     FontStretch(FontStretch),
 }
 
-/// One read-back subscription: an element's `x:Name` and the typed
-/// [`TypographyField`] to observe.
+/// One watched font property on one element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypographyWatch {
-    /// `x:Name` of the element to observe.
+    /// `x:Name` of the element (may be scope-qualified, `"Host/Leaf"`).
     pub name: String,
-    /// Which typed font property to read back.
+    /// Property to watch.
     pub field: TypographyField,
 }
 
-/// Emitted when a watched typed font property differs from the previous frame's
-/// snapshot. Read with `MessageReader<NoesisTypographyChanged>`. The first poll
-/// after a watch is added always reports, so callers see the current value.
+/// A watched font property changed since the previous frame, or its watch was
+/// just added. Polled every frame.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisTypographyChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose property changed.
     pub view: Entity,
     /// `x:Name` of the element whose property changed.
     pub name: String,
-    /// Current value, read as the watched [`TypographyField`].
+    /// Current value; the variant tells which property changed.
     pub value: TypographyValue,
 }
 
-/// Per-view typography bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Font writes and watches for named elements. Add to a
+/// [`NoesisView`](crate::NoesisView) camera entity; see the
+/// [module docs](self).
+///
+/// The per-property builders and setters merge into the element's existing
+/// [`FontStyling`].
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisTypography {
-    /// Desired [`FontStyling`] per element `x:Name`. Written to the view's
-    /// elements whenever this component changes. Each target should be a
-    /// `TextElement` (`TextBlock` / `Run` / `TextBox` / …); a non-text element
-    /// silently ignores font properties it doesn't expose.
+    /// Font properties per element `x:Name` (may be scope-qualified). Target a
+    /// text element (`TextBlock`, `Run`, `TextBox`, a `Control`). A missing name
+    /// warns; a property the element doesn't have is skipped and logged at
+    /// debug level.
     pub set: HashMap<String, FontStyling>,
-    /// `(x:Name, field)` pairs to observe. Polled every frame; a change vs. the
-    /// previous frame emits a [`NoesisTypographyChanged`].
+    /// Properties to report through [`NoesisTypographyChanged`].
     pub watch: Vec<TypographyWatch>,
 }
 
 impl NoesisTypography {
-    /// Creates an empty bridge with no styling writes or watches. Chain the
-    /// builder methods to fill it in.
+    /// An empty bridge. Chain the builders to fill it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: set element `name`'s `FontSize` (device-independent pixels).
+    /// Builder: set element `name`'s `FontSize` in DIPs.
     #[must_use]
     pub fn font_size(mut self, name: impl Into<String>, size: f32) -> Self {
         self.entry(name).font_size = Some(size);
         self
     }
 
-    /// Builder: set element `name`'s `FontFamily` from a source string.
+    /// Builder: set element `name`'s `FontFamily` from a source string such as
+    /// `"Fonts/#PT Root UI"`.
     #[must_use]
     pub fn font_family(mut self, name: impl Into<String>, source: impl Into<String>) -> Self {
         self.entry(name).font_family = Some(source.into());
@@ -192,14 +175,14 @@ impl NoesisTypography {
         self
     }
 
-    /// Builder: replace element `name`'s full [`FontStyling`] block.
+    /// Builder: replace element `name`'s whole [`FontStyling`].
     #[must_use]
     pub fn styling(mut self, name: impl Into<String>, styling: FontStyling) -> Self {
         self.set.insert(name.into(), styling);
         self
     }
 
-    /// Builder: observe element `name`'s typed `field` and surface changes as
+    /// Builder: report changes to element `name`'s `field` through
     /// [`NoesisTypographyChanged`].
     #[must_use]
     pub fn watch(mut self, name: impl Into<String>, field: TypographyField) -> Self {
@@ -210,47 +193,39 @@ impl NoesisTypography {
         self
     }
 
-    /// Set element `name`'s `FontSize` from a system holding `&mut NoesisTypography`.
-    /// The runtime counterpart of [`font_size`](Self::font_size): the next reconcile
-    /// applies it to the live element.
+    /// The `&mut` form of [`font_size`](Self::font_size), for systems that
+    /// update the component.
     pub fn set_font_size(&mut self, name: impl Into<String>, size: f32) {
         self.entry(name).font_size = Some(size);
     }
 
-    /// Set element `name`'s `FontFamily` from a source string, holding
-    /// `&mut NoesisTypography`. The runtime counterpart of
-    /// [`font_family`](Self::font_family).
+    /// The `&mut` form of [`font_family`](Self::font_family).
     pub fn set_font_family(&mut self, name: impl Into<String>, source: impl Into<String>) {
         self.entry(name).font_family = Some(source.into());
     }
 
-    /// Set element `name`'s `FontWeight` from a system holding `&mut NoesisTypography`.
-    /// The runtime counterpart of [`font_weight`](Self::font_weight).
+    /// The `&mut` form of [`font_weight`](Self::font_weight).
     pub fn set_font_weight(&mut self, name: impl Into<String>, weight: FontWeight) {
         self.entry(name).font_weight = Some(weight);
     }
 
-    /// Set element `name`'s `FontStyle` from a system holding `&mut NoesisTypography`.
-    /// The runtime counterpart of [`font_style`](Self::font_style).
+    /// The `&mut` form of [`font_style`](Self::font_style).
     pub fn set_font_style(&mut self, name: impl Into<String>, style: FontStyle) {
         self.entry(name).font_style = Some(style);
     }
 
-    /// Set element `name`'s `FontStretch` from a system holding `&mut NoesisTypography`.
-    /// The runtime counterpart of [`font_stretch`](Self::font_stretch).
+    /// The `&mut` form of [`font_stretch`](Self::font_stretch).
     pub fn set_font_stretch(&mut self, name: impl Into<String>, stretch: FontStretch) {
         self.entry(name).font_stretch = Some(stretch);
     }
 
-    /// Replace element `name`'s full [`FontStyling`] block from a system holding
-    /// `&mut NoesisTypography`. The runtime counterpart of [`styling`](Self::styling).
+    /// The `&mut` form of [`styling`](Self::styling).
     pub fn set_styling(&mut self, name: impl Into<String>, styling: FontStyling) {
         self.set.insert(name.into(), styling);
     }
 
-    /// Observe element `name`'s typed `field` from a system holding
-    /// `&mut NoesisTypography`. No-op if that exact `(name, field)` pair is already
-    /// watched. The runtime counterpart of [`watch`](Self::watch).
+    /// The `&mut` form of [`watch`](Self::watch). No-op if `(name, field)` is
+    /// already watched.
     pub fn observe(&mut self, name: impl Into<String>, field: TypographyField) {
         let watch = TypographyWatch {
             name: name.into(),
@@ -266,9 +241,6 @@ impl NoesisTypography {
     }
 }
 
-/// Reconcile every view's [`NoesisTypography`]: apply desired font-property
-/// writes when the component changed, then poll its watch list and emit
-/// [`NoesisTypographyChanged`] for each typed value that moved.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_typography_bridge(
     views: Query<(Entity, Ref<NoesisTypography>)>,
@@ -292,8 +264,7 @@ pub(crate) fn sync_typography_bridge(
     }
 }
 
-/// Wires the per-view typography bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the typography bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisTypographyPlugin;
 
 impl Plugin for NoesisTypographyPlugin {

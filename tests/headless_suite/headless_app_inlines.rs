@@ -1,4 +1,4 @@
-//! Integration test for the `NoesisInlines` bridge exercised through the headless harness.
+//! Integration test for the `NoesisInlines` bridge on the headless harness.
 //!
 //! Drives a representative inline tree on one `TextBlock` covering every builder arm
 //! (Run, Bold, Italic, Underline, Span, `LineBreak`, Hyperlink with `NavigateUri`), reads
@@ -23,11 +23,8 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Frame-gated stimulus: populate Body once the scene exists. Frames are instant
-// under run_until; the exit predicate is the read-back, not this count.
 const SET_AT_FRAME: usize = 10;
 
-// Two empty TextBlocks: the bridge target and an un-touched negative control.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="320" Height="96">
@@ -37,7 +34,6 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
 
 type Observed = Vec<(Entity, String, InlinesReadback)>;
 
-// Covers every builder arm; seven top-level inlines.
 fn inline_tree() -> Vec<InlineSpec> {
     vec![
         InlineSpec::run("Hello "),
@@ -53,7 +49,7 @@ fn inline_tree() -> Vec<InlineSpec> {
     ]
 }
 
-// Flattened text of `inline_tree()`: every Run's text, depth-first, no separators.
+// Every Run's text in `inline_tree()`, depth-first, no separators.
 const EXPECTED_TEXT: &str = "Hello World! [nestedlink end";
 const EXPECTED_TOP_LEVEL: usize = 7;
 
@@ -81,8 +77,7 @@ fn inlines_bridge_builds_textblock_content() {
                         size: UVec2::new(320, 96),
                         ..default()
                     },
-                    // Write-only bridge starts empty (no-op); filled after the
-                    // scene exists so its one-shot apply isn't lost.
+                    // Filled at SET_AT_FRAME, after the scene exists.
                     NoesisInlines::new(),
                 ))
                 .id();
@@ -100,8 +95,7 @@ fn inlines_bridge_builds_textblock_content() {
 
             if *frame == SET_AT_FRAME {
                 for mut inlines in &mut q {
-                    // Populate Body only; leave Other as the negative control.
-                    // Watch both so the control's emptiness is observed too.
+                    // Watch Other too so the negative control reports.
                     *inlines = NoesisInlines::new()
                         .set("Body", inline_tree())
                         .watching(["Body", "Other"]);
@@ -123,7 +117,6 @@ fn inlines_bridge_builds_textblock_content() {
             .map(|(_, _, v)| v.clone())
     };
 
-    // Exit once Body's built tree is live and the negative control has reported empty.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let converged = run_until(&mut app, 240, |_app| {

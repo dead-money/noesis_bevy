@@ -1,9 +1,9 @@
-//! Integration test for the routed-event bridge, end-to-end through the real `NoesisPlugin` (headless).
+//! Integration test for the routed-event bridge on the headless harness.
 //!
 //! Injects `MouseDown` via [`NoesisInputQueue`] and asserts that the resulting [`NoesisRoutedEvent`]
 //! carries the correct view entity, `RoutedEvent::MouseDown`, and a non-default arg snapshot
-//! (button + position). An all-`None` snapshot (never read from live args) would fail the arg
-//! assertions, catching a broken subscribe/reconcile or snapshot path.
+//! (button + position). A snapshot never read from the live args would be all `None` and
+//! fail.
 
 use std::sync::{Arc, Mutex};
 
@@ -57,7 +57,7 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Reconciles every frame once the scene exists; safe to attach at spawn.
+                    // Subscribes once the scene exists, so it can be attached at spawn.
                     NoesisEventWatch::new([EventWatchEntry::new("Target", RoutedEvent::MouseDown)]),
                 ))
                 .id();
@@ -73,8 +73,7 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
               mut events: MessageReader<NoesisRoutedEvent>| {
             *frame += 1;
 
-            // Pushed in Update so PostUpdate's apply pass drains it onto the View this same frame.
-            // MouseMove first: Noesis hit-tests on the last known pointer position.
+            // MouseMove first: Noesis hit-tests at the last known pointer position.
             if *frame == INJECT_AT_FRAME {
                 input.push(NoesisInputEvent::MouseMove { x: 32, y: 16 });
                 input.push(NoesisInputEvent::MouseButton {
@@ -97,8 +96,6 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
         },
     );
 
-    // Stop as soon as the injected MouseDown surfaces on Target with args, rather
-    // than padding a fixed frame count. The stimulus still fires at INJECT_AT_FRAME.
     let pred_view = Arc::clone(&view_entity);
     let pred_collected = Arc::clone(&collected);
     let observed_hit = run_until(&mut app, 240, move |_app| {
@@ -137,7 +134,6 @@ fn routed_event_watch_surfaces_mouse_down_with_args() {
         })
         .expect("expected a MouseDown routed event on Target tagged with our view");
 
-    // all-`None` default (snapshot never read from live args) would fail both.
     assert_eq!(
         hit.3,
         Some(MouseButton::Left),

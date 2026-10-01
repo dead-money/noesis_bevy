@@ -1,4 +1,4 @@
-//! End-to-end test of Primitive 1 (**panel = entity**) through the Bevy app.
+//! End-to-end test of panels as entities ([`UiPanel`]) on the headless harness.
 //!
 //! A host [`NoesisView`] scene carries a named `StackPanel` (`x:Name="Hud"`). Each
 //! [`UiPanel`] entity loads `hud.xaml` (a fragment binding `{Binding Health}` and
@@ -6,18 +6,16 @@
 //! `Score(i32)`) into one `DataContext`, and mounts into `Hud`.
 //!
 //! Three properties under test:
-//!   * **Aggregation.** One panel with *two* bound components drives *both*
-//!     bindings from one `DataContext` (neither overwrites the other).
-//!   * **Isolation.** Two panels of the *same* component set bind independently:
+//!   * Aggregation: one panel with two bound components drives both bindings from
+//!     one `DataContext`.
+//!   * Isolation: two panels with the same component set bind independently;
 //!     mutating panel A's `Health` leaves panel B's untouched.
-//!   * **Reap.** Despawning a panel removes its mounted child from the host
-//!     (`live_panels` drops back), with no leak / crash.
+//!   * Reap: despawning a panel unmounts it (`live_panels` drops from 2 to 1).
 //!
-//! Each panel's bound values are read back out of its fragment via
-//! [`NoesisPanelText`] (a fragment-scope `Text` watch), proving the bindings
-//! reached the UI. A mounted fragment keeps a private namescope, so the watch
-//! names are fragment-local (`"HealthText"`, `"ScoreText"`) and the read-back is
-//! keyed by the originating panel entity.
+//! Each panel's bound values are read back from its fragment via
+//! [`NoesisPanelText`]. A mounted fragment keeps a private namescope, so the watch
+//! names (`"HealthText"`, `"ScoreText"`) are fragment-local and each read-back
+//! carries its panel entity.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -30,44 +28,36 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Host scene: one named StackPanel that panels mount into.
 const HOST_XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="256" Height="256">
   <StackPanel x:Name="Hud"/>
 </Grid>"##;
 
-// Sub-XAML fragment, loaded once per panel; its DataContext is the panel entity's
-// aggregated components. Two bindings prove aggregation; each mounted copy gets
-// its own namescope, so "HealthText"/"ScoreText" resolve per-fragment.
 const HUD_XAML: &str = r##"<StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <TextBlock x:Name="HealthText" Text="{Binding Health}"/>
   <TextBlock x:Name="ScoreText" Text="{Binding Score}"/>
 </StackPanel>"##;
 
-/// Type-named newtype: binds `{Binding Health}`.
+/// Newtype named after its binding: `{Binding Health}`.
 #[derive(Component, NoesisViewModel)]
 struct Health(f32);
 
-/// Type-named newtype: binds `{Binding Score}`.
+/// Newtype named after its binding: `{Binding Score}`.
 #[derive(Component, NoesisViewModel)]
 struct Score(i32);
 
-// Frame-gated stimulus: heal panel A, then despawn panel B. Frames are instant
-// under run_until; the exit predicate is the terminal aggregate/isolate/reap
-// state, not a fixed frame count.
 const HEAL_AT: usize = 16;
 const DESPAWN_AT: usize = 30;
 
 #[test]
 fn panel_entity_aggregates_isolates_and_reaps() {
-    // Latest (name -> text) per panel entity, captured from the read-back.
+    // Latest text per element name, per panel entity.
     type Captured = HashMap<Entity, HashMap<String, String>>;
     let captured: Arc<Mutex<Captured>> = Arc::new(Mutex::new(HashMap::new()));
     let entities: Arc<Mutex<Option<(Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let baseline_live: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
-    // Live panel count, refreshed every frame once the despawn has fired.
     let final_live: Arc<Mutex<usize>> = Arc::new(Mutex::new(usize::MAX));
 
     let mut app = headless_app();
@@ -87,7 +77,6 @@ fn panel_entity_aggregates_isolates_and_reaps() {
                 Arc::new(HUD_XAML.as_bytes().to_vec()),
             );
 
-            // Host view: the shared parent View with the named Hud panel.
             let host = commands
                 .spawn((
                     Camera2d,
@@ -100,7 +89,6 @@ fn panel_entity_aggregates_isolates_and_reaps() {
                 ))
                 .id();
 
-            // Panel A: two bound components, one aggregated DataContext.
             let a = commands
                 .spawn((
                     UiPanel::new("hud.xaml").mount_into(host, "Hud"),
@@ -109,7 +97,6 @@ fn panel_entity_aggregates_isolates_and_reaps() {
                     Score(7),
                 ))
                 .id();
-            // Panel B: same component set, independent instance.
             let b = commands
                 .spawn((
                     UiPanel::new("hud.xaml").mount_into(host, "Hud"),
@@ -146,28 +133,23 @@ fn panel_entity_aggregates_isolates_and_reaps() {
 
             let (panel_a, panel_b) = entities_sys.lock().unwrap().expect("panels spawned");
 
-            // Mutate ONLY panel A's Health; panel B must stay isolated.
             if *frame == HEAL_AT {
                 if let Ok(mut hp) = healths.get_mut(panel_a) {
                     hp.0 = 25.0;
                 }
             }
 
-            // Record live panel count just before despawn (baseline = 2), then despawn.
             if *frame == DESPAWN_AT {
                 *baseline_sys.lock().unwrap() = diag.live_panels;
                 commands.entity(panel_b).despawn();
             }
 
-            // After the despawn, keep the post-reap count current for the predicate.
             if *frame > DESPAWN_AT {
                 *final_sys.lock().unwrap() = diag.live_panels;
             }
         },
     );
 
-    // Exit once aggregation + isolation reads have landed and the reap has settled
-    // (baseline 2 captured, live count back to 1).
     let pred_captured = Arc::clone(&captured);
     let pred_entities = Arc::clone(&entities);
     let pred_baseline = Arc::clone(&baseline_live);
@@ -206,7 +188,6 @@ fn panel_entity_aggregates_isolates_and_reaps() {
          reap) within 240 frames; A {a:?} B {b:?} baseline {baseline} final {final_count}",
     );
 
-    // Aggregation: panel A drove BOTH bindings from one DataContext.
     assert_eq!(
         a.get("HealthText").map(String::as_str),
         Some("25"),
@@ -218,7 +199,6 @@ fn panel_entity_aggregates_isolates_and_reaps() {
         "panel A Score binding never reached the UI; panel A reads {a:?}",
     );
 
-    // Isolation: mutating A's Health left B's Health (and Score) untouched.
     assert_eq!(
         b.get("HealthText").map(String::as_str),
         Some("50"),
@@ -230,7 +210,6 @@ fn panel_entity_aggregates_isolates_and_reaps() {
         "panel B Score binding never reached the UI; panel B reads {b:?}",
     );
 
-    // Reap: two panels live before despawn, one after.
     assert_eq!(baseline, 2, "expected 2 live panels before despawn");
     assert_eq!(
         final_count, 1,

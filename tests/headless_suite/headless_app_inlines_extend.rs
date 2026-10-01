@@ -16,9 +16,6 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Frame-gated stimulus: apply the initial tree once the scene exists, then
-// re-apply the replacement a few frames later. Frames are instant under
-// run_until; the exit predicate below is the terminal read-back, not a count.
 const APPLY_AT_FRAME: usize = 10;
 const REAPPLY_AT_FRAME: usize = 30;
 
@@ -28,7 +25,7 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <TextBlock x:Name="Body"/>
 </Grid>"##;
 
-// Rectangle, not a glyph element: avoids a font dependency.
+// A Rectangle, not text, so no font is needed.
 const CHILD_XAML: &str = r#"<Rectangle xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Width="10" Height="10" Fill="Red"/>"#;
 
 fn initial_tree() -> Vec<InlineSpec> {
@@ -72,7 +69,7 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
                         size: UVec2::new(320, 96),
                         ..default()
                     },
-                    // filled later; avoids losing the first apply to change-detection timing
+                    // Filled at APPLY_AT_FRAME, after the scene exists.
                     NoesisInlines::new(),
                 ))
                 .id();
@@ -112,8 +109,6 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
         },
     );
 
-    // Exit once both the initial tree ("firstX") and the re-applied replacement
-    // ("second Y") have been read back from the live TextBlock.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let converged = run_until(&mut app, 240, |_app| {
@@ -188,7 +183,6 @@ fn inlines_bridge_reapply_decorations_and_ui_container() {
         "InlineUIContainer hosts the parsed Button by pointer identity",
     );
 
-    // confirms clear-and-rebuild happened, not append or no-op
     assert_ne!(
         latest.text, "firstX",
         "re-apply must replace the initial content, not retain it",

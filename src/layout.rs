@@ -1,29 +1,27 @@
-//! Per-view `Margin` writes against named XAML elements: the positioning
-//! primitive for floating panels (context menus, popups, tooltips) that must
-//! follow gameplay coordinates.
+//! Sets `Margin` on named XAML elements, for positioning floating panels
+//! (context menus, popups, tooltips) at gameplay coordinates.
 //!
-//! Noesis's `Canvas.Left`/`Top` attached property isn't surfaced through the
-//! shim, but `FrameworkElement::Margin` is a plain dependency property. A
-//! `Left`/`Top`-anchored element with `Margin = (x, y, 0, 0)` lands its corner
-//! at `(x, y)`, so a single margin write positions a floating element anywhere
-//! in the view. Coordinates are Noesis *view* DIPs (the `NoesisScene::size`
-//! space), so a caller working in window pixels scales by `view_size /
-//! window_size` first, the same mapping the input bridge uses.
+//! An element aligned `Left`/`Top` with `Margin = (x, y, 0, 0)` puts its
+//! top-left corner at `(x, y)`, so one margin write places it anywhere in the
+//! view. Coordinates are DIPs: view pixels
+//! ([`NoesisView::size`](crate::NoesisView::size)) divided by
+//! [`NoesisView::scale`](crate::NoesisView::scale). From window logical
+//! pixels, multiply by `view_size / window_size` (as the
+//! [input bridge](crate::input#coordinates) does), then divide by the scale.
 //!
-//! Add a [`NoesisLayout`] component to the view's camera entity. Its `margins`
-//! map is the desired `Margin` per `x:Name`, applied to the view's elements
-//! whenever the component changes (Bevy change detection). This is a write-only
-//! bridge: there is no read-back message.
+//! Add a [`NoesisLayout`] to a [`NoesisView`](crate::NoesisView) camera
+//! entity or a [`UiPanel`](crate::UiPanel) entity. It is write-only: there is
+//! no read-back message.
 //!
-//! ```ignore
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use noesis_bevy::NoesisLayout;
+//! # fn place(mut commands: Commands, view: Entity, cursor_x: f32, cursor_y: f32) {
 //! commands.entity(view).insert(
 //!     NoesisLayout::new().margin("PartMenu", [cursor_x, cursor_y, 0.0, 0.0]),
 //! );
+//! # }
 //! ```
-//!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the margin
-//! writes against that view's live scene, no cross-world queues.
 
 use std::collections::HashMap;
 
@@ -31,43 +29,42 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Left, top, right, bottom offsets in view DIPs.
+/// `[left, top, right, bottom]` offsets in view DIPs (see the [module docs](self)).
 pub type Margin = [f32; 4];
 
-/// Per-view layout bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
+/// Element margins by `x:Name`, for a [`NoesisView`](crate::NoesisView) or
+/// [`UiPanel`](crate::UiPanel) entity.
+///
+/// Every margin is written when the component changes, after a scene rebuild,
+/// and when a panel mounts. Removing an entry leaves the element at its last
+/// margin. Unknown names log a warning.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisLayout {
-    /// Desired `Margin` per element `x:Name`, as `[left, top, right, bottom]` in
-    /// view DIPs. Written to the view's elements whenever this component changes.
+    /// `Margin` per element `x:Name`.
     pub margins: HashMap<String, Margin>,
 }
 
 impl NoesisLayout {
-    /// An empty layout with no element margins. Build one up with
-    /// [`margin`](Self::margin), then insert it on the [`NoesisView`](crate::NoesisView) camera.
+    /// An empty layout. Build it up with [`margin`](Self::margin).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: set element `name`'s `Margin` to `margin`
-    /// (`[left, top, right, bottom]`, view DIPs).
+    /// Sets element `name`'s `Margin`.
     #[must_use]
     pub fn margin(mut self, name: impl Into<String>, margin: Margin) -> Self {
         self.margins.insert(name.into(), margin);
         self
     }
 
-    /// Set element `name`'s `Margin` from a system holding `&mut NoesisLayout`.
-    /// The runtime counterpart of [`margin`](Self::margin): the next reconcile
-    /// applies it to the live element.
+    /// In-place form of [`margin`](Self::margin), for a system holding
+    /// `&mut NoesisLayout`.
     pub fn write(&mut self, name: impl Into<String>, margin: Margin) {
         self.margins.insert(name.into(), margin);
     }
 }
 
-/// Reconcile every view's [`NoesisLayout`]: apply desired margin writes when the
-/// component changed. Write-only, no read-back message.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_layout_bridge(
     views: Query<(Entity, Ref<NoesisLayout>)>,
@@ -86,14 +83,14 @@ pub(crate) fn sync_layout_bridge(
     }
 }
 
-/// Wires the per-view layout bridge. Added transitively by [`crate::NoesisPlugin`].
+/// Runs the [`NoesisLayout`] bridge in [`NoesisSet::Apply`].
+/// [`NoesisPlugin`](crate::NoesisPlugin) adds it.
 pub struct NoesisLayoutPlugin;
 
 impl Plugin for NoesisLayoutPlugin {
     fn build(&self, app: &mut App) {
-        // After `sync_panels` so a panel's `NoesisLayout` re-applies the same frame
-        // its fragment mounts (the bridge reads `panel_mounted_this_frame`, set by
-        // `sync_panels`); mirrors the focus bridge's F6 ordering.
+        // After `sync_panels`, which sets `panel_mounted_this_frame`, so a panel's
+        // margins apply the frame it mounts.
         app.add_systems(
             PostUpdate,
             sync_layout_bridge

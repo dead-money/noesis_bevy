@@ -1,19 +1,13 @@
-//! Per-view **generic routed-event** bridge: surface any `RoutedEvent` (mouse,
-//! key, focus, drag, manipulation, lifecycle bubbling, …) from named elements
-//! of a single [`crate::NoesisView`] as Bevy messages.
+//! Surfaces any Noesis `RoutedEvent` (mouse, key, focus, drag, manipulation,
+//! lifecycle) raised on named elements as Bevy messages and observer events.
 //!
-//! This is the general case of the [`crate::events`] click/keydown bridge: where
-//! `NoesisClickWatch` hard-codes `BaseButton::Click` and `NoesisKeyDownWatch`
-//! hard-codes `UIElement::KeyDown`, [`NoesisEventWatch`] subscribes an arbitrary
-//! `(x:Name, RoutedEvent)` pair through `noesis_runtime::events::subscribe_event`.
-//!
-//! Add a [`NoesisEventWatch`] component to the view's camera entity listing the
-//! `(name, event)` pairs to observe. The reconcile system keeps each view's live
-//! subscription set in sync; a fired event surfaces as a [`NoesisRoutedEvent`]
-//! message carrying the originating `view` entity, the element `name`, the
-//! [`RoutedEvent`] that fired, and a best-effort [`RoutedEventSnapshot`] of the
-//! event args (position / key / button / wheel / char / new-size) read out
-//! before the borrowed C++ args go out of scope.
+//! This is the general form of the [`crate::events`] click and keydown bridges,
+//! which each hard-code one event. Add a [`NoesisEventWatch`] to a
+//! [`NoesisView`](crate::NoesisView) camera (or to a
+//! [`UiPanel`](crate::panel::UiPanel) entity, to reach names inside the panel's
+//! fragment) listing `(x:Name, RoutedEvent)` pairs. Each fire produces one
+//! [`NoesisRoutedEvent`] message and one [`UiRoutedEvent`] observer trigger,
+//! both carrying a [`RoutedEventSnapshot`] of the event args.
 //!
 //! ```ignore
 //! use noesis_runtime::events::RoutedEvent;
@@ -27,18 +21,21 @@
 //!
 //! fn on_routed(mut events: MessageReader<NoesisRoutedEvent>) {
 //!     for ev in events.read() {
-//!         // ev.view: Entity, ev.name: String, ev.event: RoutedEvent,
-//!         // ev.args.position: Option<(f32, f32)>, …
+//!         // ev.view, ev.name, ev.event, ev.args.position, ...
 //!     }
 //! }
 //! ```
 //!
-//! Routed-event callbacks fire from inside Noesis's input pump while the view is
-//! driven (on whatever thread drains [`crate::input::NoesisInputQueue`] onto the
-//! `View`); they push `(view, name, event, snapshot)` onto a small `Arc<Mutex>`
-//! queue that the `PreUpdate` drain turns into messages the next frame. Every
-//! fire emits one message; there is no per-frame dedupe (unlike the read-watch
-//! text/dp bridges). A routed event *is* the change.
+//! Handlers run on the main thread, inside whichever Noesis call raises the
+//! event: input processing in [`NoesisSet::Apply`], the view update in
+//! [`NoesisSet::Drive`], or a bridge write. They queue the event, and a
+//! `PreUpdate` system emits the message and trigger on the next frame. There is
+//! no dedupe: every fire is delivered.
+//!
+//! The subscription set follows [`NoesisEventWatch::entries`] every frame. A
+//! name that isn't found is skipped with a warning, then retried (and warned
+//! about again) every frame until it resolves.
+//! Removing the component drops all of that entity's subscriptions.
 
 use std::sync::{Arc, Mutex};
 
@@ -48,25 +45,19 @@ pub use noesis_runtime::view::{Key, MouseButton};
 
 use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Event-arg snapshot
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Owned, `Send` snapshot of a routed event's arguments, captured inside the
-/// callback before the borrowed C++ [`EventArgs`] go out of scope. Every field
-/// is `None` for events that don't carry it (e.g. a `MouseEnter` has a
-/// `position` but no `key`); the un-applied default is therefore "all `None`",
-/// which makes a captured snapshot trivially distinguishable from a missing one.
+/// Owned copy of a routed event's arguments, taken inside the handler while the
+/// Noesis args are still alive. A field is `None` when the event doesn't carry
+/// it: a `MouseEnter` has a `position` but no `key`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoutedEventSnapshot {
-    /// Pointer position in the source element's coordinate space (mouse /
-    /// mouse-button / wheel events).
+    /// Pointer position in view coordinates, not relative to the element
+    /// (mouse, mouse-button and wheel events).
     pub position: Option<(f32, f32)>,
     /// Changed mouse button (mouse-button events).
     pub mouse_button: Option<MouseButton>,
     /// Wheel rotation delta, ~120 per notch (wheel events).
     pub wheel_delta: Option<i32>,
-    /// Pressed/released key, mapped to the safe [`Key`] mirror (key events).
+    /// Pressed or released key (key events).
     pub key: Option<Key>,
     /// Input character / code point (text-input events).
     pub text_char: Option<char>,
@@ -75,9 +66,6 @@ pub struct RoutedEventSnapshot {
 }
 
 impl RoutedEventSnapshot {
-    /// Read every typed accessor off the borrowed live args into an owned,
-    /// `Send` snapshot. Called from the routed-event callback while `args` is
-    /// still valid. Pure reads; never retains the borrow or any raw pointer.
     #[must_use]
     pub(crate) fn capture(args: &EventArgs) -> Self {
         Self {
@@ -91,10 +79,6 @@ impl RoutedEventSnapshot {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Message + watch component
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Emitted when a watched element raises its subscribed [`RoutedEvent`].
 #[derive(Message, Debug, Clone)]
 pub struct NoesisRoutedEvent {
@@ -104,17 +88,17 @@ pub struct NoesisRoutedEvent {
     pub name: String,
     /// Which routed event fired.
     pub event: RoutedEvent,
-    /// Best-effort snapshot of the event args (all-`None` for events that carry
-    /// nothing we surface).
+    /// The event args. All `None` for events that carry none of the captured
+    /// fields.
     pub args: RoutedEventSnapshot,
 }
 
-/// Observer-facing twin of [`NoesisRoutedEvent`]: a routed event surfaced as an
-/// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
-/// entity by default). Read the target with `On::event_target`.
+/// Observer form of [`NoesisRoutedEvent`], triggered on the watch entry's
+/// [`target`](EventWatchEntry::target). Without a target it goes to the entity
+/// holding the [`NoesisEventWatch`]: the view, or the panel.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct UiRoutedEvent {
-    /// Trigger target: the watch entry's `target` (the view entity by default).
+    /// Trigger target: the entry's `target`, else the watching view or panel.
     pub entity: Entity,
     /// The [`NoesisView`](crate::NoesisView) entity the event originated in.
     pub view: Entity,
@@ -122,32 +106,27 @@ pub struct UiRoutedEvent {
     pub name: String,
     /// Which routed event fired.
     pub event: RoutedEvent,
-    /// Best-effort snapshot of the event args.
+    /// The event args.
     pub args: RoutedEventSnapshot,
 }
 
-/// One entry in [`NoesisEventWatch`]: an element `x:Name`, the [`RoutedEvent`] to
-/// subscribe, and two routing flags.
-///
-/// * `mark_handled`: when `true`, the callback returns `handled = true`,
-///   marking the routed event handled and stopping bubbling/tunneling past this
-///   element (e.g. swallow a `PreviewKeyDown` so it never reaches a `TextBox`).
-///   Default `false`: observe without consuming.
-/// * `handled_too`: forwarded to `subscribe_event`; when `true`, this handler
-///   still runs even if a prior handler on the *same* element already marked the
-///   event handled. Default `false`.
+/// One subscription in [`NoesisEventWatch`]: an element `x:Name` (may be
+/// scope-qualified, `"Host/Leaf"`), the [`RoutedEvent`] to watch, and routing
+/// options. [`new`](Self::new) observes without consuming.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventWatchEntry {
     /// `x:Name` of the element to attach the handler to.
     pub name: String,
     /// Routed event to subscribe on that element.
     pub event: RoutedEvent,
-    /// Whether the callback marks the event handled, stopping further routing.
+    /// Mark the event handled when it fires, stopping it from bubbling or
+    /// tunneling past this element (swallow a `PreviewKeyDown` so it never
+    /// reaches a `TextBox`).
     pub mark_handled: bool,
-    /// Whether the handler runs even after a prior same-element handler marked
-    /// the event handled.
+    /// Run even when an earlier handler already marked the event handled.
     pub handled_too: bool,
-    /// Entity the fired [`UiRoutedEvent`] targets; `None` → the view entity.
+    /// Entity the [`UiRoutedEvent`] is triggered on. `None` means the entity
+    /// holding the [`NoesisEventWatch`].
     pub target: Option<Entity>,
 }
 
@@ -170,16 +149,16 @@ impl EventWatchEntry {
         self
     }
 
-    /// Builder: also run when a prior same-element handler already marked the
-    /// event handled.
+    /// Builder: also run when an earlier handler already marked the event
+    /// handled.
     #[must_use]
     pub fn handled_too(mut self) -> Self {
         self.handled_too = true;
         self
     }
 
-    /// Builder: target the fired [`UiRoutedEvent`] at `target` instead of the
-    /// view.
+    /// Builder: trigger the [`UiRoutedEvent`] on `target` instead of the
+    /// watching entity.
     #[must_use]
     pub fn target(mut self, target: Entity) -> Self {
         self.target = Some(target);
@@ -187,14 +166,13 @@ impl EventWatchEntry {
     }
 }
 
-/// Per-view component: `(x:Name, RoutedEvent)` pairs to subscribe routed-event
-/// handlers against. Add to a [`NoesisView`](crate::NoesisView) entity. Entries
-/// are diff-synced each frame: adding installs a subscription, removing tears
-/// it down. Changing an entry's `mark_handled`/`handled_too` re-binds it (the
-/// flags are captured by the callback at subscription time).
+/// Routed events to watch on a [`NoesisView`](crate::NoesisView) or
+/// [`UiPanel`](crate::panel::UiPanel) entity. Synced every frame: adding an
+/// entry subscribes, removing one unsubscribes, and changing an entry's flags or
+/// target re-subscribes it.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisEventWatch {
-    /// The `(x:Name, RoutedEvent)` pairs to keep subscribed for this view.
+    /// Subscriptions to keep live.
     pub entries: Vec<EventWatchEntry>,
 }
 
@@ -207,20 +185,14 @@ impl NoesisEventWatch {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Queue (callback → drain)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Queue between the routed-event callbacks (fired from the input pump) and the
-/// drain system. `Clone` is an `Arc` clone. Entries carry the originating view
-/// entity, the element name, the event, and the captured arg snapshot.
+/// Events queued by routed-event handlers until [`drain_routed_event_queue`]
+/// delivers them. `Clone` shares the queue.
 #[derive(Resource, Clone, Default)]
 pub struct SharedRoutedEventQueue(
     pub(crate) Arc<Mutex<Vec<(Entity, Entity, String, RoutedEvent, RoutedEventSnapshot)>>>,
 );
 
 impl SharedRoutedEventQueue {
-    /// Push `(view, target, name, event, snapshot)` from a routed-event callback.
     pub(crate) fn push(
         &self,
         view: Entity,
@@ -245,8 +217,8 @@ impl SharedRoutedEventQueue {
     }
 }
 
-/// Drain the routed-event queue: write a [`NoesisRoutedEvent`] message **and**
-/// trigger a [`UiRoutedEvent`] `EntityEvent` (one of each per fire).
+/// Delivers queued events: one [`NoesisRoutedEvent`] message and one
+/// [`UiRoutedEvent`] trigger per fire. Runs in `PreUpdate`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_routed_event_queue(
     queue: Res<SharedRoutedEventQueue>,
@@ -270,11 +242,6 @@ pub fn drain_routed_event_queue(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Reconcile system
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisEventWatch`] against its live subscription set.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_event_subscriptions(
     views: Query<(Entity, &NoesisEventWatch)>,
@@ -289,18 +256,13 @@ pub(crate) fn sync_event_subscriptions(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
 impl ReapOnRemove for NoesisEventWatch {
     fn reap(state: &mut NoesisRenderState, entity: Entity) {
         state.reap_event_watch_for(entity);
     }
 }
 
-/// Wires the per-view generic routed-event bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the routed-event bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisRoutedEventsPlugin;
 
 impl Plugin for NoesisRoutedEventsPlugin {

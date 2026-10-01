@@ -1,33 +1,29 @@
-//! Tiny GLSL-style `#ifdef` / `#ifndef` / `#endif` preprocessor for WGSL.
+//! Minimal `#ifdef` / `#ifndef` / `#endif` preprocessor for WGSL.
 //!
-//! WGSL has no native preprocessor. We borrow Noesis's GL-shader convention
-//! of one source file with `#ifdef`-gated branches, run a stripping pass with
-//! a known feature set, and feed the result to `naga`. This is enough for the
-//! `noesis.wgsl` template; if the shader matrix grows complex enough to want
-//! `#elif` / `#define` value substitution we'd swap to `naga_oil`.
+//! WGSL has no preprocessor. `noesis.wgsl` follows Noesis's GL shader
+//! convention instead: one source with `#ifdef`-gated branches, stripped
+//! against a define set before it reaches `naga`.
 //!
-//! Conventions:
-//! - Directive is the first non-whitespace text on its own line.
-//! - Supported: `#ifdef NAME`, `#ifndef NAME`, `#endif`. Nesting is fine.
-//! - Anything between an inactive `#ifdef`/`#ifndef` and its matching `#endif`
-//!   is dropped. Trailing whitespace on the directive is ignored.
-//! - Unmatched `#endif` panics (caller bug).
+//! Supported subset:
+//! - A directive is the first non-whitespace text on its own line, followed
+//!   by one space and the name. Surrounding whitespace on the name is ignored.
+//! - `#ifdef NAME`, `#ifndef NAME`, and `#endif`, nested to any depth. No
+//!   `#else`, `#elif`, or `#define`.
+//! - Directive lines and every line inside an inactive branch are dropped.
 
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 
-/// Strip `#ifdef`/`#ifndef`/`#endif` branches from WGSL source according to
-/// `defines`. See module docs for the supported subset.
+/// Returns `source` with inactive branches removed for the given `defines`.
+/// Every output line ends in `\n`.
 ///
 /// # Panics
 ///
-/// Panics on a malformed input: an `#endif` without a matching open
-/// directive, or an unterminated `#ifdef`/`#ifndef` at end of source. Both
-/// indicate a bug in the embedded shader template, not user input.
+/// Panics on an `#endif` with no open directive, or an `#ifdef`/`#ifndef`
+/// still open at end of source.
 #[must_use]
 pub fn preprocess<S: BuildHasher>(source: &str, defines: &HashSet<&'static str, S>) -> String {
     let mut out = String::with_capacity(source.len());
-    // Per-branch "emitting?" flags; outer scope always emits.
     let mut stack: Vec<bool> = vec![true];
 
     for (lineno, line) in source.lines().enumerate() {

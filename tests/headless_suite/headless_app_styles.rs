@@ -1,12 +1,12 @@
-//! Integration test for the `NoesisStyles` bridge (headless, pipelined rendering on).
+//! Integration test for the `NoesisStyles` bridge on the headless harness.
 //!
 //! Asserts via [`NoesisDp`] watches:
 //!   - `Styled.Opacity`: Style Setter Opacity=0.5 drives it from the default 1.0 to 0.5.
 //!   - `Styled.Width`: Style Setter Width=40 drives it from unset to 40.
 //!   - `Plain.Opacity`: unstyled sibling stays at 1.0 (negative control for wrong-entity routing).
 //!
-//! `NoesisStyles` starts empty and is filled at frame 10, after the scene exists.
-//! `set_style` applies only on change-detection; a style is sealed on first apply.
+//! `NoesisStyles` starts empty and is filled at `SET_AT_FRAME`, after the scene
+//! exists. The bridge applies on change (or scene rebuild).
 
 use std::sync::{Arc, Mutex};
 
@@ -60,8 +60,6 @@ fn code_built_style_applies_to_named_element() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Starts empty (no-op); filled in after the scene exists so
-                    // the one-shot style apply isn't lost.
                     NoesisStyles::new(),
                     watcher(),
                 ))
@@ -100,8 +98,6 @@ fn code_built_style_applies_to_named_element() {
         },
     );
 
-    // Stop once the setters have driven Styled and the negative control read back,
-    // rather than padding a fixed frame count. The style apply still fires at SET_AT_FRAME.
     let pred_view = Arc::clone(&view_entity);
     let pred_observed = Arc::clone(&observed);
     let converged = run_until(&mut app, 240, move |_app| {
@@ -147,8 +143,6 @@ fn code_built_style_applies_to_named_element() {
         Some(DpValue::F32(40.0)),
         "setter: a Style with Setter Width=40 should drive Styled.Width to 40 (no local value)",
     );
-    // Negative control: the style targets one element only; a wrong-entity-routing
-    // regression would flip Plain too.
     assert_eq!(
         latest("Plain", "Opacity"),
         Some(DpValue::F32(1.0)),

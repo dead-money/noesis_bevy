@@ -1,4 +1,4 @@
-//! Integration tests for the [`NoesisTransform`] bridge, run headless through the real `NoesisPlugin`.
+//! Integration tests for the [`NoesisTransform`] bridge, run headless through the real bridge plugins.
 //!
 //! `RenderTransform` is post-layout (no `ActualWidth`/`ActualHeight` change) and lives on a nested
 //! `CompositeTransform` object, not reachable through `NoesisDp`. The bridge reads the element's
@@ -8,8 +8,8 @@
 //! round-trip through [`NoesisTransformChanged`].
 //! Negative: `Other` receives no transform and must never appear in any change event.
 //!
-//! `NoesisTransform` starts empty and is assigned at frame `SET_AT_FRAME`, after the scene exists.
-//! Assigning before the view is live drops the one-shot change-detection apply.
+//! `NoesisTransform` starts empty and is assigned at `SET_AT_FRAME`, after the scene is live, so
+//! the test exercises a change-driven apply rather than the scene-build re-apply.
 
 use std::sync::{Arc, Mutex};
 
@@ -20,8 +20,6 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Stimulus timing: assign after the scene is live (a pre-scene write loses the
-// one-shot change-detection apply). The run's exit is the read-back predicate.
 const SET_AT_FRAME: usize = 10;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -57,8 +55,6 @@ fn render_transform_bridge_reads_back_assigned_transform() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Starts empty (no-op); filled after the scene exists so the
-                    // one-shot apply isn't lost.
                     NoesisTransform::new(),
                 ))
                 .id();
@@ -92,8 +88,6 @@ fn render_transform_bridge_reads_back_assigned_transform() {
         },
     );
 
-    // Exit as soon as Box has reported its assigned RenderTransform back, not
-    // after a padded frame count.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let read_back = run_until(&mut app, 240, move |_app| {

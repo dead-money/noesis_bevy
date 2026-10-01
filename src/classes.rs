@@ -1,51 +1,50 @@
-//! Register Rust-backed XAML classes (`<myns:Foo>`) with Noesis from Bevy systems.
+//! Register Rust-backed XAML classes (`<myns:Foo>`) from Bevy systems.
 //!
-//! The resulting [`ClassRegistration`] is owned by the Bevy resource lifecycle:
-//! it drops at app teardown, before [`noesis_runtime::shutdown`] runs via
-//! `NoesisShutdownGuard`.
+//! The class machinery ([`ClassBuilder`], [`ClassRegistration`], [`Instance`],
+//! [`PropertyChangeHandler`], [`PropertyValue`]) comes from
+//! [`noesis_runtime::classes`] and is re-exported here. This module adds
+//! [`NoesisClassRegistry`], a non-send resource that keeps registrations alive
+//! for the app's lifetime. [`crate::NoesisPlugin`] installs it.
 //!
-//! The class machinery (`ClassBuilder`, `ClassRegistration`, `Instance`,
-//! `PropertyChangeHandler`, `PropertyValue`) lives in [`noesis_runtime::classes`]
-//! and is re-exported here. The Bevy side adds two pieces:
-//!   * [`NoesisClassPlugin`] installs the registry resource.
-//!   * [`NoesisClassRegistry`] owns the live `ClassRegistration` instances. Bevy
-//!     0.18 runs resource cleanup before the `!Send` `NoesisShutdownGuard` Drop,
-//!     so registrations release before Noesis shuts down.
+//! Register classes in a `Startup` system, before any XAML that uses them
+//! loads. [`ClassBuilder::register`] returns `None` if the name is already
+//! registered.
 //!
-//! # Property-change threading
+//! # Property-change callbacks
 //!
-//! Callbacks fire from inside Noesis's property pump, on the **main thread**
-//! that drives the View. The handler runs while Noesis (and the
-//! `NoesisRenderState` that owns it) is borrowed, so it must not reenter the
-//! Bevy `World`; queue any ECS mutations for a later system. For purely-derived
-//! properties (e.g. `NineSlicer` computing viewbox rects from `SliceThickness`),
-//! the handler can do the math and call `Instance::set_*` inline. Handlers are
-//! `Send`-bound by the FFI.
+//! [`PropertyChangeHandler::on_changed`] runs on the main thread, inside
+//! Noesis's property system, while the crate holds its Noesis state borrowed.
+//! It must not reach back into the Bevy `World`; queue ECS work for a later
+//! system instead. Pure derivations (computing one property from another) can
+//! write back inline through the [`Instance`] setters. Handlers must be `Send`.
 //!
-//! # Usage
+//! # Example
 //!
 //! ```ignore
 //! use bevy::prelude::*;
 //! use noesis_bevy::classes::{
-//!     ClassBase, ClassBuilder, NoesisClassRegistry, PropType,
-//!     PropertyChangeHandler, PropertyValue, Instance,
+//!     ClassBase, ClassBuilder, Instance, NoesisClassRegistry, PropType,
+//!     PropertyChangeHandler, PropertyValue,
 //! };
 //!
-//! struct NineSlicerHandler { source_idx: u32, thickness_idx: u32 /* ... */ }
+//! struct NineSlicerHandler { thickness_idx: u32 }
+//!
 //! impl PropertyChangeHandler for NineSlicerHandler {
-//!     fn on_changed(&mut self, instance: Instance, idx: u32, value: PropertyValue<'_>) {
+//!     fn on_changed(&self, instance: Instance, idx: u32, value: PropertyValue<'_>) {
 //!         if idx == self.thickness_idx {
-//!             // Recompute derived properties and write back via instance.set_rect(...)
+//!             // Recompute derived properties and write them back through `instance`.
 //!         }
 //!     }
 //! }
 //!
 //! fn register(mut registry: NonSendMut<NoesisClassRegistry>) {
-//!     let mut b = ClassBuilder::new("AOR.NineSlicer", ClassBase::ContentControl,
-//!                                   NineSlicerHandler { /* ... */ });
+//!     let mut b = ClassBuilder::new(
+//!         "AOR.NineSlicer",
+//!         ClassBase::ContentControl,
+//!         NineSlicerHandler { thickness_idx: 1 },
+//!     );
 //!     b.add_property("Source", PropType::ImageSource);
 //!     b.add_property("SliceThickness", PropType::Thickness);
-//!     // ...
 //!     if let Some(reg) = b.register() {
 //!         registry.add(reg);
 //!     }
@@ -60,26 +59,22 @@ pub use noesis_runtime::classes::{
 };
 pub use noesis_runtime::ffi::{ClassBase, PropType};
 
-/// Owns the live [`ClassRegistration`] instances for the app lifetime.
-/// Insert finished registrations from a `Startup` system; the resource
-/// drops them at app teardown, before [`noesis_runtime::shutdown`] runs.
+/// Keeps [`ClassRegistration`]s alive for the app's lifetime. Access it with
+/// `NonSendMut<NoesisClassRegistry>`: registrations hold `!Send` Noesis handles.
 ///
-/// Add registrations BEFORE any XAML referencing them is loaded: a `Startup`
-/// system ordered after [`crate::NoesisPlugin`] initialization (Bevy's default
-/// startup order suffices unless you override it).
-///
-/// Non-send resource: [`ClassRegistration`] holds `!Send`/`!Sync` Noesis handles,
-/// so it is stored via `init_non_send` and accessed through `NonSendMut`.
-/// Class registration is a main-thread, startup-time concern anyway, since Noesis
-/// is thread-affine.
+/// Add registrations from a `Startup` system, before any XAML that references
+/// the class loads. They are released at app teardown, before Noesis shuts down:
+/// Bevy 0.18 drops non-send resources in insertion order, and this one is
+/// inserted at plugin build, before the render state whose `Drop` calls
+/// [`noesis_runtime::shutdown`].
 #[derive(Default)]
 pub struct NoesisClassRegistry {
     registrations: Vec<ClassRegistration>,
 }
 
 impl NoesisClassRegistry {
-    /// Take ownership of a [`ClassRegistration`]. Holds for the resource's
-    /// lifetime (= app lifetime in normal use).
+    /// Keep `registration` alive until app teardown. A registration dropped
+    /// earlier unregisters its class.
     pub fn add(&mut self, registration: ClassRegistration) {
         self.registrations.push(registration);
     }
@@ -97,13 +92,8 @@ impl NoesisClassRegistry {
     }
 }
 
-/// Plugin that installs [`NoesisClassRegistry`]. Add **after**
-/// [`crate::NoesisPlugin`] so [`noesis_runtime::init`] has already run by the
-/// time consumers register classes from `Startup` systems.
-///
-/// The plugin itself is intentionally minimal: registration is a startup-time
-/// concern and class definitions are consumer-specific, so the plugin's only
-/// job is to give consumers a well-known place to stash their registrations.
+/// Installs [`NoesisClassRegistry`]. Added by [`crate::NoesisPlugin`]; adding it
+/// again panics.
 pub struct NoesisClassPlugin;
 
 impl Plugin for NoesisClassPlugin {

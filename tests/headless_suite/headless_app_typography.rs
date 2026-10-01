@@ -4,8 +4,9 @@
 //! FontWeight/Style/Stretch are Noesis enum DPs that do not round-trip through
 //! `NoesisDp::get_i32`; the typed `NoesisTypography` getters are the only read path.
 //!
-//! `NoesisTypography` spawns empty and is populated after the scene builds because
-//! Bevy change-detection drops a write made before the view exists.
+//! `NoesisTypography` spawns empty and is populated at `SET_AT_FRAME`, after the
+//! scene is live, so the test exercises a change-driven apply rather than the
+//! scene-build re-apply.
 
 use std::sync::{Arc, Mutex};
 
@@ -73,7 +74,6 @@ fn typography_bridge_applies_all_font_properties() {
                         size: UVec2::new(200, 64),
                         ..default()
                     },
-                    // Empty on spawn; populated after scene build so the one-shot apply isn't lost.
                     NoesisTypography::new(),
                     NoesisDp::new(),
                 ))
@@ -101,7 +101,7 @@ fn typography_bridge_applies_all_font_properties() {
                         .font_weight("Title", FontWeight::Bold)
                         .font_style("Title", FontStyle::Italic)
                         .font_stretch("Title", FontStretch::Condensed);
-                    // Re-assign triggers change detection, re-activating the poll list.
+                    // The fresh builder above has no watches; add them.
                     typo.watch = typo_watcher().watch;
                     *dp = dp_watcher();
                 }

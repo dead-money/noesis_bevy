@@ -1,4 +1,4 @@
-//! Integration test for [`NoesisShapes`] through the real `NoesisPlugin` pipeline (headless).
+//! Integration test for [`NoesisShapes`] on the headless harness.
 //!
 //! Shapes have no read-back message, so the effect is observed via a [`NoesisDp`] watch on
 //! `ActualWidth`/`ActualHeight`: a size-to-content `Border` adopts the shape's measured size.
@@ -17,7 +17,7 @@ use crate::common::{headless_app, run_until};
 
 const SET_AT_FRAME: usize = 10;
 
-// Left/Top alignment causes each Border to shrink to content; explicit size would swallow the shape measurement.
+// Left/Top alignment sizes each Border to its content; an explicit size would hide the shape's.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="200" Height="120">
@@ -58,7 +58,7 @@ fn shapes_bridge_sizes_its_container() {
                         size: UVec2::new(200, 120),
                         ..default()
                     },
-                    // Filled at SET_AT_FRAME so the first apply fires after the scene exists.
+                    // Filled at SET_AT_FRAME, after the scene exists.
                     NoesisShapes::new(),
                     watcher(),
                 ))
@@ -92,8 +92,6 @@ fn shapes_bridge_sizes_its_container() {
         },
     );
 
-    // Stop once the shape has resized its host and the negative control read back,
-    // rather than padding a fixed frame count. The stimulus still fires at SET_AT_FRAME.
     let pred_view = Arc::clone(&view_entity);
     let pred_observed = Arc::clone(&observed);
     let converged = run_until(&mut app, 240, move |_app| {
@@ -141,8 +139,6 @@ fn shapes_bridge_sizes_its_container() {
         "shapes: a 24-tall Rectangle assigned to the Border should size it to ActualHeight 24 \
          (default 0)",
     );
-    // Negative control: the bridge must touch only its target. A wrong-name or
-    // build-into-every-container regression would size Empty too.
     assert_eq!(
         latest("Empty", "ActualWidth"),
         Some(DpValue::F32(0.0)),

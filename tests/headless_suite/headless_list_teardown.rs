@@ -1,22 +1,21 @@
-//! Despawn-teardown regression for **Primitive 2 (list = query)**: despawning a
-//! [`NoesisView`] that owns a [`UiList`] must reap that view's `ListBinding` *and*
-//! despawn the (now-separate) list entity, not leak either.
+//! Despawn-teardown regression for Primitive 2 (list = query): despawning a
+//! [`NoesisView`] that owns a [`UiList`] must reap that view's `ListBinding` and
+//! despawn the separate list entity, not leak either.
 //!
-//! Since the list is its own entity (naming its view), despawning the view does not
-//! despawn the list entity automatically; `despawn_orphan_lists` does. This asserts
-//! both halves: the render `ListBinding` drains and the `UiList` entity is gone.
+//! The list is its own entity naming its view, so despawning the view does not
+//! despawn it; `despawn_orphan_lists` does. This asserts both halves: the
+//! `ListBinding` drains and the `UiList` entity is gone.
 //!
-//! A `ListBinding` holds Noesis refcounted state in a strict drop order: the
-//! `ObservableCollection` (releasing its refs to the row instances) → each realized
-//! row `ClassInstance` (our `+1`) → the row-class `ClassRegistration` (which
-//! unregisters the class, and must outlive every instance of it). That ordering is
-//! one of the project's hard invariants ("drop order matters"); a regression
-//! (class unregistered before its instances release) would be use-after-free-adjacent
-//! and could ship silently because no test despawned a list-owning view.
+//! A `ListBinding` holds refcounted Noesis state in a strict drop order: the
+//! `ObservableCollection` (releasing its refs to the row instances), then each
+//! realized row `ClassInstance` (our `+1`), then the `ClassRegistration`, which
+//! unregisters the class and must outlive every instance. Getting that order
+//! wrong is a use-after-free risk that only shows when a list-owning view is
+//! despawned.
 //!
-//! This drives a view with a `ListBox` + a few entity-rows until its binding is
-//! live (`live_lists == 1`), despawns the view, and asserts the live-list count
-//! drains back to 0; the `teardown_for` reap path ran in refcount order.
+//! Drives a view with a `ListBox` and a few entity rows until its binding is live
+//! (`live_lists == 1`), despawns the view, and asserts the live-list count drains
+//! back to 0 through the `teardown_for` reap path.
 //!
 //! Font-free XAML so the scene builds without a font folder.
 
@@ -102,8 +101,8 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
               views: Query<Entity, With<NoesisView>>,
               lists: Query<(), With<UiList>>,
               mut commands: Commands| {
-            // Phase 0 (pre == None): wait for the binding to go live, snapshot the
-            // live count, then despawn the view. Phase 1: track the drained counts.
+            // Until `pre` is set: wait for the binding to go live, snapshot the live
+            // count, then despawn the view. Afterwards: track the drained counts.
             if pre_sys.lock().unwrap().is_none() {
                 if diag.live_lists >= 1 {
                     *pre_sys.lock().unwrap() = Some(diag.live_lists);
@@ -120,9 +119,6 @@ fn despawning_a_list_owning_view_reaps_its_binding() {
         },
     );
 
-    // Exit once the binding has gone live (pre captured) and, after despawn, both the
-    // live-list binding count and the UiList entity count drained to 0 (binding
-    // reaped in refcount order; list entity despawned with its view).
     let pred_pre = Arc::clone(&pre);
     let pred_post = Arc::clone(&post);
     let pred_post_ents = Arc::clone(&post_list_entities);

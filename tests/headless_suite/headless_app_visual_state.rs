@@ -1,12 +1,12 @@
 //! Integration test for the `NoesisVisualState` bridge (`VisualStateManager::GoToState`),
-//! run end-to-end through the Noesis driving pipeline (headless, no render graph).
+//! run headless through the real bridge plugins (no render graph).
 //!
 //! The bridge has no read-back message, so its effect is observed via a `NoesisDp` watch on
 //! `ActualWidth`. Driving "Widget" to "Big" must yield `ActualWidth = 50`; "Other" is left
 //! undriven and must stay at `10` (negative control for wrong-entity routing regressions).
 //!
-//! The write-only component starts empty and is filled after the scene is built, because it
-//! applies only on change-detection and mutating it before the view exists drops the apply.
+//! The write-only component starts empty and is filled once the scene is live, so the test
+//! exercises a change-driven apply rather than the scene-build re-apply.
 
 use std::sync::{Arc, Mutex};
 
@@ -82,7 +82,6 @@ fn visual_state_bridge_transitions_named_control() {
                         size: UVec2::new(64, 64),
                         ..default()
                     },
-                    // Starts empty; filled after the scene exists so the one-shot apply isn't dropped.
                     NoesisVisualState::new(),
                     watcher(),
                 ))
@@ -105,9 +104,7 @@ fn visual_state_bridge_transitions_named_control() {
                     ev.value.clone(),
                 ));
             }
-            // Apply once the scene is live (the watcher has reported at least one
-            // value): mutating the write-only component before the view exists
-            // drops the one-shot apply.
+            // The first watcher report means the scene is live.
             if !*applied && !observed_sys.lock().unwrap().is_empty() {
                 for mut vs in &mut q {
                     // Snap (no transition) Widget -> "Big"; leave Other alone.

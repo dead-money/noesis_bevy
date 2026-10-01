@@ -1,25 +1,19 @@
-//! Generalized XAML viewer: load a single `.xaml` file or a directory of
-//! them and page through scenes interactively.
+//! XAML viewer: loads one `.xaml` file or a directory of them and pages through
+//! the scenes.
 //!
-//! Cycle between scenes with `[` / `]`, jump with `Home` / `End`, reload the
-//! current one with `R`, and trigger a screenshot with `S`. Build with
-//! `--features hot_reload` for edit-and-save live editing: any scene file
-//! changing on disk reloads automatically, editing a `Source="…"` dictionary
-//! reloads every scene that merges it, and (for images loaded from `assets/`)
-//! re-saving an image re-sizes and repaints it. With
-//! `NOESIS_VIEWER_EXIT_AFTER=1` set, it waits a few frames, shoots the
-//! configured target (`NOESIS_SCREENSHOT`) and exits, for headless eval.
+//! Keys: `[` / `]` previous/next scene, `Home` / `End` first/last, `R` reloads the
+//! current file from disk, `P` toggles PPAA ([`NoesisView::ppaa`], applied live
+//! without a rebuild), `S` takes a screenshot.
 //!
-//! `P` toggles PPAA (Noesis per-primitive edge anti-aliasing) by flipping
-//! `NoesisScene.ppaa`; the render-world picks the change up per frame via
-//! `apply_live_scene_flags` and calls `View::set_flags` only on change.
+//! Build with `--features hot_reload` to reload on save: a changed scene file
+//! reloads, editing a `Source="…"` dictionary reloads every scene that merges it,
+//! and re-saving an image loaded from `assets/` re-sizes and repaints it.
 //!
-//! When `NOESIS_VIEWER_THEME=<name>` is set (e.g. `DarkBlue`, `LightRed`),
-//! the viewer stages the Noesis SDK's theme XAMLs and PT Root UI fonts
-//! from `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/` into the
-//! XAML + font registries, and points `NoesisScene.application_resources`
-//! at `NoesisTheme.<name>.xaml` so unstyled controls pick up real
-//! `ControlTemplates` instead of Noesis's magenta placeholders.
+//! `NOESIS_VIEWER_THEME=<name>` (e.g. `DarkBlue`, `LightRed`) stages the SDK's
+//! theme XAML and fonts from `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`
+//! and sets [`NoesisView::application_resources`] to `NoesisTheme.<name>.xaml`,
+//! so unstyled controls get real `ControlTemplate`s instead of Noesis's magenta
+//! placeholders.
 //!
 //! ```bash
 //! # Single file
@@ -28,21 +22,24 @@
 //! # Directory (cycle with [/])
 //! cargo run -p noesis_bevy --example xaml_viewer assets/viewer_samples
 //!
-//! # Point at the SDK's Data/ (symlink assets/Data -> $NOESIS_SDK_DIR/Data first)
+//! # The SDK's Data/ (symlink assets/Data -> $NOESIS_SDK_DIR/Data first)
 //! cargo run -p noesis_bevy --example xaml_viewer assets/Data
 //!
-//! # Headless screenshot for CI / visual eval
+//! # Headless screenshot
 //! NOESIS_VIEWER_EXIT_AFTER=1 NOESIS_SCREENSHOT=out.png \
 //!   cargo run -p noesis_bevy --example xaml_viewer assets/viewer_samples/01_button_hover.xaml
 //! ```
 //!
 //! Environment:
-//! - `NOESIS_VIEWER_PATH`:        fallback for the positional arg.
-//! - `NOESIS_SCREENSHOT`:         screenshot output path (default: `<stem>.png`).
-//! - `NOESIS_SCREENSHOT_FRAMES`:  frame to shoot on in headless mode (default 120).
-//! - `NOESIS_VIEWER_EXIT_AFTER`:  any value takes one screenshot and exits.
-//! - `NOESIS_VIEWER_SIZE`:        `WxH` override for the Noesis view size
-//!   (default: match the window's initial physical size).
+//! - `NOESIS_VIEWER_PATH`: fallback for the positional argument (default
+//!   `assets/viewer_samples`).
+//! - `NOESIS_VIEWER_THEME`: SDK theme name to stage (see above).
+//! - `NOESIS_VIEWER_IMAGES`: comma-separated image paths under `assets/` to load
+//!   before scenes build (default `Data/Images/BgTile.png`).
+//! - `NOESIS_VIEWER_SIZE`: `WxH` window and view size (default `1280x720`).
+//! - `NOESIS_VIEWER_EXIT_AFTER`: any value takes one screenshot and exits.
+//! - `NOESIS_SCREENSHOT`: screenshot path (default `<scene stem>.png`).
+//! - `NOESIS_SCREENSHOT_FRAMES`: frame to shoot on in headless mode (default 120).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,8 +101,7 @@ fn main() {
         .as_deref()
         .map(|t| vec![format!("NoesisTheme.{t}.xaml")])
         .unwrap_or_default();
-    // Require every theme font to be present before Noesis's
-    // CachedFontProvider does its one-shot `scan_folder("Fonts")`.
+    // CachedFontProvider scans a folder once; gate the build on every theme font.
     let wait_for_font_files: Vec<(String, String)> = theme_files
         .fonts
         .iter()
@@ -133,9 +129,8 @@ fn main() {
         }),
         ..default()
     });
-    // With hot-reload on, also turn on Bevy's asset file-watcher so images and
-    // fonts loaded through `AssetServer` (from `assets/`) refresh on edit — the
-    // notify watcher below only feeds the directly-inserted scene XAML.
+    // The hot-reload watcher only feeds the scene XAML inserted directly; images and
+    // fonts loaded through `AssetServer` need Bevy's own file watcher.
     #[cfg(feature = "hot_reload")]
     let plugins = plugins.set(bevy::asset::AssetPlugin {
         watch_for_changes_override: Some(true),
@@ -190,14 +185,14 @@ fn parse_size_env() -> Option<UVec2> {
     Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
 }
 
-/// Resolved theme XAML + font paths, discovered under
-/// `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`. Cached in a
-/// `StagedTheme` resource and pushed into `XamlRegistry` / `FontRegistry`
-/// at startup so theme resolution has everything it needs.
+/// Theme XAML and font paths found under
+/// `$NOESIS_SDK_DIR/Src/Packages/App/Theme/Data/Theme/`, held in [`StagedTheme`]
+/// until [`load_theme_into_registries_once`] reads them into the registries.
 #[derive(Default, Clone)]
 struct StagedThemeFiles {
     xamls: Vec<(String, PathBuf)>,
-    fonts: Vec<(String, String, PathBuf)>, // (folder, filename, absolute path)
+    /// `(folder, filename, absolute path)`.
+    fonts: Vec<(String, String, PathBuf)>,
 }
 
 #[derive(Resource, Default)]
@@ -216,9 +211,7 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
 
     let mut files = StagedThemeFiles::default();
 
-    // Pull every *.xaml in the theme dir into the registry under its plain
-    // filename; the theme's nested `<ResourceDictionary Source="..."/>`
-    // uses the same bare-name form.
+    // Keyed by bare filename, the form the theme's nested `Source="..."` uses.
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "xaml")
@@ -228,9 +221,8 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
         }
     }
 
-    // PT Root UI goes into the `Fonts/` folder so NoesisTheme.Fonts.xaml's
-    // `FontFamily="Fonts/#PT Root UI"` resolves. Single folder shared with
-    // any scene fonts the user already has under assets/Fonts.
+    // `Fonts` folder so NoesisTheme.Fonts.xaml's `FontFamily="Fonts/#PT Root UI"`
+    // resolves; shared with the scene fonts under assets/Fonts.
     let fonts_dir = root.join("Fonts");
     for entry in std::fs::read_dir(&fonts_dir)
         .into_iter()
@@ -266,12 +258,10 @@ fn stage_theme(theme: &str) -> StagedThemeFiles {
     files
 }
 
-/// Inject theme XAMLs + fonts into the registries the moment the Bevy
-/// asset system has finished loading `assets/Fonts/`. Deferring until
-/// then makes both font sets land simultaneously in `FontRegistry` →
-/// `SharedFontMap`, which in turn keeps Noesis's `CachedFontProvider`
-/// from caching an empty-or-partial `scan_folder("Fonts")` result. Runs
-/// once, then clears the staged list so it's effectively idempotent.
+/// Reads the staged theme XAML and fonts into the registries once
+/// `assets/Fonts/Bitter-Regular.ttf` has loaded, so both font sets reach
+/// `FontRegistry` together and Noesis's `CachedFontProvider` never caches a
+/// partial `Fonts` folder. Clears the staged list, so later runs do nothing.
 #[allow(clippy::needless_pass_by_value)]
 fn load_theme_into_registries_once(
     mut staged: ResMut<StagedTheme>,
@@ -281,10 +271,7 @@ fn load_theme_into_registries_once(
     if staged.0.xamls.is_empty() && staged.0.fonts.is_empty() {
         return;
     }
-    // Wait for a sentinel font from `assets/Fonts/` to land. `Bitter-
-    // Regular.ttf` is present in every scene we care about; it's also the
-    // first fallback, so if it's missing our text rendering was never
-    // going to work anyway.
+    // Bitter is also the fallback font; without it text can't render anyway.
     if font_registry.get("Fonts", "Bitter-Regular.ttf").is_none() {
         return;
     }
@@ -339,9 +326,7 @@ fn collect_scenes(arg: &str) -> Vec<ScenePath> {
 fn scene_from_file(abs: &Path) -> Option<ScenePath> {
     let file_name = abs.file_name()?.to_string_lossy().into_owned();
     Some(ScenePath {
-        // Use the bare filename as the URI; matches how Noesis.xaml references
-        // other XAMLs (`Source="Styles.xaml"`) and how `AssetServer::load`
-        // pathways shape their keys.
+        // Bare filename, matching how scenes reference each other (`Source="Styles.xaml"`).
         uri: file_name,
         fs_path: abs.to_path_buf(),
     })
@@ -357,19 +342,13 @@ fn setup_camera(mut commands: Commands, asset_server: Res<AssetServer>, initial:
         NoesisCamera,
         initial.0.clone(),
     ));
-    // Pull Fonts/ into the asset system so the Bevy FontProvider populates
-    // FontRegistry; any scene that references `FontFamily="Fonts/#..."`
-    // will then resolve. Handle is kept alive by the resource below.
+    // Loading assets/Fonts fills FontRegistry so `FontFamily="Fonts/#..."` resolves.
+    // The handle is held in a resource to keep the folder loaded.
     let fonts_handle = asset_server.load_folder("Fonts");
     commands.insert_resource(KeepFonts(fonts_handle));
 
-    // Pre-load any images `NOESIS_VIEWER_IMAGES` names (comma-separated
-    // paths relative to `assets/`). The ImageBrush / Image loader only
-    // resolves pixels Noesis asks for *after* the asset server has
-    // populated ImageRegistry, so we need an explicit trigger.
-    //
-    // Default list covers the SDK samples that reference common image paths,
-    // letting `xaml_viewer assets/Data/Transform3D.xaml` work out of the box.
+    // Images only resolve once the asset server has put them in ImageRegistry, so
+    // load them up front. The default covers SDK samples such as Transform3D.xaml.
     let image_list = std::env::var("NOESIS_VIEWER_IMAGES")
         .unwrap_or_else(|_| "Data/Images/BgTile.png".to_string());
     let mut image_handles = Vec::new();
@@ -417,9 +396,8 @@ fn load_scenes_into_registry(viewer: Res<Viewer>, mut registry: ResMut<XamlRegis
     );
 }
 
-/// Register every scene file with the filesystem watcher so edits reload live.
-/// Compiled to a no-op unless the crate's `hot_reload` feature is enabled; run
-/// with `cargo run --example xaml_viewer --features hot_reload <path>`.
+/// Registers every scene file with [`NoesisHotReload`](noesis_bevy::NoesisHotReload)
+/// so edits reload live. A no-op without the `hot_reload` feature.
 #[cfg(feature = "hot_reload")]
 #[allow(clippy::needless_pass_by_value)]
 fn register_hot_reload(viewer: Res<Viewer>, hot: Option<Res<noesis_bevy::NoesisHotReload>>) {

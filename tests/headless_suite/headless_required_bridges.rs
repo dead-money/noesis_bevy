@@ -1,12 +1,10 @@
-//! Regression test for the auto-attached bridges (the main-menu bug).
+//! Regression test for the auto-attached bridges.
 //!
-//! Before required components, a write from `Startup`/`OnEnter` was lost when the
-//! bridge component didn't exist yet: `NoesisUi::get_mut()` returned `None` and
-//! nothing retried. `NoesisView` now pulls in every per-view bridge via required
-//! components, so the component is always present and the write lands once the
-//! scene builds.
+//! `NoesisView` pulls in every per-view bridge as a required component, so a
+//! write through `NoesisUi` from `Startup`/`OnEnter` finds the component and
+//! lands once the scene builds.
 //!
-//! This test spawns a bare `NoesisView` (no bridge components added by hand),
+//! Spawns a bare `NoesisView` (no bridge components added by hand),
 //! writes text through `NoesisUi` before the scene exists, registers the XAML
 //! late, and reads the value back through an auto-attached `NoesisDp` watch.
 
@@ -84,7 +82,6 @@ fn write_without_spawning_the_bridge_survives() {
         },
     );
 
-    // Exit once the written value has been read back through the auto-attached DP.
     let pred_observed = Arc::clone(&observed);
     let applied = run_until(&mut app, 240, move |_app| {
         pred_observed

@@ -1,7 +1,8 @@
-//! Tests `DOWNSAMPLE` (shader 49) and `UPSAMPLE` (shader 48) in the Noesis separable-blur resolve chain.
+//! `DOWNSAMPLE` (shader 49) and `UPSAMPLE` (shader 48), the blur resolve-chain shaders.
 //!
-//! DOWNSAMPLE: four-tap box-filter over a 2x2 red/green/blue/yellow source; asserts the average.
-//! UPSAMPLE: `mix(image, pattern, color.a)` with red image, green pattern, alpha=0.5; asserts the half blend.
+//! DOWNSAMPLE: four-tap box filter over a 2x2 red/green/blue/yellow source; asserts the average.
+//! UPSAMPLE: `mix(image, pattern, color.a)` with a red image, green pattern and alpha 0.5;
+//! asserts the half blend.
 
 use std::ffi::c_void;
 
@@ -66,7 +67,7 @@ async fn run_test() {
         MipFilter::Disabled,
     );
 
-    // ── DOWNSAMPLE: 2×2 red/green/blue/yellow → average ───────────────────
+    // DOWNSAMPLE: 2×2 red/green/blue/yellow → average.
     let src_texels: [u8; 2 * 2 * 4] = [
         255, 0, 0, 255, // (0,0) red
         0, 255, 0, 255, // (1,0) green
@@ -115,7 +116,7 @@ async fn run_test() {
     // Mean of red/green/blue/yellow = (127.5, 127.5, 63.75, 255).
     assert_close(avg, [128, 128, 64, 255], 2, "downsample 4-tap average");
 
-    // ── UPSAMPLE: mix(red image, green pattern, 0.5) ──────────────────────
+    // UPSAMPLE: mix(red image, green pattern, 0.5).
     let red_px: [u8; 4] = [255, 0, 0, 255];
     let green_px: [u8; 4] = [0, 255, 0, 255];
     let red_levels = [&red_px[..]];
@@ -169,8 +170,6 @@ async fn run_test() {
     // mix(red, green, ~0.5) = (~127, ~128, 0, 255).
     assert_close(blend, [128, 128, 0, 255], 2, "upsample mix");
 }
-
-// ── Geometry helpers ────────────────────────────────────────────────────
 
 fn full_tile() -> noesis_runtime::render_device::types::Tile {
     noesis_runtime::render_device::types::Tile {
@@ -242,8 +241,7 @@ fn effect_batch(shader: Shader) -> Batch {
         num_vertices: 6,
         start_index: 0,
         num_indices: 6,
-        // Non-null so draw_batch's null-check passes; resolution goes through
-        // the test-only forced pattern/image hooks.
+        // Never dereferenced: the forced pattern/image hooks replace these.
         pattern: std::ptr::dangling_mut(),
         ramps: std::ptr::null_mut(),
         image: std::ptr::dangling_mut(),
@@ -266,8 +264,6 @@ fn effect_batch(shader: Shader) -> Batch {
         pixel_shader: std::ptr::null_mut(),
     }
 }
-
-// ── Readback ────────────────────────────────────────────────────────────
 
 async fn read_pixel(
     device: &wgpu::Device,

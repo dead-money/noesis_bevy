@@ -1,25 +1,15 @@
-//! Per-view **formatted text** bridge: give a named `TextBlock` rich inline
-//! content (`Run` / `Bold` / `Italic` / `Underline` / `Span` / `Hyperlink` /
-//! `LineBreak`) from Bevy, then read the resulting live structure back.
+//! Builds a named `TextBlock`'s rich inline content (`Run`, `Bold`, `Italic`,
+//! `Underline`, `Span`, `Hyperlink`, `LineBreak`, decorated spans, embedded UI)
+//! from Rust, and reads the live structure back.
 //!
-//! This is the [`crate::typography`] bridge's sibling: typography restyles the
-//! *font* attached properties of an element, while this bridge replaces a
-//! `TextBlock`'s **`Inlines`**, the flow-content tree behind WPF-style
-//! `<TextBlock><Run/><Bold>…</Bold></TextBlock>` markup, built entirely in code.
-//! (It is distinct from `noesis_runtime::formatted_text`, which is a standalone
-//! text *measurement* object, not a `TextBlock`'s content.)
+//! This replaces a `TextBlock`'s `Inlines`, the tree behind
+//! `<TextBlock><Run/><Bold>…</Bold></TextBlock>`. To restyle fonts use
+//! [`crate::typography`]; to set plain text use [`crate::text`].
 //!
-//! Beyond the styled spans, an [`InlineSpec`] can carry a [`TextDecorations`]
-//! value (via [`InlineSpec::decorated`], a `Span` with the decoration applied to
-//! it and its descendants) and embed an arbitrary `UIElement` in flow content
-//! (via [`InlineSpec::ui_container`], an `InlineUIContainer` hosting a child
-//! parsed from XAML).
-//!
-//! Add a [`NoesisInlines`] component to the view's camera entity. Its `set` map is
-//! the desired inline tree ([`InlineSpec`]) per `x:Name`, applied whenever the
-//! component changes (Bevy change detection). Its `watch` list names `TextBlock`s
-//! whose live inline structure to observe; each surfaces as a
-//! [`NoesisInlinesChanged`] carrying an [`InlinesReadback`].
+//! Add a [`NoesisInlines`] to the [`NoesisView`](crate::NoesisView) camera
+//! entity. [`set`](NoesisInlines::set) maps a `TextBlock` `x:Name` to its
+//! [`InlineSpec`] tree; [`watch`](NoesisInlines::watch) lists `TextBlock`s to
+//! observe through [`NoesisInlinesChanged`].
 //!
 //! ```ignore
 //! use noesis_bevy::{InlineSpec, NoesisInlines};
@@ -38,16 +28,15 @@
 //!
 //! # Re-apply semantics
 //!
-//! A changed [`NoesisInlines`] component is fully re-applied: for each named
-//! `TextBlock` in `set`, the bridge **clears** the live `InlineCollection`
-//! (`InlineCollection::clear`, exposed since runtime 0.10) and repopulates it
-//! from the new spec, replacing whatever was there, whether built by an earlier
-//! apply or authored in XAML. Editing a spec therefore swaps the rendered
-//! content in place without rebuilding the scene.
+//! When the component changes, or the scene is rebuilt, each `TextBlock` in
+//! `set` is cleared and rebuilt from its spec, replacing earlier content
+//! whether it came from a previous apply or from XAML. An empty spec list is
+//! skipped, so it leaves the current content alone. Removing an entry from
+//! `set` also leaves the content in place.
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the writes /
-//! polls the reads against that view's live scene; no cross-world queues.
+//! The bridge acts on a view's own scene only, not on
+//! [`UiPanel`](crate::panel::UiPanel) entities. It runs in
+//! [`NoesisSet::Apply`] on the main thread.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -59,19 +48,13 @@ use noesis_runtime::text_inlines::{
 };
 use noesis_runtime::view::FrameworkElement;
 
-/// Re-exported from `noesis_runtime`: the `TextDecorations` an inline can carry
-/// (see [`InlineSpec::decorated`]).
+/// Text decorations for [`InlineSpec::decorated`].
 pub use noesis_runtime::text_inlines::TextDecorations;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Declarative spec
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A declarative description of one inline in a `TextBlock`'s flow content. The
-/// `Bold` / `Italic` / `Underline` / `Span` / `Hyperlink` variants nest further
-/// inlines; `Run` carries plain text and `LineBreak` forces a break.
+/// One inline in a `TextBlock`'s content. Span-like variants nest further
+/// inlines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InlineSpec {
     /// A `Run`: a span of plain text.
@@ -93,19 +76,17 @@ pub enum InlineSpec {
         /// The hyperlink's child inlines (typically its label `Run`).
         children: Vec<InlineSpec>,
     },
-    /// A `Span` carrying a [`TextDecorations`] value applied to it and its
-    /// descendants (e.g. `Strikethrough` / `OverLine`). This is how per-inline
-    /// `TextDecorations` is expressed in the spec.
+    /// A `Span` whose [`TextDecorations`] (e.g. `Strikethrough`, `OverLine`)
+    /// apply to all its descendants.
     Decorated {
         /// The decoration to apply to the span.
         decoration: TextDecorations,
         /// The decorated span's child inlines.
         children: Vec<InlineSpec>,
     },
-    /// An `InlineUIContainer` embedding an arbitrary `UIElement` in flow content.
-    /// The child is parsed from `child_xaml` (e.g. `"<Button Content=\"Go\"/>"`,
-    /// with the presentation namespace declared) so it is freshly owned by the
-    /// container and never collides with an element already in the visual tree.
+    /// An `InlineUIContainer` hosting a `UIElement` parsed from `child_xaml`,
+    /// e.g. `<Button Content="Go"/>` with the presentation namespace declared.
+    /// A parse failure logs a warning and leaves the container empty.
     UiContainer {
         /// XAML markup parsed into the hosted `UIElement`.
         child_xaml: String,
@@ -161,7 +142,7 @@ impl InlineSpec {
         }
     }
 
-    /// A `Span` with `decoration` applied to it (and its descendants).
+    /// A `Span` with `decoration` applied to it and its descendants.
     #[must_use]
     pub fn decorated(
         decoration: TextDecorations,
@@ -182,16 +163,9 @@ impl InlineSpec {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Live handle tree (built on apply, kept for read-back)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The live Noesis inline objects the bridge built for one `TextBlock`, mirroring
-/// the [`InlineSpec`] tree. Kept in the scene so the read-back can re-read the
-/// *live* `Run` text / `Hyperlink` URIs (the runtime exposes no way to wrap a raw
-/// `Inline*` from the collection back into a typed handle, so we hold our own).
-/// Each handle is also owned (`AddRef`'d) by the collection it was added to, so
-/// these stay valid as long as the `TextBlock` keeps them.
+/// The live inline objects built for one `TextBlock`, mirroring the
+/// [`InlineSpec`] tree. Held because the runtime can't wrap a raw `Inline*` from
+/// a collection back into a typed handle, and the read-back needs typed access.
 pub(crate) enum BuiltInline {
     Run(Run),
     LineBreak(LineBreak),
@@ -416,9 +390,6 @@ pub(crate) fn readback(tree: &[BuiltInline], collection: &InlineCollection) -> I
     collect_decorations(tree, &mut decorations);
     let mut hosted_ui = 0;
     count_hosted_ui(tree, &mut hosted_ui);
-    // Every built top-level inline must sit at its expected index in the *live*
-    // collection: this is the bluff-killer (a no-op apply leaves count 0, and the
-    // identity check is vacuously true only because `tree` is empty too).
     let matched = tree.len() == count
         && tree
             .iter()
@@ -434,61 +405,53 @@ pub(crate) fn readback(tree: &[BuiltInline], collection: &InlineCollection) -> I
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back (observation)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A snapshot of a `TextBlock`'s live inline structure, read back after a
-/// [`NoesisInlines`] apply.
+/// A watched `TextBlock`'s live inline structure.
+///
+/// Only [`count`](Self::count) reads the whole collection. The other fields
+/// walk the inlines this bridge built, so for XAML-authored content they stay
+/// empty and [`matched`](Self::matched) is `false`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlinesReadback {
     /// Number of *top-level* inlines in the live `TextBlock.Inlines`.
     pub count: usize,
-    /// The depth-first concatenation of every `Run`'s live text (no separators;
-    /// `LineBreak`s contribute nothing). Read from the live Noesis `Run` objects.
+    /// Every built `Run`'s live text, depth-first, with no separators.
+    /// `LineBreak`s add nothing.
     pub text: String,
-    /// Whether every top-level inline the bridge built is present, by pointer
-    /// identity, at its expected index in the live collection (and the counts
-    /// match). Proves the built inlines really are this `TextBlock`'s content.
+    /// Whether the live collection holds exactly the top-level inlines the
+    /// bridge built, at their indices (pointer identity). `true` when nothing
+    /// was built and the collection is empty.
     pub matched: bool,
     /// Each `Hyperlink`'s live `NavigateUri`, depth-first.
     pub hyperlink_uris: Vec<String>,
-    /// Each decorated span's live [`TextDecorations`], depth-first. Read from the
-    /// live Noesis `Span` (not echoed from the spec).
+    /// Each decorated span's live [`TextDecorations`], depth-first.
     pub decorations: Vec<TextDecorations>,
-    /// Number of `InlineUIContainer`s whose live `Child` is present and matches
-    /// the element the bridge hosted, by pointer identity. Proves the embedded
-    /// `UIElement` really is this container's child.
+    /// Number of `InlineUIContainer`s whose live `Child` is the element the
+    /// bridge put there (pointer identity).
     pub hosted_ui: usize,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component / message
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view formatted-text bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Rich inline content for named `TextBlock`s. See the [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisInlines {
-    /// Desired inline tree per element `x:Name`. Fully re-applied whenever this
-    /// component changes: the target `TextBlock`'s `Inlines` is cleared and
-    /// repopulated from the spec (see the module's re-apply semantics).
+    /// Inline tree per `TextBlock` `x:Name`. Every entry is rebuilt whenever
+    /// this component changes. A target that isn't a `TextBlock` is skipped
+    /// with a warning.
     pub set: HashMap<String, Vec<InlineSpec>>,
-    /// Element `x:Name`s whose live inline structure to observe. A change vs. the
-    /// previous frame emits a [`NoesisInlinesChanged`]; the first poll after a
-    /// name is added always reports.
+    /// `TextBlock` names to observe. Each change emits a
+    /// [`NoesisInlinesChanged`]; the first poll after a name is added, or after
+    /// a scene rebuild, always reports.
     pub watch: Vec<String>,
 }
 
 impl NoesisInlines {
-    /// An empty bridge: no `set` entries, no watches. Chain [`set`](Self::set)
-    /// and [`watching`](Self::watching) to fill it in.
+    /// An empty bridge. Chain [`set`](Self::set) and
+    /// [`watching`](Self::watching) to fill it in.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: set element `name`'s inline content.
+    /// Sets `name`'s inline content.
     #[must_use]
     pub fn set(
         mut self,
@@ -499,8 +462,7 @@ impl NoesisInlines {
         self
     }
 
-    /// Builder: observe these elements' inline structure. Names already watched
-    /// are skipped, matching [`observe`](Self::observe).
+    /// Watches each of `names`, skipping ones already watched.
     #[must_use]
     pub fn watching(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         for name in names {
@@ -509,9 +471,8 @@ impl NoesisInlines {
         self
     }
 
-    /// Set element `name`'s inline content from a system holding
-    /// `&mut NoesisInlines`. The runtime counterpart of [`set`](Self::set): the
-    /// next reconcile clears the `TextBlock` and repopulates it from the spec.
+    /// In-place form of [`set`](Self::set), for systems holding
+    /// `&mut NoesisInlines`.
     pub fn write(
         &mut self,
         name: impl Into<String>,
@@ -520,10 +481,8 @@ impl NoesisInlines {
         self.set.insert(name.into(), inlines.into_iter().collect());
     }
 
-    /// Observe element `name`'s inline structure from a system holding
-    /// `&mut NoesisInlines`. No-op if already watched. The runtime counterpart of
-    /// [`watching`](Self::watching). Named `observe` (not `watch`) to avoid
-    /// colliding with the [`watch`](Self::watch) field.
+    /// In-place form of [`watching`](Self::watching) for one name. No-op if
+    /// already watched.
     pub fn observe(&mut self, name: impl Into<String>) {
         let name = name.into();
         if !self.watch.contains(&name) {
@@ -533,7 +492,7 @@ impl NoesisInlines {
 }
 
 /// Emitted when a watched `TextBlock`'s inline structure differs from the
-/// previous frame. Read with `MessageReader<NoesisInlinesChanged>`.
+/// previous frame.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisInlinesChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose element changed.
@@ -544,13 +503,8 @@ pub struct NoesisInlinesChanged {
     pub value: InlinesReadback,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems / plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisInlines`]: apply the desired inline content
-/// when the component changed, then poll its watch list and emit
-/// [`NoesisInlinesChanged`] for each structure that moved.
+/// Rebuilds changed [`NoesisInlines`] content, then polls the watch lists and
+/// emits [`NoesisInlinesChanged`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_inlines_bridge(
     views: Query<(Entity, Ref<NoesisInlines>)>,
@@ -574,8 +528,8 @@ pub(crate) fn sync_inlines_bridge(
     }
 }
 
-/// Wires the per-view formatted-text bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers [`NoesisInlines`]'s system and message. Added by
+/// [`NoesisPlugin`](crate::NoesisPlugin).
 pub struct NoesisInlinesPlugin;
 
 impl Plugin for NoesisInlinesPlugin {

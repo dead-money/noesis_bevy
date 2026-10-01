@@ -1,25 +1,20 @@
-//! Custom `MarkupExtension` registration for Bevy.
+//! Custom XAML markup extensions (`{myns:Foo arg}`) backed by Rust handlers.
 //!
-//! Register Rust-backed `{myns:Foo positional_arg}` markup extensions from
-//! Bevy systems. The resulting [`MarkupExtensionRegistration`] is owned by
-//! [`NoesisMarkupExtensionRegistry`], tied to the Bevy resource lifecycle.
+//! Build a [`MarkupExtensionRegistration`] with the [`noesis_runtime::markup`]
+//! API (re-exported here) and hand it to [`NoesisMarkupExtensionRegistry`],
+//! which keeps it alive for the life of the app. [`crate::NoesisPlugin`]
+//! installs the registry through [`NoesisMarkupExtensionPlugin`].
 //!
-//! The primitives ([`MarkupExtensionRegistration`], [`MarkupExtensionHandler`],
-//! [`MarkupValue`]) come from [`noesis_runtime::markup`] and are re-exported
-//! here. The Bevy layer adds [`NoesisMarkupExtensionPlugin`] to install the
-//! registry resource and [`NoesisMarkupExtensionRegistry`] to own the live
-//! registrations. Registrations drop during resource cleanup, which Bevy 0.18
-//! runs before the `!Send` `NoesisShutdownGuard` Drop, so they clean up before
-//! Noesis shuts down.
+//! Register an extension before any XAML that uses it loads: a `Startup`
+//! system is early enough, since scenes build in `PostUpdate`.
 //!
 //! # Threading
 //!
-//! Callbacks fire from inside Noesis's XAML parser, on whichever thread
-//! triggered the load. In a Bevy app that's the main thread, during the
-//! scene-build pass that drives the View. The handler runs while Noesis (and
-//! the `NoesisRenderState` that owns it) is borrowed, so it must not reenter
-//! the Bevy `World`; keep the body small and queue any ECS work for a later
-//! system. Handlers are still `Send`-bound by the FFI.
+//! Handlers run synchronously inside Noesis's XAML parser on the main thread,
+//! while the crate's `NoesisRenderState` is borrowed to load a scene or panel
+//! fragment. A handler cannot reach the Bevy `World`; keep it small and queue
+//! any ECS work for a later system. The FFI still requires handlers to be
+//! `Send`.
 
 use bevy::prelude::*;
 
@@ -27,26 +22,19 @@ pub use noesis_runtime::markup::{
     ClosureHandler, MarkupExtensionHandler, MarkupExtensionRegistration, MarkupValue,
 };
 
-/// Owns the live [`MarkupExtensionRegistration`] instances for the app
-/// lifetime. Insert finished registrations from a `Startup` system; the
-/// resource drops them at app teardown, before [`noesis_runtime::shutdown`]
-/// runs.
+/// Keeps [`MarkupExtensionRegistration`]s alive for the life of the app.
 ///
-/// Add registrations BEFORE any XAML referencing the extension loads. In
-/// practice that means a `Startup` system ordered after [`crate::NoesisPlugin`]
-/// initialization (Bevy's default startup order suffices unless overridden).
-///
-/// Non-send resource: [`MarkupExtensionRegistration`] holds `!Send`/`!Sync`
-/// Noesis handles, so this is stored via `init_non_send` and accessed
-/// through `NonSendMut`.
+/// This is a non-send resource (registrations hold `!Send` Noesis handles), so
+/// reach it with `NonSendMut<NoesisMarkupExtensionRegistry>`. Dropping a
+/// registration unregisters the extension; the registry drops its
+/// registrations when the app's resources drop.
 #[derive(Default)]
 pub struct NoesisMarkupExtensionRegistry {
     registrations: Vec<MarkupExtensionRegistration>,
 }
 
 impl NoesisMarkupExtensionRegistry {
-    /// Take ownership of a [`MarkupExtensionRegistration`]. Holds for the
-    /// resource's lifetime (= app lifetime in normal use).
+    /// Keeps `registration` alive until the registry drops.
     pub fn add(&mut self, registration: MarkupExtensionRegistration) {
         self.registrations.push(registration);
     }
@@ -64,9 +52,8 @@ impl NoesisMarkupExtensionRegistry {
     }
 }
 
-/// Plugin that installs [`NoesisMarkupExtensionRegistry`]. Add **after**
-/// [`crate::NoesisPlugin`] so [`noesis_runtime::init`] has run by the time
-/// consumers register from `Startup` systems.
+/// Installs [`NoesisMarkupExtensionRegistry`]. [`crate::NoesisPlugin`] adds
+/// this plugin; you don't add it yourself.
 pub struct NoesisMarkupExtensionPlugin;
 
 impl Plugin for NoesisMarkupExtensionPlugin {

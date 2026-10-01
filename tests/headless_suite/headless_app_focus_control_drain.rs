@@ -1,11 +1,9 @@
-//! Regression for audit P0.5: `NoesisFocusControl` one-shot actions
-//! (`moves` / `engages`) must be *drained* after they apply, so they neither
-//! accumulate nor replay on a later change or a scene rebuild.
+//! Regression test: `NoesisFocusControl` one-shot actions (`moves` / `engages`)
+//! are drained after they apply, so they neither accumulate nor replay on a later
+//! change or a scene rebuild.
 //!
-//! Drives `request_move` (the push API) once against a live scene, then asserts
-//! two frames later that `moves` is empty. Under the pre-fix code the vec was
-//! push-only and never drained, so it stayed non-empty (and every subsequent
-//! change replayed the whole accumulated history).
+//! Calls `request_move` once against a live scene, checks the move focused
+//! `Second`, and asserts `moves` is empty on a later frame.
 
 use std::sync::{Arc, Mutex};
 
@@ -85,7 +83,6 @@ fn focus_control_one_shots_drain_after_apply() {
             }
             if *frame == MOVE_AT_FRAME {
                 for (_focus, mut ctl) in &mut q {
-                    // Push API: this is the path that accumulated pre-fix.
                     ctl.request_move("First", FocusNavigationDirection::Right, false);
                 }
             }
@@ -105,9 +102,6 @@ fn focus_control_one_shots_drain_after_apply() {
         },
     );
 
-    // Event-driven exit: the move/check are frame-gated (the move must land, then
-    // a later frame reads back the drained `moves` len), so exit once that post-
-    // apply snapshot exists.
     let pred_moves = Arc::clone(&moves_after_check);
     let checked = run_until(&mut app, 240, move |_app| {
         pred_moves.lock().unwrap().is_some()
@@ -127,14 +121,12 @@ fn focus_control_one_shots_drain_after_apply() {
             .map(|(_, _, v)| v.clone())
     };
 
-    // The move actually took effect (sanity: the apply still runs).
     assert_eq!(
         latest("Second.IsFocused"),
         Some(DpValue::Bool(true)),
         "request_move(First, Right) should focus Second",
     );
 
-    // The crux: the one-shot was drained, not left to accumulate/replay.
     assert_eq!(
         *moves_after_check.lock().unwrap(),
         Some(0),

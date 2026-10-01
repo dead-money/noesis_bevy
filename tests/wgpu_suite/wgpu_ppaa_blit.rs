@@ -1,12 +1,12 @@
-//! Tests the premultiplied composite blit used when `RenderFlag::Ppaa` is on.
+//! The premultiplied-alpha composite blit that draws a view's intermediate over
+//! the camera target, with PPAA's fractional edge alpha and with hard alpha.
 //!
 //! Drives [`blit_composite_for_test`], which builds the same `BlitPipeline` and
-//! premultiplied "over" blend (`One, OneMinusSrcAlpha`) the render-graph nodes
-//! use. Each test composites a fractional-alpha premultiplied source over a
-//! target pre-cleared to a distinct colour, reads back pixels, and asserts exact
-//! premultiplied blend values with no clear-colour bleed.
+//! premultiplied "over" blend (`One, OneMinusSrcAlpha`) the Core2d/Core3d
+//! compositing systems use. Each test composites a premultiplied source over a target pre-cleared to
+//! a distinct colour and asserts the blended pixels.
 //!
-//! Pure wgpu: no Noesis FFI, no init/license needed.
+//! Pure wgpu: no Noesis FFI, no init or license needed.
 
 use noesis_bevy::render::blit_composite_for_test;
 
@@ -116,8 +116,7 @@ fn composite(gpu: &Gpu, src_pixels: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("ppaa blit"),
     });
-    // Camera clear: production blit runs LoadOp::Load against this.
-    // Block scope: drops the pass at ';' to release &mut encoder for the blit.
+    // Stands in for the camera clear; the production blit loads (LoadOp::Load) over it.
     {
         let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("camera clear"),

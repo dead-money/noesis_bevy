@@ -1,11 +1,9 @@
-//! Regression test for [`NoesisBinding`] rebuild-on-re-insert (audit P1.5).
+//! Regression test: re-inserting a [`NoesisBinding`] rebuilds its targets.
 //!
-//! A view is spawned with a binding whose Rust converter upper-cases
-//! `Source.Text` into `Upper.Text` (`"hello"` → `"HELLO"`). Mid-run the
-//! component is re-inserted with a *different* converter (upper-case + `"!"`).
-//! Before the fix `has_binding` short-circuited and the new converter was
-//! swallowed, freezing `Upper.Text` at `"HELLO"`; now the changed target
-//! rebuilds and `Upper.Text` becomes `"HELLO!"`.
+//! The view starts with a converter that upper-cases `Source.Text` into
+//! `Upper.Text` (`"hello"` to `"HELLO"`). Mid-run the component is re-inserted
+//! with a different converter (upper-case plus `"!"`), and `Upper.Text` must
+//! become `"HELLO!"` rather than stay frozen at `"HELLO"`.
 //!
 //! Font-free XAML; no glyph rendering involved.
 
@@ -113,15 +111,12 @@ fn reinserted_binding_rebuilds_with_new_converter() {
         },
     );
 
-    // The latest observed value for a (view, name, property) triple.
     let latest_for = |got: &Observed, view: Entity, name: &str, prop: &str| -> Option<DpValue> {
         got.iter()
             .rfind(|(e, n, p, _)| *e == view && n == name && p == prop)
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // Event-driven exit: the first converter drove "HELLO", then the re-inserted
-    // converter rebuilt the target to "HELLO!". Both observed => done.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let rebuilt = run_until(&mut app, 240, move |_app| {
@@ -156,8 +151,6 @@ fn reinserted_binding_rebuilds_with_new_converter() {
             && *v == DpValue::Str("HELLO".to_string())),
         "first binding should have upper-cased Source.Text to \"HELLO\" before re-insert",
     );
-    // After re-insert the rebuilt converter wins: the change is applied, not
-    // swallowed (which would leave the value frozen at \"HELLO\").
     assert_eq!(
         latest("Upper", "Text"),
         Some(DpValue::Str("HELLO!".to_string())),

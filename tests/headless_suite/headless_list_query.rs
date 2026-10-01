@@ -1,4 +1,4 @@
-//! End-to-end test of Primitive 2 (**list = query**) through the Bevy app.
+//! End-to-end test of Primitive 2 (list = query) through the Bevy app.
 //!
 //! A host [`NoesisView`] scene carries a `ListBox` (`x:Name="Inv"`). Rows are
 //! plain entities: each carries a `Row` component (`{Binding label}` /
@@ -6,29 +6,24 @@
 //! [`UiList`] entity binds the reconciled `ObservableCollection` to the
 //! control, ordered by `weight`.
 //!
-//! Properties under test (all via the minimal [`NoesisListOps`] tally + the
-//! [`Selected`] marker, never reading a "reset"):
-//!   * **Add.** Spawning rows realizes them (an `adds` op), no clears.
-//!   * **Update in place.** Mutating one row's *non-order* field produces an
-//!     an `updates`-only op (no `adds`/`removes`/`moves`), proving the surviving
-//!     row's existing instance was written, not re-created (no Reset).
-//!   * **Reorder via Move.** Flipping the sort relocates rows with `moves` ops and
-//!     **keeps the selected row selected**: currency rides the moved container.
-//!   * **Remove.** Despawning a row drops it (`removes` op) without disturbing the
+//! Properties under test, all via the [`NoesisListOps`] tally and the
+//! [`Selected`] marker:
+//!   * Add: spawning rows realizes them (an `adds` op), no clears.
+//!   * Update in place: mutating one row's non-order field produces an
+//!     `updates`-only op (no `adds`/`removes`/`moves`), so the surviving row's
+//!     instance was written, not re-created (no Reset).
+//!   * Reorder via Move: flipping the sort relocates rows with `moves` ops and
+//!     keeps the selected row selected; the `ListBox` tracks the selected item,
+//!     not the slot.
+//!   * Remove: despawning a row drops it (`removes` op) without disturbing the
 //!     rest or the selection.
-//!   * **Default currency is NOT reported as a selection.** A fresh
-//!     `ICollectionView` starts with the first row current, but the bridge adopts
-//!     that baseline silently; it must not mark [`Selected`] or emit a
-//!     [`NoesisListSelection`] before any genuine change. This test asserts no
-//!     auto-selection and no spurious message. (NB: the binding observes its *own*
-//!     `CollectionView`, a separate object from the live `ListBox`'s default view,
-//!     so a real control-side row click does not reach this currency channel today;
-//!     that goes through the `row_click_subs -> UiClicked` path. The
-//!     control-to-currency link is covered, `#[ignore]`-d, in `headless_list_select`.)
-//!   * **Currency is selection (ECS → UI).** Setting [`Selected`] from the app
-//!     drives the current item; the marker survives the reorder, proving no Reset.
-//!     App-driven selection is the *cause*, not an effect, so it emits **no**
-//!     [`NoesisListSelection`], asserted via the message stream.
+//!   * The control's initial selection is a silent baseline: the bridge must not
+//!     mark [`Selected`] or emit a [`NoesisListSelection`] before a genuine
+//!     change. Control-side selection reaching the bridge is covered in
+//!     `headless_list_select`.
+//!   * App-driven selection (ECS to UI): setting [`Selected`] drives the
+//!     control's selection and survives the reorder. It is the cause, not an
+//!     effect, so it emits no [`NoesisListSelection`].
 
 use std::sync::{Arc, Mutex};
 
@@ -63,10 +58,8 @@ struct Row {
     weight: i32,
 }
 
-// Stimulus/capture timings. Each stage settles a few frames before the next, so
-// an op raised by one action is observed before the following action fires.
-// These sequence the scenario; the run's exit is the assert-worthy predicate
-// below (all ops seen + selection survived), not a fixed frame count.
+// Each stage settles a few frames before the next, so an op raised by one action
+// is observed before the following action fires.
 const CAPTURE_DEFAULT_AT: usize = 14;
 const UPDATE_AT: usize = 18;
 const SELECT_AT: usize = 28;
@@ -88,7 +81,7 @@ struct OpFlags {
 fn list_reconciles_minimal_ops_and_keeps_selection() {
     let entities: Arc<Mutex<Option<(Entity, Entity, Entity)>>> = Arc::new(Mutex::new(None));
     let flags: Arc<Mutex<OpFlags>> = Arc::new(Mutex::new(OpFlags::default()));
-    // Who the bridge auto-selected from default currency, before the app touches it.
+    // Who the bridge marked Selected before the app touches selection.
     let default_selected: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_select: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let sel_after_reorder: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
@@ -195,11 +188,9 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                 ui_sel_sys.lock().unwrap().push(ev.selected);
             }
 
-            // Latest selection, always current for the exit predicate.
             *final_selected_sys.lock().unwrap() = selected_q.iter().next();
 
-            // Default currency must NOT auto-select: before the app sets any
-            // Selected of its own, nothing should be marked.
+            // Before the app sets any Selected of its own, nothing should be marked.
             if *frame == CAPTURE_DEFAULT_AT {
                 *default_selected_sys.lock().unwrap() = selected_q.iter().next();
                 flags_sys.lock().unwrap().default_captured = true;
@@ -212,7 +203,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                 }
             }
 
-            // App-driven selection: select C (currency is selection).
+            // App-driven selection: select C.
             if *frame == SELECT_AT {
                 for e in &selected_q {
                     commands.entity(e).remove::<Selected>();
@@ -225,7 +216,7 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
                 *sel_after_select_sys.lock().unwrap() = selected_q.iter().next();
             }
 
-            // Flip the sort: A,B,C -> C,B,A. Selection must survive (Move).
+            // Flip the sort: A,B,C -> C,B,A. Selection must survive the Move.
             if *frame == REORDER_AT {
                 if let Ok(mut list) = lists.single_mut() {
                     list.sort = Some(noesis_bevy::ListSort {
@@ -247,8 +238,6 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
         },
     );
 
-    // Exit once the scenario has fully played out: every reconcile op observed
-    // and the app-driven selection has survived add/update/reorder/remove.
     let pred_flags = Arc::clone(&flags);
     let pred_final = Arc::clone(&final_selected);
     let pred_entities = Arc::clone(&entities);
@@ -290,9 +279,8 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
     );
     assert!(f.saw_removes, "despawning a row produced no removes op");
 
-    // Default currency is adopted silently: before the app touches Selected, nothing
-    // is marked and no UI selection message has been emitted; the unsolicited
-    // first-frame auto-select is suppressed.
+    // Initial selection is a silent baseline: before the app touches Selected,
+    // nothing is marked and no UI selection message has been emitted.
     assert_eq!(
         default_sel, None,
         "a fresh list auto-selected its first row — the default current item must \

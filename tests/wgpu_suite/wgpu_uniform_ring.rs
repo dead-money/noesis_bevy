@@ -1,10 +1,12 @@
-//! Regression: two batches in one submit, each reading its own `ps_uniforms0` slot.
-//! Before the uniform-ring fix, per-batch `queue.write_buffer` calls all landed before
-//! the encoder ran, so every draw saw the last value written. The ring + dynamic-offset
-//! bind groups ensure each draw reads from its own slot.
+//! Two batches in one submit, each reading its own `ps_uniforms0` value.
 //!
-//! 256x256 target; left half drawn red, right half green.
-//! If the ring is broken, both halves collapse to green.
+//! All of a phase's `queue.write_buffer` calls run before its encoder is
+//! submitted, so a single uniform slot would leave every draw with the last
+//! value written. The device writes each batch's uniforms to its own ring slot
+//! and binds it with a dynamic offset.
+//!
+//! 256x256 target; the left half is drawn red and the right half green. If the
+//! ring is broken, both halves come out green.
 
 use std::ffi::c_void;
 
@@ -105,8 +107,7 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // Vertex format `Pos`: 8 bytes per vertex (two f32).
-    // Left quad: x ∈ [-1, 0], y ∈ [-1, 1]; right quad: x ∈ [0, 1], y ∈ [-1, 1]
+    // `Pos` vertices, 8 bytes each. Left quad x ∈ [-1, 0], right quad x ∈ [0, 1].
     let mut vb = Vec::with_capacity(96);
     for v in [
         [-1.0f32, -1.0],

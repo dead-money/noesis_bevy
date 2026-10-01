@@ -1,5 +1,5 @@
-//! Integration test for [`NoesisBinding`]: value-converter and multi-binding
-//! bridges, run through the Noesis bridge pipeline on the headless harness.
+//! Integration test for [`NoesisBinding`] converter and multi-bindings on the
+//! headless harness.
 //!
 //! Sources are sibling elements resolved by `x:Name`; no `DataContext` needed.
 //! Assertions read converted target values via [`NoesisDp`] string watch:
@@ -112,8 +112,6 @@ fn binding_bridge_drives_targets_through_rust_converters() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // Event-driven exit: stop as soon as both converted targets have landed, not
-    // after a padded frame count.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let converged = run_until(&mut app, 240, move |_app| {

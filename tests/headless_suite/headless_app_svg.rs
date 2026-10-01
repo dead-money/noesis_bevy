@@ -1,8 +1,8 @@
 //! Integration test for the SVG bridge: parse path data, read back measured
 //! bounds, and verify element sizing via `ActualWidth`.
 //!
-//! `NoesisSvg` is populated at frame `SET_AT_FRAME` rather than at spawn so the
-//! view exists when change-detection fires; an earlier mutation drops the apply.
+//! `NoesisSvg` is populated at `SET_AT_FRAME`, after the scene is live, so the
+//! test exercises a change-driven apply rather than the scene-build re-apply.
 
 use std::sync::{Arc, Mutex};
 
@@ -46,8 +46,6 @@ fn svg_bridge_parses_and_sizes_element() {
                         size: UVec2::new(64, 64),
                         ..default()
                     },
-                    // Starts empty (no-op); filled after the scene exists so its
-                    // one-shot apply isn't lost.
                     NoesisSvg::new(),
                     NoesisDp::new().watch("Icon", "ActualWidth", DpKind::F32),
                 ))
@@ -89,8 +87,7 @@ fn svg_bridge_parses_and_sizes_element() {
         },
     );
 
-    // Stop once Icon has reported its measured bounds and re-laid out to width 40,
-    // rather than padding a fixed frame count. The SVG apply still fires at SET_AT_FRAME.
+    // Stop once Icon has reported its measured bounds and re-laid out to width 40.
     let pred_view = Arc::clone(&view_entity);
     let pred_svg = Arc::clone(&svg_msgs);
     let pred_dp = Arc::clone(&dp_msgs);

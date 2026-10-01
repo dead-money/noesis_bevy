@@ -1,14 +1,12 @@
-//! Regression for P1.11: re-applying an unchanged source must not reset selection.
+//! Re-applying an unchanged source must not reset selection.
 //!
-//! A `NoesisItems` mutation re-applies every name in the component. Before the
-//! fix, `set_typed` always cleared and repushed the collection, which dropped the
-//! control's `SelectedIndex` back to `-1` — so touching one list wiped every
-//! other list's selection ("Reset is the enemy"). Here we select an item, feed
-//! the *same* items again, and assert the selection survives.
+//! A `NoesisItems` mutation re-applies every name in the component, so
+//! `ItemsBinding::set_typed` must skip an identical list. Clearing and repushing
+//! drops the control's `SelectedIndex` to `-1`, and touching one list would wipe
+//! every other list's selection. Selects an item, feeds the same items again,
+//! and asserts the selection survives.
 //!
 //! Drives Noesis directly (no GPU), same harness as `headless_items_source`.
-//!
-//!   `cargo test -p noesis_bevy --test headless_items_no_reset -- --nocapture`
 
 use std::collections::HashMap;
 
@@ -67,7 +65,6 @@ fn unchanged_source_preserves_selection() {
         t += 0.016;
         view.update(t);
 
-        // Select an item, then confirm the control reports it.
         assert!(combo.set_selected_index(1), "set_selected_index failed");
         t += 0.016;
         view.update(t);
@@ -77,8 +74,7 @@ fn unchanged_source_preserves_selection() {
             "ComboBox did not take the selection",
         );
 
-        // Re-apply the identical source (what a sibling-list mutation triggers):
-        // must be a no-op, leaving the selection intact rather than clearing it.
+        // Identical source, as a sibling-list mutation re-applies it: must be a no-op.
         binding.set_typed(&items);
         t += 0.016;
         view.update(t);

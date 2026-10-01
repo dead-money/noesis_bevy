@@ -1,8 +1,8 @@
-//! Integration tests for per-entity bridges through the real `NoesisPlugin` pipeline (headless).
+//! Integration test for per-entity routing across two views on the headless harness.
 //!
-//! Couples three bridges per view: a [`NoesisVm`] sets a `Foo` string property as `DataContext`,
-//! a `TextBlock` binds to it, and a [`NoesisText`] watch reports the result. All three must
-//! work correctly for the right entity to receive the right [`NoesisTextChanged`] message.
+//! Each view couples three bridges: a [`NoesisVm`] supplies a `Foo` string as
+//! `DataContext`, a `TextBlock` binds to it, and a [`NoesisText`] watch reports the
+//! result. Each view must receive only its own sentinel in [`NoesisTextChanged`].
 //!
 //! Font-free XAML; no glyph rendering is asserted.
 
@@ -23,8 +23,6 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <TextBlock x:Name="Echo" Text="{Binding Foo}"/>
 </Grid>"##;
 
-// Two views, each with its own VM/binding/watch. Catches "route to first scene"
-// cross-entity routing bugs that a single-view test cannot detect.
 #[test]
 fn per_entity_routing_is_isolated_across_two_views() {
     let collected: Arc<Mutex<Vec<(Entity, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -72,7 +70,6 @@ fn per_entity_routing_is_isolated_across_two_views() {
         },
     );
 
-    // Event-driven exit: stop once both views have echoed their own sentinel.
     let pred_collected = Arc::clone(&collected);
     let pred_views = Arc::clone(&views);
     let routed = run_until(&mut app, 240, move |_app| {

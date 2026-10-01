@@ -1,41 +1,26 @@
-//! App-level system-integration bridge.
+//! Noesis host callbacks (cursor, open URL, play audio) as Bevy messages.
 //!
-//! Noesis raises a handful of **process-global host callbacks** (not per-view):
-//! it asks the host to change the OS cursor, open a URL, or play a sound. The
-//! runtime ([`noesis_runtime::integration`]) wraps each as a `set_*` registration
-//! returning a `Drop`-guard. This plugin registers all three once, funnels their
-//! firings through a shared queue, and surfaces them as Bevy messages:
+//! Noesis asks the host to change the OS cursor, open a URL, or play a sound
+//! through process-global callbacks, not per view. [`NoesisIntegrationPlugin`]
+//! registers all three and writes each firing as a message:
 //!
-//!   * [`NoesisCursorRequested`]: fired when the engine wants a cursor change
-//!     (e.g. the pointer moves over an element with a non-default `Cursor`). Also
-//!     applied to the primary window's [`CursorIcon`] as a convenience.
-//!   * [`NoesisOpenUrl`]: fired when a `Hyperlink` / command asks the host to
-//!     open a URL, or when the app calls [`open_url`].
-//!   * [`NoesisPlayAudio`]: fired when a `MediaElement` / sound asks the host to
-//!     play audio, or when the app calls [`play_audio`].
+//! - [`NoesisCursorRequested`]: the pointer moved over an element with a
+//!   different `Cursor`. The plugin also sets the primary window's
+//!   [`CursorIcon`], overwriting any icon you set there.
+//! - [`NoesisOpenUrl`]: a `Hyperlink` or command asked to open a URL, or your
+//!   code called [`open_url`].
+//! - [`NoesisPlayAudio`]: XAML asked to play a sound, or your code called
+//!   [`play_audio`].
 //!
-//! # Threading
+//! Messages are written after [`NoesisSet::Drive`], so a request raised
+//! anywhere in the frame up to that point is readable the same frame from a
+//! later `PostUpdate` system, or from `Update` on the next frame.
 //!
-//! Noesis is thread-affine to the main thread in this crate (see
-//! `crate::render::NoesisRenderState`), so every callback fires **synchronously
-//! on the main thread** while the frame is driven in `PostUpdate`. The shared
-//! queue is therefore only ever touched from one thread; the `Mutex` exists to
-//! satisfy the runtime's `Send` bound on the closures, not to bridge threads.
-//!
-//! # Registration lifetime
-//!
-//! The three `*Callback` guards unregister via FFI on `Drop`, which crashes if
-//! it runs after `shutdown()`. Bevy gives no drop order between main-world
-//! resources, so the guards can't live in this plugin's own resource. Instead
-//! `install_integration_guards` hands them to `crate::render::NoesisRenderState`
-//! (via `own_integration_guards`), whose `Drop` releases them just before it
-//! calls `shutdown()`, the same ownership discipline as the render device and
-//! provider guards.
-//!
-//! These hooks are **single-slot, last-registration-wins** process-globally
-//! (see the runtime module docs): adding this plugin twice, or mixing it with a
-//! hand-rolled `set_cursor_callback`, means the last registration wins. We
-//! register exactly once (guarded by a `Local` flag).
+//! The callbacks are registered during the first frame's
+//! [`NoesisSet::Sync`]; [`open_url`] and [`play_audio`] calls made before that
+//! do nothing. Each hook has one process-wide slot, so registering your own
+//! callback with `noesis_runtime::integration::set_*_callback` replaces this
+//! plugin's and its messages stop.
 
 use std::sync::{Arc, Mutex};
 
@@ -46,58 +31,45 @@ use noesis_runtime::integration;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Built-in cursor kind Noesis asks the host to display. Re-exported from the
-/// runtime so consumers can match on [`NoesisCursorRequested::cursor`] without
-/// depending on `noesis_runtime` directly.
+/// Built-in cursor kind Noesis asks the host to display, carried by
+/// [`NoesisCursorRequested::cursor`].
 pub use noesis_runtime::integration::CursorType;
 
-// Re-export the engine-driving triggers: calling these synchronously invokes the
-// registered callback, so they round-trip back out as the messages below.
 pub use noesis_runtime::integration::{get_culture, open_url, play_audio, set_culture};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Messages
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when the engine requests a cursor change. Read with
-/// `MessageReader<NoesisCursorRequested>`. The bridge also applies the request
-/// to the primary window's [`CursorIcon`].
+/// Noesis wants a different cursor shown. The plugin also applies it to the
+/// primary window's [`CursorIcon`] when there is a system equivalent.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoesisCursorRequested {
     /// The cursor the engine wants shown.
     pub cursor: CursorType,
 }
 
-/// Emitted when the engine asks the host to open a URL (e.g. a `Hyperlink`).
+/// Noesis asks the host to open a URL, for example from a `Hyperlink`. The
+/// plugin doesn't open it; handle the message yourself.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct NoesisOpenUrl {
     /// The URL to open.
     pub url: String,
 }
 
-/// Emitted when the engine asks the host to play a sound.
+/// Noesis asks the host to play a sound. The plugin doesn't play it; handle
+/// the message yourself.
 #[derive(Message, Debug, Clone, PartialEq)]
 pub struct NoesisPlayAudio {
-    /// Canonicalized URI of the sound to play.
+    /// URI of the sound to play.
     pub uri: String,
     /// Requested volume in `[0.0, 1.0]`.
     pub volume: f32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared queue + registration guards
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One firing of a registered integration callback, waiting to be turned into a
-/// Bevy message by [`drain_integration_queue`].
 enum IntegrationEvent {
     Cursor(CursorType),
     OpenUrl(String),
     PlayAudio(String, f32),
 }
 
-/// Queue between the (main-thread) Noesis callbacks and the drain system. Cloned
-/// `Arc` handles are captured by the registered closures.
+// Only touched on the main thread; the `Mutex` satisfies the callbacks' `Send` bound.
 #[derive(Resource, Clone, Default)]
 struct SharedIntegrationQueue(Arc<Mutex<Vec<IntegrationEvent>>>);
 
@@ -111,14 +83,10 @@ impl SharedIntegrationQueue {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Register the three process-global callbacks once and hand their guards to
-/// [`NoesisRenderState`] for ordered teardown (see the module docs). Each
-/// closure pushes onto the shared queue. Runs in [`NoesisSet::Sync`], before
-/// any view is built or driven, so the callbacks are live for the first frame.
+/// Registers the callbacks once, before any view is built. The guards go to
+/// [`NoesisRenderState`] because unregistering after `shutdown()` crashes, and
+/// Bevy gives no drop order between resources; its `Drop` releases them just
+/// before calling `shutdown()`.
 #[allow(clippy::needless_pass_by_value)]
 fn install_integration_guards(
     queue: Res<SharedIntegrationQueue>,
@@ -159,9 +127,6 @@ fn install_integration_guards(
     *installed = true;
 }
 
-/// Drain queued callback firings into their corresponding Bevy messages. Runs
-/// after [`NoesisSet::Drive`], so any callback raised while driving this frame's
-/// view is surfaced the same frame.
 #[allow(clippy::needless_pass_by_value)]
 fn drain_integration_queue(
     queue: Res<SharedIntegrationQueue>,
@@ -184,9 +149,7 @@ fn drain_integration_queue(
     }
 }
 
-/// Apply the most recent cursor request to the primary window. No-op when there
-/// is no window (e.g. a headless app); the [`NoesisCursorRequested`] message is
-/// still emitted for consumers that route the cursor themselves.
+/// Applies the frame's last cursor request to the primary window, if any.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_cursor_to_window(
     mut reader: MessageReader<NoesisCursorRequested>,
@@ -197,7 +160,6 @@ fn apply_cursor_to_window(
         reader.clear();
         return;
     };
-    // Only the last request in a frame matters.
     if let Some(req) = reader.read().last()
         && let Some(icon) = to_system_cursor(req.cursor)
     {
@@ -205,9 +167,8 @@ fn apply_cursor_to_window(
     }
 }
 
-/// Map a Noesis [`CursorType`] to the nearest Bevy [`SystemCursorIcon`].
-/// Returns `None` for cursors with no standard system equivalent (`None`,
-/// `Custom`, …). Those leave the window cursor unchanged.
+/// Nearest Bevy [`SystemCursorIcon`], or `None` (leave the cursor alone) when
+/// there is no system equivalent.
 fn to_system_cursor(ty: CursorType) -> Option<SystemCursorIcon> {
     use CursorType as C;
     Some(match ty {
@@ -228,19 +189,13 @@ fn to_system_cursor(ty: CursorType) -> Option<SystemCursorIcon> {
         C::ScrollSE => SystemCursorIcon::SeResize,
         C::Wait => SystemCursorIcon::Wait,
         C::Hand => SystemCursorIcon::Pointer,
-        // `None`, `Custom`, and any future (`non_exhaustive`) variant have no
-        // standard system equivalent; leave the window cursor unchanged.
         _ => return None,
     })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Registers Noesis's process-global integration callbacks and surfaces them as
-/// Bevy messages. Added transitively by [`crate::NoesisPlugin`]. See the module
-/// docs for threading and lifetime details.
+/// Registers the Noesis host callbacks and writes them as
+/// [`NoesisCursorRequested`], [`NoesisOpenUrl`] and [`NoesisPlayAudio`]
+/// messages. [`NoesisPlugin`](crate::NoesisPlugin) adds it.
 pub struct NoesisIntegrationPlugin;
 
 impl Plugin for NoesisIntegrationPlugin {

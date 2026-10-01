@@ -1,18 +1,21 @@
-//! Per-view clip bridge: imperative polygon clips against named XAML elements on a
-//! single [`NoesisView`](crate::NoesisView). The clip counterpart of
-//! [`crate::geometry`] — where that assigns a `Path`'s `Data`, this assigns any
-//! element's [`UIElement::Clip`](noesis_runtime::view::FrameworkElement::set_clip_points).
+//! Polygon clips: clip a named element to a polygon set from Rust.
 //!
-//! Add a [`NoesisClip`] component to the view's camera entity. Its `clips` map is
-//! the desired clip polygon per `x:Name`, applied whenever the component changes
-//! (Bevy change detection). Each set of points (in the element's own coordinate
-//! space) becomes a filled Noesis `StreamGeometry` set as the element's `Clip`; an
-//! empty polygon clears the clip. Rewriting the polygon each frame animates a
-//! moving clip region.
+//! Add a [`NoesisClip`] component to a [`NoesisView`](crate::NoesisView) camera
+//! entity or a [`UiPanel`](crate::UiPanel) entity. Its `clips` map holds a
+//! polygon per element `x:Name`, in the element's own coordinates. When the
+//! component changes, the scene is rebuilt, or the panel mounts, the reconcile
+//! system in [`NoesisSet::Apply`] sets each polygon as the element's `Clip`
+//! (through [`set_clip_points`](noesis_runtime::view::FrameworkElement::set_clip_points)).
+//! Rewriting a polygon every frame animates the clip.
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the writes against
-//! that view's live scene. No cross-world queues.
+//! ```ignore
+//! commands.entity(view).insert(
+//!     NoesisClip::new().clip("Portrait", vec![[0.0, 0.0], [64.0, 0.0], [32.0, 64.0]]),
+//! );
+//! ```
+//!
+//! An empty polygon clears the clip. Removing an entry from the map does not:
+//! the element keeps its last clip. Unknown names log a warning.
 
 use std::collections::HashMap;
 
@@ -20,20 +23,18 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Per-view clip bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
+/// Per-view clip bridge. Add it to a [`NoesisView`](crate::NoesisView) or
+/// [`UiPanel`](crate::UiPanel) entity; see the [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisClip {
-    /// Desired clip polygon per element `x:Name`. Written to the view's elements
-    /// whenever this component changes. Each value is a closed polygon through
-    /// `[x, y]` pairs in the element's own coordinate space; an empty `Vec` clears
-    /// the element's clip. A degenerate polygon (1 or 2 points) is skipped with a
-    /// warning on apply.
+    /// Clip polygon per element `x:Name`, as `[x, y]` points in the element's
+    /// own coordinates; the polygon closes itself. An empty `Vec` clears the
+    /// clip. One or two points is rejected with a warning.
     pub clips: HashMap<String, Vec<[f32; 2]>>,
 }
 
 impl NoesisClip {
-    /// Creates an empty bridge with no clips. Chain [`clip`](Self::clip) to add
-    /// polygons before inserting it on the [`NoesisView`](crate::NoesisView) camera.
+    /// An empty bridge. Chain [`clip`](Self::clip) to add polygons.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -47,16 +48,15 @@ impl NoesisClip {
         self
     }
 
-    /// Set element `name`'s clip from a system holding `&mut NoesisClip`. The
-    /// runtime counterpart of [`clip`](Self::clip): the next reconcile assigns the
-    /// polygon (or clears it, when empty) on the live element.
+    /// In-place form of [`clip`](Self::clip), for a system holding
+    /// `&mut NoesisClip`. Applied by the next reconcile.
     pub fn set(&mut self, name: impl Into<String>, points: Vec<[f32; 2]>) {
         self.clips.insert(name.into(), points);
     }
 }
 
-/// Reconcile every view's [`NoesisClip`]: apply the desired clip writes when the
-/// component changed.
+/// Apply each entity's [`NoesisClip`] when it changed, its scene was rebuilt, or
+/// its panel mounted.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_clip_bridge(
     views: Query<(Entity, Ref<NoesisClip>)>,
@@ -75,14 +75,14 @@ pub(crate) fn sync_clip_bridge(
     }
 }
 
-/// Wires the per-view clip bridge. Added transitively by [`crate::NoesisPlugin`].
+/// Registers the [`NoesisClip`] reconcile system. Added by
+/// [`crate::NoesisPlugin`].
 pub struct NoesisClipPlugin;
 
 impl Plugin for NoesisClipPlugin {
     fn build(&self, app: &mut App) {
-        // After `sync_panels` so a panel's `NoesisClip` re-applies the same frame
-        // its fragment mounts (the bridge reads `panel_mounted_this_frame`, set by
-        // `sync_panels`); mirrors the geometry bridge's ordering.
+        // After `sync_panels`, which sets `panel_mounted_this_frame`, so a panel
+        // applies the same frame it mounts.
         app.add_systems(
             PostUpdate,
             sync_clip_bridge

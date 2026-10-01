@@ -1,32 +1,30 @@
-//! App-level diagnostics bridge: surface Noesis's process-global allocator
-//! counters as a Bevy resource and route its error handler into Bevy's log.
+//! Engine-wide diagnostics: Noesis allocator counters, bridge bookkeeping and
+//! timing in the [`NoesisDiagnostics`] resource, plus Noesis error reports
+//! routed into Bevy's log.
 //!
-//! Unlike the per-element bridges (visibility, layout, brushes, …) this targets
-//! nothing in the visual tree; it watches the engine itself. The plugin owns:
+//! [`NoesisDiagnosticsPlugin`] is added by [`crate::NoesisPlugin`]. Read the
+//! resource from any system:
 //!
-//!   * [`NoesisDiagnostics`], a resource refreshed every frame from
-//!     `noesis_runtime::diagnostics::{allocated_memory, allocated_memory_accum,
-//!     allocations_count}`. Absolute values aren't meaningful across builds;
-//!     reason about deltas and monotonicity (`accum` is monotonic
-//!     non-decreasing; the others rise and fall with object lifetimes).
-//!   * an optional process-global error handler ([`route_errors`]) that forwards
-//!     Noesis `NS_ERROR` reports into Bevy `tracing` (`warn!` / `error!`). It is
-//!     installed for the process lifetime (see `install_error_routing`).
+//! ```ignore
+//! fn report(diag: Res<NoesisDiagnostics>) {
+//!     if diag.is_changed() {
+//!         info!("noesis: {} bytes live, {} scenes", diag.allocated_memory, diag.live_scenes);
+//!     }
+//! }
+//! ```
 //!
-//! [`route_errors`]: NoesisDiagnosticsPlugin::route_errors
-//!
-//! Both halves need [`crate::NoesisPlugin`] to have called `noesis_runtime::init`
-//! first, which it has, since this plugin is added from inside `NoesisPlugin`
-//! after `init()`.
+//! Absolute allocator figures vary between builds; compare them over time.
+//! The `live_*` counts return to zero once their owners despawn, which makes them
+//! useful for leak checks.
 
 use bevy::prelude::*;
 use noesis_runtime::diagnostics;
 
-/// Snapshot of Noesis's allocator counters, refreshed once per frame.
+/// Noesis engine counters, refreshed every frame in `Update`.
 ///
-/// Starts at all-zero (`Default`); a working refresh fills it with the live
-/// figures after the engine has allocated anything (which it has by the time the
-/// first scene builds). All values are bytes/counts straight from Noesis.
+/// The `live_*` counts read 0 in an app without Noesis render state (no
+/// `RenderApp` and no headless harness). Change detection fires only on frames
+/// where a value moved.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoesisDiagnostics {
     /// Bytes currently allocated through Noesis's allocator
@@ -37,52 +35,41 @@ pub struct NoesisDiagnostics {
     pub allocated_memory_accum: u32,
     /// Number of live allocations (`GetAllocationsCount`).
     pub allocations_count: u32,
-    /// Cumulative count of FFI "hops" into the Noesis engine (name lookups, DP
-    /// get/set, collection ops) since process start. Monotonic non-decreasing;
-    /// reason about the per-frame *delta* to see how much engine traffic a frame
-    /// cost. Stays 0 in a build with no live view.
+    /// Cumulative count of crate calls into Noesis (name lookups, property
+    /// get/set, collection ops) since process start. Monotonic; the per-frame
+    /// delta shows how much engine traffic a frame cost.
     pub ffi_hops: u64,
-    /// Number of live Noesis scenes (one per built [`crate::NoesisView`]). Returns
-    /// to 0 after every view despawns, which is the despawn-teardown invariant.
+    /// Number of live Noesis scenes (one per built [`crate::NoesisView`]).
     pub live_scenes: usize,
-    /// Number of live mounted panels (one per [`crate::UiPanel`] entity whose
-    /// fragment has been built). Returns to 0 after every panel despawns, mirroring
-    /// [`live_scenes`](Self::live_scenes) for the panel primitive.
+    /// Number of mounted panels (one per [`crate::UiPanel`] whose fragment has
+    /// been built).
     pub live_panels: usize,
-    /// Number of live entity-keyed list bindings (one per `(view, x:Name)` a
-    /// [`crate::UiList`] reconciles). Returns to 0 after every owning view
-    /// despawns, mirroring [`live_panels`](Self::live_panels) for the list
-    /// primitive.
+    /// Number of live list bindings (one per `(view, x:Name)` a
+    /// [`crate::UiList`] drives).
     pub live_lists: usize,
-    /// Number of live [`crate::NoesisBinding`] target entries (one per
-    /// `(view, x:Name, property)` a binding reconciles). Returns to 0 after every
-    /// binding component (or its owning view) is removed, mirroring
-    /// [`live_lists`](Self::live_lists) for the binding bridge.
+    /// Number of live [`crate::NoesisBinding`] targets (one per
+    /// `(view, x:Name, property)`).
     pub live_bindings: usize,
-    /// Wall-time of the previous frame's `NoesisSet::Apply` phase (every bridge's
-    /// FFI push). `ZERO` until the first frame with a live view has run.
+    /// Wall time of the previous frame's [`NoesisSet::Apply`](crate::NoesisSet::Apply)
+    /// phase, where every bridge writes into Noesis. `ZERO` before the first one.
     pub apply_time: std::time::Duration,
 }
 
-/// App-level plugin exposing [`NoesisDiagnostics`] and (optionally) routing the
-/// Noesis error handler into Bevy's log.
+/// Inserts [`NoesisDiagnostics`] and, when [`route_errors`](Self::route_errors)
+/// is set, routes Noesis error reports into Bevy's log.
 ///
-/// Added by [`crate::NoesisPlugin`] with [`route_errors`](Self::route_errors)
-/// enabled. Construct it directly to opt out of error routing:
-///
-/// ```ignore
-/// app.add_plugins(NoesisDiagnosticsPlugin { route_errors: false });
-/// ```
+/// [`crate::NoesisPlugin`] adds it with `route_errors: true`. Adding it a second
+/// time panics, so `route_errors: false` only takes effect in an app that adds
+/// neither `NoesisPlugin` nor [`NoesisPlugin::add_bridge_plugins`](crate::NoesisPlugin::add_bridge_plugins).
 pub struct NoesisDiagnosticsPlugin {
-    /// When `true`, install a process-global Noesis error handler that forwards
-    /// reports into Bevy `tracing` (`warn!`, or `error!` for fatal). The handler
-    /// stays installed for the process lifetime (see `install_error_routing`).
+    /// Install a process-global Noesis error handler that logs each report under
+    /// the `noesis` target: `warn!`, or `error!` for fatal ones. Once installed it
+    /// stays for the life of the process.
     pub route_errors: bool,
 }
 
 impl Default for NoesisDiagnosticsPlugin {
     fn default() -> Self {
-        // Default on: log-only, so it can't break an app that doesn't want it.
         Self { route_errors: true }
     }
 }
@@ -98,20 +85,15 @@ impl Plugin for NoesisDiagnosticsPlugin {
     }
 }
 
-/// Install a process-global Noesis error handler that forwards into Bevy's log,
-/// for the lifetime of the process.
+/// Install the error handler for the life of the process. Must run after
+/// `noesis_runtime::init()`.
 ///
-/// `NoesisPlugin` adds this only after `noesis_runtime::init()`, so the handler
-/// slot is live. We deliberately **leak** the RAII guard: it restores the
-/// predecessor handler on drop, but Bevy gives no drop-order guarantee between a
-/// main-world resource and the render-world `NoesisRenderState` that owns
-/// `shutdown()`. If the guard dropped after shutdown, the restore call would
-/// reach into a torn-down `NsCore` kernel and crash. A process-global log hook
-/// wants process lifetime anyway (the same reason `log::set_logger` never
-/// uninstalls), so leaking is the correct trade, not a workaround.
+/// The guard is leaked on purpose. Dropping it restores the previous handler,
+/// which crashes if it runs after `shutdown()`, and nothing would order a
+/// resource holding it before `NoesisRenderState`'s `Drop` (which calls
+/// `shutdown()`).
 fn install_error_routing() {
-    // Guard against re-install: building several `App`s in one process (tests,
-    // editors) would otherwise leak — and stack — a handler each time.
+    // Several `App`s in one process (tests) would otherwise stack a handler each.
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
         let guard = diagnostics::set_error_handler(|file, line, message, fatal| {
@@ -125,11 +107,7 @@ fn install_error_routing() {
     });
 }
 
-/// Pull the current allocator counters, FFI-hop tally, live-scene count and last
-/// Apply wall-time into [`NoesisDiagnostics`]. The Noesis-sourced figures
-/// (`ffi_hops`, `live_scenes`) come from the render state when it exists;
-/// headless builds without a `RenderApp` have none, so they read 0. `set_if_neq`
-/// keeps change-detection quiet on frames where nothing moved.
+/// Refresh [`NoesisDiagnostics`]; `set_if_neq` keeps change detection quiet.
 #[allow(clippy::needless_pass_by_value)]
 fn refresh_diagnostics(
     mut diag: ResMut<NoesisDiagnostics>,

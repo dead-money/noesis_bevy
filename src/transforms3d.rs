@@ -1,50 +1,34 @@
-//! Per-view **3D transform** writes against named XAML elements: the
-//! `UIElement.Transform3D` attached behaviour (WinUI/Noesis) that rotates,
-//! scales and translates an element in 3D space about a center, with the
-//! implicit projection camera supplying perspective. Distinct from the 2D
-//! `RenderTransform` bridge ([`crate::transforms`]): that one sets
-//! `RenderTransform`, this one sets `Transform3D`.
+//! Sets the `Transform3D` of named elements: rotation, scale, and translation
+//! in 3D with perspective, for effects such as a card flip. For flat 2D motion,
+//! use the `RenderTransform` bridge in [`crate::transforms`].
 //!
-//! Noesis's `CompositeTransform3D` bundles center / rotation / scale /
-//! translation (each XYZ) into one object. We build one from Rust
-//! ([`CompositeTransform3D`](noesis_runtime::transforms::CompositeTransform3D))
-//! and assign it via
-//! [`FrameworkElement::set_transform3d`](noesis_runtime::view::FrameworkElement::set_transform3d)
-//! (`UIElement::SetTransform3D`). Like `RenderTransform`, `Transform3D` is a
-//! render-time concern: it never disturbs the element's measured/arranged
-//! bounds, so it can't reflow surrounding layout.
-//!
-//! Add a [`NoesisTransform3D`] component to the view's camera entity. Its
-//! `transforms` map is the desired [`Transform3DSpec`] per `x:Name`, applied to
-//! the view's elements whenever the component changes (Bevy change detection).
+//! Add a [`NoesisTransform3D`] to a [`NoesisView`](crate::NoesisView) camera.
+//! Each entry in [`transforms`](NoesisTransform3D::transforms) becomes a
+//! `CompositeTransform3D`, and each entry in
+//! [`matrices`](NoesisTransform3D::matrices) a `MatrixTransform3D`, assigned
+//! with
+//! [`FrameworkElement::set_transform3d`](noesis_runtime::view::FrameworkElement::set_transform3d).
+//! Like a render transform, it changes how the element is painted, not its
+//! layout bounds.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
 //!     NoesisTransform3D::new()
-//!         .rotate_y("Card", 45.0)            // flip 45° around the Y axis
+//!         .rotate_y("Card", 45.0)             // turn 45° around the Y axis
 //!         .translate("Card", 0.0, 0.0, -20.0) // push 20 DIP into the screen
-//!         .scale("Card", 1.2, 1.2, 1.0),     // 120% in-plane
+//!         .scale("Card", 1.2, 1.2, 1.0),      // 120% in-plane
 //! );
 //! ```
 //!
-//! This is a **read-watch** bridge mirroring [`crate::transforms`]: besides
-//! applying the writes it polls each element's *live* `Transform3D` back from
-//! Noesis and emits a [`NoesisTransform3DChanged`] carrying the values Noesis
-//! actually stored. The read-back is element-sourced (element → `Transform3D`
-//! DP → `CompositeTransform3D` object) and gated on pointer identity with the
-//! object we assigned, so it is bluff-resistant: an un-applied / mis-routed
-//! write leaves the element with no `Transform3D` and emits nothing.
+//! Whenever the component changes or the view's scene is rebuilt, every entry
+//! is assigned again. Removing an entry leaves the last transform on the
+//! element.
 //!
-//! **Rendering caveat.** Assigning a `Transform3D` (this bridge) is a pure
-//! data-model operation. *Compositing* the resulting perspective image, however,
-//! routes through the offscreen effects/projection render path, parts of which
-//! (Downsample/Upsample and the effect shaders) are not yet implemented in our
-//! wgpu render device. A scene that needs that path can panic at render time. The
-//! bridge itself does not require it; only the final visual does.
-//!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies + polls against
-//! that view's live scene; no cross-world queues.
+//! The bridge reads each element's live `Transform3D` back every frame and
+//! emits [`NoesisTransform3DChanged`] or [`NoesisMatrixTransform3DChanged`] when
+//! its values change. It reports only while the element still holds the
+//! transform this bridge assigned, so silence means the write did not land or
+//! something else replaced it.
 
 use std::collections::HashMap;
 
@@ -53,28 +37,22 @@ use noesis_runtime::transforms::Composite3DFields;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Spec
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A 3D composite transform: scale → rotate → translate, applied about a shared
-/// center `(CenterX, CenterY, CenterZ)`. Mirrors XAML's `CompositeTransform3D`;
-/// the [`Default`] is the identity (unit scale, no rotation/translation, origin
-/// center).
+/// A `CompositeTransform3D`: scale, then rotate about
+/// [`center`](Self::center), then translate. [`Default`] is the identity.
 ///
-/// Perspective is *not* a field here: Noesis applies an implicit projection
-/// camera to any element that carries a `Transform3D`, so depth (`translate.z`,
-/// rotation about X/Y) reads as perspective foreshortening without an explicit
-/// distance knob.
+/// There is no perspective field. Noesis projects any element with a
+/// `Transform3D` through an implicit camera, so depth and rotation about X or Y
+/// foreshorten on their own.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform3DSpec {
-    /// Center of the transformation `[x, y, z]` in view DIPs.
+    /// Pivot `[x, y, z]` for scale and rotation, in DIPs relative to the
+    /// element's top-left corner.
     pub center: [f32; 3],
     /// Rotation about each axis `[x, y, z]` in degrees.
     pub rotation: [f32; 3],
     /// Scale factors `[x, y, z]` (`1.0` = unchanged).
     pub scale: [f32; 3],
-    /// Translation `[x, y, z]` in view DIPs (`z` toward/away from the viewer).
+    /// Translation `[x, y, z]` in DIPs; `z` moves along the view axis.
     pub translate: [f32; 3],
 }
 
@@ -90,8 +68,6 @@ impl Default for Transform3DSpec {
 }
 
 impl Transform3DSpec {
-    /// Lower this spec into the runtime's flat [`Composite3DFields`] for
-    /// assignment.
     #[must_use]
     pub(crate) fn to_fields(self) -> Composite3DFields {
         Composite3DFields {
@@ -110,8 +86,6 @@ impl Transform3DSpec {
         }
     }
 
-    /// Rebuild a spec from the runtime's [`Composite3DFields`] read back off a
-    /// live element; the inverse of [`Self::to_fields`].
     #[must_use]
     pub(crate) fn from_fields(f: Composite3DFields) -> Self {
         Self {
@@ -123,24 +97,21 @@ impl Transform3DSpec {
     }
 }
 
-/// A raw 3D matrix transform: the arbitrary-affine alternative to
-/// [`Transform3DSpec`], mirroring XAML's `MatrixTransform3D`. Where
-/// `Transform3DSpec` decomposes into center/rotation/scale/translate, this
-/// carries the bare 12 coefficients of a Noesis `Transform3`: four rows of a
-/// `Vector3`, `[row0(xyz), row1(xyz), row2(xyz), row3(xyz)]`, with row 3 the
-/// translation (Noesis uses row-vector convention, `v' = v · M`).
+/// A `MatrixTransform3D`: an arbitrary affine 3D transform, for when
+/// [`Transform3DSpec`]'s decomposed form isn't enough.
 ///
-/// Build one with [`Self::from_rows`] (the runtime form) or [`Self::from_mat4`]
-/// (a row-major 4×4 affine whose projective 4th column is dropped). The
+/// Holds the 12 coefficients of a Noesis `Transform3`: four rows of three,
+/// with row 3 the translation. Noesis uses row vectors (`v' = v * M`). Build
+/// one with [`from_rows`](Self::from_rows) or [`from_mat4`](Self::from_mat4).
 /// [`Default`] is the identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Matrix3DSpec {
-    /// The 12 `Transform3` coefficients (4 rows × 3 columns, row-major).
+    /// The 12 coefficients, 4 rows by 3 columns, row-major.
     pub rows: [f32; 12],
 }
 
 impl Default for Matrix3DSpec {
-    /// The identity transform (no scale/rotation, zero translation).
+    /// The identity transform.
     fn default() -> Self {
         Self {
             #[rustfmt::skip]
@@ -155,18 +126,15 @@ impl Default for Matrix3DSpec {
 }
 
 impl Matrix3DSpec {
-    /// Build from the runtime's 12-float `Transform3` form directly
-    /// (`[row0(xyz), row1(xyz), row2(xyz), row3(xyz)]`).
+    /// Build from the 12 coefficients, `[row0 xyz, row1 xyz, row2 xyz, row3 xyz]`.
     #[must_use]
     pub fn from_rows(rows: [f32; 12]) -> Self {
         Self { rows }
     }
 
-    /// Build from a **row-major** 4×4 affine matrix, dropping the projective 4th
-    /// column. For an affine transform that column is `[0, 0, 0, 1]ᵀ`, so the
-    /// `Transform3` is exactly `rows[r][0..3]` for each row `r`, with translation
-    /// in row 3. This matches Noesis's row-vector convention; a column-vector matrix
-    /// must be transposed by the caller first.
+    /// Build from a 4x4 affine matrix whose translation is `m[3]`, dropping
+    /// the 4th element of each row (`[0, 0, 0, 1]` for an affine matrix).
+    /// Transpose a matrix that keeps its translation in `m[_][3]` first.
     #[must_use]
     pub fn from_mat4(m: [[f32; 4]; 4]) -> Self {
         #[rustfmt::skip]
@@ -180,33 +148,28 @@ impl Matrix3DSpec {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view 3D-transform bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity. The builder methods *merge* into the per-name spec, so `rotate_y`
-/// then `translate` on the same element compose into one `CompositeTransform3D`.
+/// 3D transforms for named elements. Add to a
+/// [`NoesisView`](crate::NoesisView) camera entity; see the
+/// [module docs](self).
+///
+/// The per-field builders and setters merge into the element's existing spec,
+/// so `rotate_y` then `translate` on one name give one transform with both.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisTransform3D {
-    /// Desired [`Transform3DSpec`] (decomposed `CompositeTransform3D`) per element
-    /// `x:Name`. Assigned as each element's `Transform3D` whenever this component
-    /// changes.
+    /// Composite transform per element `x:Name` (may be scope-qualified,
+    /// `"Host/Leaf"`). A missing name or a non-`UIElement` is skipped with a
+    /// warning.
     pub transforms: HashMap<String, Transform3DSpec>,
-    /// Desired [`Matrix3DSpec`] (raw `MatrixTransform3D`) per element `x:Name`.
-    /// Both maps drive the single `UIElement::Transform3D` DP, so a name should
-    /// appear in *one* of them. If it appears in both, the reconcile applies
-    /// [`transforms`](Self::transforms) first and [`matrices`](Self::matrices)
-    /// second, so the matrix deterministically wins and the composite's read-back
-    /// stays silent.
+    /// Matrix transform per element `x:Name`. Both maps set the same
+    /// `Transform3D` property, so use one per name. A name in both gets the
+    /// matrix, and its composite read-back stays silent.
     pub matrices: HashMap<String, Matrix3DSpec>,
 }
 
 impl NoesisTransform3D {
-    /// An empty bridge with no queued transforms. Chain the builder methods
-    /// ([`set`](Self::set), [`translate`](Self::translate),
-    /// [`rotate_y`](Self::rotate_y), [`matrix`](Self::matrix), ...) to populate
-    /// it, then insert it on the [`NoesisView`](crate::NoesisView) camera.
+    /// An empty bridge. Chain [`set`](Self::set),
+    /// [`translate`](Self::translate), [`rotate_y`](Self::rotate_y),
+    /// [`matrix`](Self::matrix), and the other builders to populate it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -219,54 +182,53 @@ impl NoesisTransform3D {
         self
     }
 
-    /// Builder: set `name`'s translation `(x, y, z)`, keeping any other fields
-    /// already queued for it.
+    /// Builder: set `name`'s translation in DIPs, keeping its other fields.
     #[must_use]
     pub fn translate(mut self, name: impl Into<String>, x: f32, y: f32, z: f32) -> Self {
         self.entry(name).translate = [x, y, z];
         self
     }
 
-    /// Builder: set `name`'s scale factors `(x, y, z)`, keeping other fields.
+    /// Builder: set `name`'s scale factors, keeping its other fields.
     #[must_use]
     pub fn scale(mut self, name: impl Into<String>, x: f32, y: f32, z: f32) -> Self {
         self.entry(name).scale = [x, y, z];
         self
     }
 
-    /// Builder: set `name`'s pivot center `(x, y, z)`, keeping other fields.
+    /// Builder: set `name`'s pivot in DIPs, keeping its other fields.
     #[must_use]
     pub fn center(mut self, name: impl Into<String>, x: f32, y: f32, z: f32) -> Self {
         self.entry(name).center = [x, y, z];
         self
     }
 
-    /// Builder: set all three rotation angles `(x, y, z)` in degrees, keeping
-    /// other fields.
+    /// Builder: set all three rotation angles in degrees, keeping its other
+    /// fields.
     #[must_use]
     pub fn rotate(mut self, name: impl Into<String>, x: f32, y: f32, z: f32) -> Self {
         self.entry(name).rotation = [x, y, z];
         self
     }
 
-    /// Builder: set `name`'s rotation about the X axis (degrees), keeping the
-    /// other two rotation angles and all other fields.
+    /// Builder: set `name`'s rotation about the X axis in degrees, keeping
+    /// everything else.
     #[must_use]
     pub fn rotate_x(mut self, name: impl Into<String>, degrees: f32) -> Self {
         self.entry(name).rotation[0] = degrees;
         self
     }
 
-    /// Builder: set `name`'s rotation about the Y axis (degrees), keeping the
-    /// other two rotation angles and all other fields.
+    /// Builder: set `name`'s rotation about the Y axis in degrees, keeping
+    /// everything else.
     #[must_use]
     pub fn rotate_y(mut self, name: impl Into<String>, degrees: f32) -> Self {
         self.entry(name).rotation[1] = degrees;
         self
     }
 
-    /// Builder: set `name`'s rotation about the Z axis (degrees), keeping the
-    /// other two rotation angles and all other fields.
+    /// Builder: set `name`'s rotation about the Z axis in degrees, keeping
+    /// everything else.
     #[must_use]
     pub fn rotate_z(mut self, name: impl Into<String>, degrees: f32) -> Self {
         self.entry(name).rotation[2] = degrees;
@@ -277,96 +239,76 @@ impl NoesisTransform3D {
         self.transforms.entry(name.into()).or_default()
     }
 
-    /// Builder: assign `name` a raw matrix [`Transform3D`](Matrix3DSpec),
-    /// replacing any matrix previously queued for it. See the note on
-    /// [`Self::matrices`]: a name should use either the composite builders or this
-    /// matrix path, not both.
+    /// Builder: give `name` a matrix transform. Don't also give it a composite
+    /// transform; see [`matrices`](Self::matrices).
     #[must_use]
     pub fn matrix(mut self, name: impl Into<String>, spec: Matrix3DSpec) -> Self {
         self.matrices.insert(name.into(), spec);
         self
     }
 
-    /// Builder: assign `name` a raw matrix from the runtime's 12-float
-    /// `Transform3` form. Convenience for [`Self::matrix`] +
-    /// [`Matrix3DSpec::from_rows`].
+    /// Builder: [`matrix`](Self::matrix) with [`Matrix3DSpec::from_rows`].
     #[must_use]
     pub fn matrix_rows(self, name: impl Into<String>, rows: [f32; 12]) -> Self {
         self.matrix(name, Matrix3DSpec::from_rows(rows))
     }
 
-    /// Replace `name`'s entire spec from a system holding `&mut NoesisTransform3D`.
-    /// The runtime counterpart of [`set`](Self::set): the next reconcile assigns
-    /// it to the live element.
+    /// Replace `name`'s entire spec. The `&mut` form of [`set`](Self::set),
+    /// for systems that update the component.
     pub fn write(&mut self, name: impl Into<String>, spec: Transform3DSpec) {
         self.transforms.insert(name.into(), spec);
     }
 
-    /// Set `name`'s translation `(x, y, z)` in place, keeping its other fields.
-    /// The runtime counterpart of [`translate`](Self::translate).
+    /// The `&mut` form of [`translate`](Self::translate).
     pub fn set_translate(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
         self.entry(name).translate = [x, y, z];
     }
 
-    /// Set `name`'s scale factors `(x, y, z)` in place, keeping its other fields.
-    /// The runtime counterpart of [`scale`](Self::scale).
+    /// The `&mut` form of [`scale`](Self::scale).
     pub fn set_scale(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
         self.entry(name).scale = [x, y, z];
     }
 
-    /// Set `name`'s pivot center `(x, y, z)` in place, keeping its other fields.
-    /// The runtime counterpart of [`center`](Self::center).
+    /// The `&mut` form of [`center`](Self::center).
     pub fn set_center(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
         self.entry(name).center = [x, y, z];
     }
 
-    /// Set all three of `name`'s rotation angles `(x, y, z)` in degrees in place,
-    /// keeping its other fields. The runtime counterpart of [`rotate`](Self::rotate).
+    /// The `&mut` form of [`rotate`](Self::rotate).
     pub fn set_rotation(&mut self, name: impl Into<String>, x: f32, y: f32, z: f32) {
         self.entry(name).rotation = [x, y, z];
     }
 
-    /// Set `name`'s rotation about the X axis (degrees) in place, keeping the
-    /// other angles and fields. The runtime counterpart of [`rotate_x`](Self::rotate_x).
+    /// The `&mut` form of [`rotate_x`](Self::rotate_x).
     pub fn set_rotation_x(&mut self, name: impl Into<String>, degrees: f32) {
         self.entry(name).rotation[0] = degrees;
     }
 
-    /// Set `name`'s rotation about the Y axis (degrees) in place, keeping the
-    /// other angles and fields. The runtime counterpart of [`rotate_y`](Self::rotate_y).
+    /// The `&mut` form of [`rotate_y`](Self::rotate_y).
     pub fn set_rotation_y(&mut self, name: impl Into<String>, degrees: f32) {
         self.entry(name).rotation[1] = degrees;
     }
 
-    /// Set `name`'s rotation about the Z axis (degrees) in place, keeping the
-    /// other angles and fields. The runtime counterpart of [`rotate_z`](Self::rotate_z).
+    /// The `&mut` form of [`rotate_z`](Self::rotate_z).
     pub fn set_rotation_z(&mut self, name: impl Into<String>, degrees: f32) {
         self.entry(name).rotation[2] = degrees;
     }
 
-    /// Assign `name` a raw matrix [`Transform3D`](Matrix3DSpec) in place,
-    /// replacing any matrix previously queued for it. The runtime counterpart of
-    /// [`matrix`](Self::matrix).
+    /// The `&mut` form of [`matrix`](Self::matrix).
     pub fn write_matrix(&mut self, name: impl Into<String>, spec: Matrix3DSpec) {
         self.matrices.insert(name.into(), spec);
     }
 
-    /// Assign `name` a raw matrix from the runtime's 12-float `Transform3` form in
-    /// place. The runtime counterpart of [`matrix_rows`](Self::matrix_rows).
+    /// The `&mut` form of [`matrix_rows`](Self::matrix_rows).
     pub fn write_matrix_rows(&mut self, name: impl Into<String>, rows: [f32; 12]) {
         self.matrices
             .insert(name.into(), Matrix3DSpec::from_rows(rows));
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back message
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when a transformed element's live `Transform3D` differs from the
-/// previous frame's snapshot (and on the first poll after it is assigned). The
-/// `spec` is read back from Noesis, so it reflects what the engine stored.
-/// Read with `MessageReader<NoesisTransform3DChanged>`.
+/// An element's live composite `Transform3D` values changed, or were read for
+/// the first time after assignment. `spec` is read from Noesis, not copied from
+/// the component.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisTransform3DChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose element changed.
@@ -377,28 +319,19 @@ pub struct NoesisTransform3DChanged {
     pub spec: Transform3DSpec,
 }
 
-/// Emitted when a matrix-transformed element's live `Transform3D` differs from
-/// the previous frame's snapshot (and on the first poll after it is assigned).
-/// The `matrix` is read back from Noesis (the 12 `Transform3` coefficients), so
-/// it reflects what the engine stored. Read with
-/// `MessageReader<NoesisMatrixTransform3DChanged>`.
+/// An element's live matrix `Transform3D` changed, or was read for the first
+/// time after assignment. `matrix` is read from Noesis, not copied from the
+/// component.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisMatrixTransform3DChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose element changed.
     pub view: Entity,
     /// `x:Name` of the element whose `Transform3D` changed.
     pub name: String,
-    /// The 12 `Transform3` coefficients Noesis currently holds on the element.
+    /// The 12 coefficients Noesis holds, laid out as [`Matrix3DSpec::rows`].
     pub matrix: [f32; 12],
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisTransform3D`]: assign desired 3D transforms
-/// when the component changed, then poll the assigned elements' live transforms
-/// and emit [`NoesisTransform3DChanged`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_transform3d_bridge(
     views: Query<(Entity, Ref<NoesisTransform3D>)>,
@@ -435,12 +368,7 @@ pub(crate) fn sync_transform3d_bridge(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Wires the per-view 3D-transform bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the 3D-transform bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisTransform3DPlugin;
 
 impl Plugin for NoesisTransform3DPlugin {

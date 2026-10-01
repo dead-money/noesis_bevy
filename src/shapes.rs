@@ -1,19 +1,12 @@
-//! Per-view shapes bridge: build a Noesis vector `Shape` (`Rectangle`,
-//! `Ellipse`, or `Line`) entirely in Rust and assign it as the content of a
-//! named XAML container element on a single [`NoesisView`](crate::NoesisView).
+//! Builds Noesis vector shapes (`Rectangle`, `Ellipse`, `Line`) in Rust and
+//! places each one inside a named container element of a
+//! [`NoesisView`](crate::NoesisView).
 //!
-//! This complements the [`crate::geometry`] polyline bridge. Geometry *mutates*
-//! an existing `Path`'s `Data`; this bridge *constructs* a whole shape object
-//! (via [`noesis_runtime::shapes`]) with its size, corner radii, fill, stroke,
-//! and stroke thickness, then hands it to a named container. Rust can populate a
-//! UI region with vector art without authoring it in XAML.
-//!
-//! Add a [`NoesisShapes`] component to the view's camera entity. Its `shapes`
-//! map is the desired shape per container `x:Name`; each entry is built and
-//! assigned whenever the component changes (Bevy change detection). The named
-//! target may be either a `ContentControl` (the shape becomes its `Content`) or
-//! a `Border`/`Decorator` (the shape becomes its `Child`); the bridge tries
-//! `Content` first and falls back to the decorator child.
+//! Add a [`NoesisShapes`] to the view's camera entity. Its
+//! [`shapes`](NoesisShapes::shapes) map gives the shape for each container
+//! `x:Name`. The container may be a `ContentControl` (the shape becomes its
+//! `Content`) or a `Border` / `Decorator` (the shape becomes its `Child`).
+//! To edit an existing `Path` instead, use the [`crate::geometry`] bridge.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
@@ -23,14 +16,11 @@
 //! );
 //! ```
 //!
-//! Like [`crate::geometry`] this is write-only and carries no read-back message.
-//! The assignment's effect is observable through a [`crate::dp::NoesisDp`] watch
-//! on the *container's* `ActualWidth`/`ActualHeight`: a size-to-content `Border`
-//! or `ContentControl` adopts the assigned shape's measured size.
-//!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the writes
-//! against that view's live scene, with no cross-world queues.
+//! Whenever the component changes, or the view's scene is rebuilt, every entry
+//! builds a new shape object that replaces the container's current content.
+//! Removing an entry does not clear its container; the last shape stays. There
+//! is no read-back message. To observe the effect, watch the container's
+//! `ActualWidth` / `ActualHeight` with [`NoesisDp`](crate::dp::NoesisDp).
 
 use std::collections::HashMap;
 
@@ -38,18 +28,16 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Which kind of Noesis [`Shape`](noesis_runtime::shapes::Shape) to build, plus
-/// its geometry. Noesis ships only `Rectangle`, `Ellipse`, `Line`, and `Path`
-/// as shape elements (no `Polygon`/`Polyline`); polylines are covered by the
-/// [`crate::geometry`] bridge.
+/// The kind of Noesis [`Shape`](noesis_runtime::shapes::Shape) to build and its
+/// geometry, in device-independent pixels. Noesis has no `Polygon` or
+/// `Polyline`; use the [`crate::geometry`] bridge for polylines.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShapeKind {
-    /// An axis-aligned rectangle of `width` × `height` with optional corner
-    /// radii `radius_x` / `radius_y`.
+    /// An axis-aligned rectangle, optionally with rounded corners.
     Rectangle {
-        /// Width of the rectangle, in device-independent pixels.
+        /// Width.
         width: f32,
-        /// Height of the rectangle, in device-independent pixels.
+        /// Height.
         height: f32,
         /// Horizontal corner radius. `0.0` for square corners.
         radius_x: f32,
@@ -58,12 +46,13 @@ pub enum ShapeKind {
     },
     /// An ellipse filling a `width` × `height` box.
     Ellipse {
-        /// Width of the bounding box, in device-independent pixels.
+        /// Width of the bounding box.
         width: f32,
-        /// Height of the bounding box, in device-independent pixels.
+        /// Height of the bounding box.
         height: f32,
     },
-    /// A straight line from `(x1, y1)` to `(x2, y2)`.
+    /// A straight line from `(x1, y1)` to `(x2, y2)`, in the shape's own
+    /// coordinates.
     Line {
         /// X coordinate of the start point.
         x1: f32,
@@ -76,22 +65,23 @@ pub enum ShapeKind {
     },
 }
 
-/// A code-built shape: its geometry ([`ShapeKind`]) plus optional solid `fill` /
-/// `stroke` colours (RGBA, each `0.0..=1.0`) and `stroke_thickness`.
+/// A shape to build: its geometry plus optional solid paint. Colors are
+/// `[r, g, b, a]`, each `0.0..=1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapeSpec {
-    /// The shape geometry to build.
+    /// Geometry.
     pub kind: ShapeKind,
-    /// Optional solid fill colour (RGBA). `None` leaves `Fill` unset.
+    /// Solid fill color. `None` leaves `Fill` unset (no interior).
     pub fill: Option<[f32; 4]>,
-    /// Optional solid stroke colour (RGBA). `None` leaves `Stroke` unset.
+    /// Solid outline color. `None` leaves `Stroke` unset (no outline). A
+    /// `Line` draws nothing without one.
     pub stroke: Option<[f32; 4]>,
-    /// Optional outline width. `None` leaves the shape's default thickness.
+    /// Outline width in DIPs. `None` keeps the Noesis default.
     pub stroke_thickness: Option<f32>,
 }
 
 impl ShapeSpec {
-    /// A bare spec for `kind` with no fill, stroke, or explicit thickness.
+    /// A spec for `kind` with no fill, stroke, or explicit thickness.
     #[must_use]
     pub fn new(kind: ShapeKind) -> Self {
         Self {
@@ -124,27 +114,27 @@ impl ShapeSpec {
     }
 }
 
-/// Per-view shapes bridge. Attach to a [`NoesisView`](crate::NoesisView) entity.
+/// Code-built shapes for named containers. Add to a
+/// [`NoesisView`](crate::NoesisView) camera entity; see the
+/// [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisShapes {
-    /// Desired shape per container `x:Name`. Built and assigned to the view's
-    /// elements whenever this component changes. Writes to the same name apply
-    /// last-wins. A name absent from the live tree, or a target that accepts
-    /// neither `Content` nor a decorator `Child`, is skipped with a warning on
-    /// apply.
+    /// Shape per container `x:Name` (may be scope-qualified, `"Host/Leaf"`).
+    /// A name not in the live tree, or a container that takes neither
+    /// `Content` nor a `Child`, is skipped with a warning.
     pub shapes: HashMap<String, ShapeSpec>,
 }
 
 impl NoesisShapes {
-    /// An empty bridge with no shapes. Chain the builder methods
-    /// ([`rectangle`](Self::rectangle), [`ellipse`](Self::ellipse),
-    /// [`line`](Self::line), [`insert`](Self::insert)) to populate it.
+    /// An empty set. Chain [`rectangle`](Self::rectangle),
+    /// [`ellipse`](Self::ellipse), [`line`](Self::line), or
+    /// [`insert`](Self::insert) to populate it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: assign a fully-specified [`ShapeSpec`] to container `name`.
+    /// Builder: put `spec` in container `name`. Use this form to add paint.
     #[must_use]
     pub fn insert(mut self, name: impl Into<String>, spec: ShapeSpec) -> Self {
         self.shapes.insert(name.into(), spec);
@@ -199,17 +189,13 @@ impl NoesisShapes {
         self.insert(name, ShapeSpec::new(ShapeKind::Line { x1, y1, x2, y2 }))
     }
 
-    /// Assign a fully-specified [`ShapeSpec`] to container `name` from a system
-    /// holding `&mut NoesisShapes`. The runtime counterpart of
-    /// [`insert`](Self::insert): the next reconcile builds and assigns it to the
-    /// live element.
+    /// Put `spec` in container `name`. The `&mut` form of
+    /// [`insert`](Self::insert), for systems that update the component.
     pub fn set(&mut self, name: impl Into<String>, spec: ShapeSpec) {
         self.shapes.insert(name.into(), spec);
     }
 
-    /// Assign a plain `width` × `height` rectangle to container `name` from a
-    /// system holding `&mut NoesisShapes`. The runtime counterpart of
-    /// [`rectangle`](Self::rectangle).
+    /// The `&mut` form of [`rectangle`](Self::rectangle).
     pub fn set_rectangle(&mut self, name: impl Into<String>, width: f32, height: f32) {
         self.set(
             name,
@@ -222,9 +208,7 @@ impl NoesisShapes {
         );
     }
 
-    /// Assign a rounded `width` × `height` rectangle (corner radii `radius_x` /
-    /// `radius_y`) to container `name` from a system holding `&mut NoesisShapes`.
-    /// The runtime counterpart of [`rounded_rectangle`](Self::rounded_rectangle).
+    /// The `&mut` form of [`rounded_rectangle`](Self::rounded_rectangle).
     pub fn set_rounded_rectangle(
         &mut self,
         name: impl Into<String>,
@@ -244,22 +228,17 @@ impl NoesisShapes {
         );
     }
 
-    /// Assign a `width` × `height` ellipse to container `name` from a system
-    /// holding `&mut NoesisShapes`. The runtime counterpart of
-    /// [`ellipse`](Self::ellipse).
+    /// The `&mut` form of [`ellipse`](Self::ellipse).
     pub fn set_ellipse(&mut self, name: impl Into<String>, width: f32, height: f32) {
         self.set(name, ShapeSpec::new(ShapeKind::Ellipse { width, height }));
     }
 
-    /// Assign a `(x1, y1)`-`(x2, y2)` line to container `name` from a system
-    /// holding `&mut NoesisShapes`. The runtime counterpart of [`line`](Self::line).
+    /// The `&mut` form of [`line`](Self::line).
     pub fn set_line(&mut self, name: impl Into<String>, x1: f32, y1: f32, x2: f32, y2: f32) {
         self.set(name, ShapeSpec::new(ShapeKind::Line { x1, y1, x2, y2 }));
     }
 }
 
-/// Reconcile every view's [`NoesisShapes`]: build and assign the desired shapes
-/// when the component changed.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_shapes_bridge(
     views: Query<(Entity, Ref<NoesisShapes>)>,
@@ -275,8 +254,7 @@ pub(crate) fn sync_shapes_bridge(
     }
 }
 
-/// Wires the per-view shapes bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the shapes bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisShapesPlugin;
 
 impl Plugin for NoesisShapesPlugin {

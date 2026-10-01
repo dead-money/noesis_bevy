@@ -1,14 +1,12 @@
-//! Integration test for *image* hot-reload through the real `NoesisPlugin`
-//! pipeline.
+//! Integration test for image hot-reload on the headless harness.
 //!
-//! Noesis caches a decoded texture per URI and never re-issues `LoadTexture`
-//! for it, so swapping an image's bytes only reaches the screen if the view
-//! rebuilds. Re-inserting the same URI with new pixel dimensions must, after
-//! the epoch-driven rebuild, re-run `GetTextureInfo` and re-size the `<Image>`.
+//! Noesis caches a decoded texture per URI and never re-issues `LoadTexture` for
+//! it, so new image bytes only reach the screen if the view rebuilds. Re-inserting
+//! the same URI with new pixel dimensions must rebuild the view so
+//! `GetTextureInfo` re-sizes the `<Image>`.
 //!
-//! `Stretch="None"` sizes the Image to its source's pixel dimensions, observed
-//! via a `NoesisDp` watch on `ActualWidth` — a layout-only effect, no GPU pass
-//! or font setup needed (mirrors `headless_app_imaging`).
+//! `Stretch="None"` sizes the Image to its source's pixel dimensions, read via a
+//! `NoesisDp` watch on `ActualWidth`. Layout only: no GPU pass or font setup.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,8 +31,7 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
          HorizontalAlignment="Left" VerticalAlignment="Top"/>
 </Grid>"##;
 
-// RGBA8 bytes sized to match the declared dimensions; a fresh `Arc` each call is
-// what `refresh_images` compares by pointer to bump the image epoch.
+// A fresh `Arc` per call: the image-change check compares by pointer.
 fn rgba(w: u32, h: u32) -> Arc<Vec<u8>> {
     Arc::new(vec![0xAB; (w * h * 4) as usize])
 }
@@ -81,15 +78,11 @@ fn image_reload_rebuilds_view_with_new_dimensions() {
               mut changes: MessageReader<NoesisDpChanged>| {
             *frame += 1;
 
-            // Same URI, new pixel dimensions + fresh Arc: the image-bytes swap
-            // a live edit produces.
             if *frame == RELOAD_AT_FRAME {
                 images.insert(IMG_URI.to_string(), W2, 11, rgba(W2, 11));
             }
 
             for ev in changes.read() {
-                // `ev.name` is the x:Name ("Pic"); `ev.property` is the DP name
-                // ("ActualWidth") — the discriminator this test keys on.
                 observed_sys
                     .lock()
                     .unwrap()

@@ -1,39 +1,52 @@
-//! Per-view Rust-owned `ViewModel` / `DataContext` bridge.
+//! Rust-owned view model bound as a view's `DataContext`.
 //!
-//! Drive a XAML scene's `{Binding ...}` controls from a Rust-owned view model
-//! without touching Noesis pointers. Add a [`NoesisVm`] component to the
-//! view's camera entity: it declares the bindable dependency properties (a
-//! [`ViewModelDef`]), the bridge registers the Noesis class + instance and
-//! attaches it as the view's (or a named element's) `DataContext`. Writes are
-//! queued by mutating the component; two-way edits flow back as
-//! [`NoesisViewModelChanged`] messages carrying the originating `view` entity.
+//! Drives a XAML scene's `{Binding ...}` controls from Rust without touching
+//! Noesis pointers. Add a [`NoesisVm`] to the [`NoesisView`](crate::NoesisView)
+//! camera entity. Its [`ViewModelDef`] names a Noesis class and its bindable
+//! dependency properties; the bridge registers that class, creates one instance,
+//! and sets it as the `DataContext` of the view root or a named element.
 //!
-//! ```ignore
-//! use noesis_bevy::viewmodel::{NoesisVm, ViewModelDef};
+//! Write to the UI with the `set_*` methods on [`NoesisVm`]. Changes from the UI
+//! (a two-way bound slider, a checkbox) arrive as [`NoesisViewModelChanged`]
+//! messages tagged with the view entity.
+//!
+//! ```no_run
+//! use bevy::prelude::*;
 //! use noesis_bevy::classes::PropType;
+//! use noesis_bevy::viewmodel::{NoesisViewModelChanged, NoesisVm, ViewModelDef};
 //!
-//! commands.entity(view).insert(NoesisVm::new(
-//!     ViewModelDef::new("Settings.ViewModel")
-//!         .property("MasterVolume", PropType::Double)
-//!         .property("Muted", PropType::Bool),
-//! ));
-//!
-//! // write Rust -> UI:
-//! fn set_volume(mut q: Query<&mut NoesisVm>) {
-//!     q.single_mut().set_f64("MasterVolume", 0.8);
+//! fn add_settings_vm(commands: &mut Commands, view: Entity) {
+//!     commands.entity(view).insert(NoesisVm::new(
+//!         ViewModelDef::new("Settings.ViewModel")
+//!             .property("MasterVolume", PropType::Double)
+//!             .property("Muted", PropType::Bool),
+//!     ));
 //! }
-//! // observe UI -> Rust:
+//!
+//! fn set_volume(mut vms: Query<&mut NoesisVm>) {
+//!     for mut vm in &mut vms {
+//!         vm.set_f64("MasterVolume", 0.8);
+//!     }
+//! }
+//!
 //! fn on_change(mut changed: MessageReader<NoesisViewModelChanged>) {
-//!     for ev in changed.read() { /* ev.view, ev.prop, ev.value */ }
+//!     for ev in changed.read() {
+//!         info!("{:?}: {} = {:?}", ev.view, ev.prop, ev.value);
+//!     }
 //! }
 //! ```
 //!
-//! # Threading & lifetime
+//! # Timing and lifetime
 //!
-//! The [`ClassInstance`] is created on the main thread (Noesis is thread-affine
-//! to the `View`) and owned per-view in [`NoesisRenderState`](crate::render),
-//! released before `noesis_runtime::shutdown`. `on_changed` also fires on the
-//! main thread; the forwarder pushes onto a queue drained into messages.
+//! Queued writes, class registration and the `DataContext` attach run in
+//! [`NoesisSet::Apply`] on the main thread, where Noesis lives. Change callbacks
+//! are queued and drained into [`NoesisViewModelChanged`] in the next
+//! `PreUpdate`, so a change is visible one frame after it happens. A Rust write
+//! that changes a value also comes back as a [`NoesisViewModelChanged`].
+//!
+//! The instance is reattached after a scene rebuild (hot reload). Re-inserting a
+//! [`NoesisVm`] with a different def rebuilds the class and instance; removing
+//! the component or despawning the view detaches and releases them.
 
 use std::sync::{Arc, Mutex};
 
@@ -44,10 +57,6 @@ use noesis_runtime::classes::{
 use noesis_runtime::ffi::{ClassBase, PropType};
 
 use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Public value type
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// An owned dependency-property value crossing the bridge in either direction.
 ///
@@ -67,8 +76,7 @@ pub enum VmValue {
 }
 
 impl VmValue {
-    /// Decode the value handed to a [`PropertyChangeHandler`]. Returns `None`
-    /// for property kinds this bridge doesn't surface.
+    /// `None` for property kinds this bridge doesn't surface.
     fn from_property(value: &PropertyValue<'_>) -> Option<Self> {
         match *value {
             PropertyValue::Double(d) => Some(Self::Double(d)),
@@ -80,7 +88,6 @@ impl VmValue {
         }
     }
 
-    /// Write this value into `instance`'s dependency property at `index`.
     fn apply_to(&self, instance: Instance, index: u32) {
         match self {
             Self::Double(v) => instance.set_double(index, *v),
@@ -90,10 +97,6 @@ impl VmValue {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ViewModelDef: declarative recipe
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Where the bridge attaches a view model's instance as `DataContext`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -105,7 +108,6 @@ pub(crate) enum AttachTarget {
 }
 
 impl AttachTarget {
-    /// Human-readable target for diagnostics: `"root"` or `x:Name "Foo"`.
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Root => "root".to_owned(),
@@ -114,12 +116,13 @@ impl AttachTarget {
     }
 }
 
-/// A declarative recipe for a view model: a Noesis class name, the ordered set
-/// of bindable dependency properties, and where to attach the instance.
+/// Recipe for a view model: a Noesis class name, its bindable dependency
+/// properties in order, and where to attach the instance.
 ///
-/// Build with the chained setters, then hand to [`NoesisVm::new`]. Each
-/// property name must be unique within the def and match the `{Binding <name>}`
-/// paths authored in the XAML.
+/// Build with the chained setters, then pass to [`NoesisVm::new`]. Property
+/// names must be unique within the def and match the `{Binding <name>}` paths in
+/// the XAML. The class name is registered process-wide, so two live defs with
+/// the same class name collide and the second fails to build (with a warning).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewModelDef {
     class_name: String,
@@ -128,8 +131,8 @@ pub struct ViewModelDef {
 }
 
 impl ViewModelDef {
-    /// Begin a def for the Noesis class `class_name`. Defaults to attaching at
-    /// the view root; override with [`Self::attach_to`].
+    /// Starts a def for the Noesis class `class_name`, attached at the view root
+    /// unless you call [`Self::attach_to`].
     #[must_use]
     pub fn new(class_name: impl Into<String>) -> Self {
         Self {
@@ -139,22 +142,26 @@ impl ViewModelDef {
         }
     }
 
-    /// Declare a bindable dependency property. `name` is the `{Binding name}`
-    /// path; `kind` is its [`PropType`].
+    /// Declares a bindable dependency property. `name` is the `{Binding name}`
+    /// path. Writes and change messages support `Double`, `Float` (reported as
+    /// [`VmValue::Double`]), `Bool`, `Int32` and `String`; other kinds bind but
+    /// don't surface changes.
     #[must_use]
     pub fn property(mut self, name: impl Into<String>, kind: PropType) -> Self {
         self.props.push((name.into(), kind));
         self
     }
 
-    /// Attach the instance as the view root's `DataContext` (the default).
+    /// Attaches the instance as the view root's `DataContext` (the default).
     #[must_use]
     pub fn attach_to_root(mut self) -> Self {
         self.target = AttachTarget::Root;
         self
     }
 
-    /// Attach the instance as the `DataContext` of the element named `x_name`.
+    /// Attaches the instance as the `DataContext` of the element named `x_name`.
+    /// The name may be scope-qualified (`"Host/Leaf"`). Until the element
+    /// exists, each frame logs a warning and retries.
     #[must_use]
     pub fn attach_to(mut self, x_name: impl Into<String>) -> Self {
         self.target = AttachTarget::Named(x_name.into());
@@ -166,13 +173,10 @@ impl ViewModelDef {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-view component
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view binding component. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity. Holds the [`ViewModelDef`] and a queue of pending Rust→UI writes;
-/// mutate it (`set_f64`, …) to push values, which apply on the next frame.
+/// Per-view view model. Add it to a [`NoesisView`](crate::NoesisView) camera
+/// entity. Holds the [`ViewModelDef`] and a queue of writes to the UI; the
+/// `set_*` methods queue a write, applied in the next [`NoesisSet::Apply`].
+/// A write to a property the def doesn't declare logs a warning and is dropped.
 #[derive(Component)]
 pub struct NoesisVm {
     def: ViewModelDef,
@@ -180,9 +184,9 @@ pub struct NoesisVm {
 }
 
 impl NoesisVm {
-    /// Build a view model from its [`ViewModelDef`]. The class registration,
-    /// instantiation, and `DataContext` attach happen on a later frame
-    /// (retained until the view exists), so this is safe from `Startup`.
+    /// Creates the component from its def. Registration and the `DataContext`
+    /// attach wait until the view's scene exists, so this is safe to insert from
+    /// `Startup`.
     #[must_use]
     pub fn new(def: ViewModelDef) -> Self {
         Self {
@@ -191,22 +195,22 @@ impl NoesisVm {
         }
     }
 
-    /// Queue a `Double` write (e.g. `Slider.Value`).
+    /// Queues a `Double` write (e.g. `Slider.Value`).
     pub fn set_f64(&mut self, prop: impl Into<String>, value: f64) {
         self.pending.push((prop.into(), VmValue::Double(value)));
     }
 
-    /// Queue a `Bool` write (e.g. `CheckBox.IsChecked`).
+    /// Queues a `Bool` write (e.g. `CheckBox.IsChecked`).
     pub fn set_bool(&mut self, prop: impl Into<String>, value: bool) {
         self.pending.push((prop.into(), VmValue::Bool(value)));
     }
 
-    /// Queue an `Int32` write (e.g. `ComboBox.SelectedIndex`).
+    /// Queues an `Int32` write (e.g. `ComboBox.SelectedIndex`).
     pub fn set_i32(&mut self, prop: impl Into<String>, value: i32) {
         self.pending.push((prop.into(), VmValue::Int32(value)));
     }
 
-    /// Queue a `String` write.
+    /// Queues a `String` write.
     pub fn set_string(&mut self, prop: impl Into<String>, value: impl Into<String>) {
         self.pending.push((prop.into(), VmValue::Str(value.into())));
     }
@@ -215,29 +219,23 @@ impl NoesisVm {
         &self.def
     }
 
-    /// Whether any writes are queued. Read via `&self` so the reconcile system
-    /// can gate its mutable access and avoid tripping change detection.
+    /// `&self` so the reconcile system can check without tripping change detection.
     pub(crate) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 
-    /// Take the queued writes (called by the reconcile system).
     pub(crate) fn take_pending(&mut self) -> Vec<(String, VmValue)> {
         std::mem::take(&mut self.pending)
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Change side: shared queue + message + forwarding handler
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Queue between the (main-thread) [`ViewModelChangeForwarder`] callbacks and
-/// the drain system. Entries carry the originating view entity.
+/// Changes queued by [`ViewModelChangeForwarder`] callbacks as
+/// `(view, property, value)`, drained into [`NoesisViewModelChanged`] each
+/// `PreUpdate`. Inserted by [`NoesisViewModelPlugin`].
 #[derive(Resource, Clone, Default)]
 pub struct SharedVmChangedQueue(Arc<Mutex<Vec<(Entity, String, VmValue)>>>);
 
 impl SharedVmChangedQueue {
-    /// Push a change from a forwarder.
     pub(crate) fn push(&self, view: Entity, prop: String, value: VmValue) {
         self.0
             .lock()
@@ -245,8 +243,12 @@ impl SharedVmChangedQueue {
             .push((view, prop, value));
     }
 
-    /// Take the pending changes. Drained into [`NoesisViewModelChanged`]; also
-    /// exposed so headless tests can read the queue directly.
+    /// Takes the queued changes. The plugin's drain system normally does this;
+    /// it is public so headless tests can read the queue directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned.
     #[must_use]
     pub fn drain(&self) -> Vec<(Entity, String, VmValue)> {
         let mut guard = self.0.lock().expect("SharedVmChangedQueue poisoned");
@@ -258,8 +260,9 @@ impl SharedVmChangedQueue {
     }
 }
 
-/// Emitted when a view model's dependency property changes, from a two-way
-/// bound control (a slider drag) or a Rust write that altered the value.
+/// A view model's dependency property changed, from a two-way bound control (a
+/// slider drag) or a Rust write that changed the value. Rust writes echo back,
+/// so guard against feedback loops if you write in response.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisViewModelChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose view model changed.
@@ -270,20 +273,20 @@ pub struct NoesisViewModelChanged {
     pub value: VmValue,
 }
 
-/// Main-thread [`PropertyChangeHandler`] that forwards a view model's
-/// dependency-property changes onto a [`SharedVmChangedQueue`], tagged with the
-/// owning view entity. `pub` so headless tests can wire the same forwarding.
+/// [`PropertyChangeHandler`] that pushes a view model's property changes onto a
+/// [`SharedVmChangedQueue`], tagged with the owning view entity. Public so
+/// headless tests can wire the same forwarding; changes of unsupported kinds and
+/// out-of-range indices are dropped.
 pub struct ViewModelChangeForwarder {
     view: Entity,
-    /// Property index → name (DP addition order). Shared (not cloned per call)
-    /// because the callback fires on the hot path.
+    /// Index → name, in DP registration order.
     prop_names: Arc<Vec<String>>,
     queue: SharedVmChangedQueue,
 }
 
 impl ViewModelChangeForwarder {
-    /// Build a forwarder for the view model owned by `view`. `prop_names` must
-    /// be indexed the same way the class's DPs were registered.
+    /// Creates a forwarder for the view model on `view`. `prop_names` must be in
+    /// the order the class's properties were registered.
     #[must_use]
     pub fn new(view: Entity, prop_names: Arc<Vec<String>>, queue: SharedVmChangedQueue) -> Self {
         Self {
@@ -306,30 +309,20 @@ impl PropertyChangeHandler for ViewModelChangeForwarder {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Render-world entry: VmEntry
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One live view model, owned per-view by [`NoesisRenderState`]. Field order
-/// matters: `instance` drops before `registration`, mirroring the C++ refcount
-/// rule that a class's instances release before the class unregisters.
+/// One live view model, owned per view by [`NoesisRenderState`]. Field order is
+/// drop order: the instance must release before its class unregisters.
 pub(crate) struct VmEntry {
     instance: ClassInstance,
     _registration: ClassRegistration,
-    /// The def this entry was built from. Retained as the rebuild fingerprint
-    /// (class + props + target) *and* as the name→index map for writes: a
-    /// re-inserted [`NoesisVm`] with a changed def rebuilds (see
-    /// [`Self::matches`]).
+    /// Rebuild fingerprint (see [`Self::matches`]) and name → index map for writes.
     def: ViewModelDef,
-    /// URI of the scene this VM is currently attached to, or `None` when not
-    /// yet attached / detached by a scene rebuild.
+    /// Scene URI this is attached to; `None` until attached or after a rebuild.
     attached_for_uri: Option<String>,
 }
 
 impl VmEntry {
-    /// Register the Noesis class, instantiate it, and wire its change forwarder
-    /// (tagged with `view`) to `changed`. `None` if registration / instantiation
-    /// is rejected (e.g. a duplicate class name). Main-thread only.
+    /// `None` if registration or instantiation is rejected (e.g. a duplicate
+    /// class name).
     pub(crate) fn build(
         view: Entity,
         def: &ViewModelDef,
@@ -351,9 +344,6 @@ impl VmEntry {
         })
     }
 
-    /// Whether this entry was built from an equivalent def. `false` means a
-    /// re-inserted [`NoesisVm`] changed the class, props, or target and the
-    /// entry must be rebuilt.
     pub(crate) fn matches(&self, def: &ViewModelDef) -> bool {
         &self.def == def
     }
@@ -362,12 +352,11 @@ impl VmEntry {
         &self.def.target
     }
 
-    /// Borrow the instance for `set_data_context`. Lives as long as the entry.
     pub(crate) fn instance(&self) -> &ClassInstance {
         &self.instance
     }
 
-    /// Apply a write by property name. `false` when the VM has no such property.
+    /// `false` when the def has no such property.
     pub(crate) fn write(&self, prop: &str, value: &VmValue) -> bool {
         let Some(index) = self.def.props.iter().position(|(n, _)| n == prop) else {
             return false;
@@ -384,20 +373,15 @@ impl VmEntry {
         self.attached_for_uri = Some(uri.to_owned());
     }
 
-    /// Detach (logically) so the next attach pass re-binds against the rebuilt
-    /// scene. Called from scene teardown.
+    /// Marks the entry unattached so the next attach pass rebinds to the rebuilt
+    /// scene.
     pub(crate) fn reset_attach(&mut self) {
         self.attached_for_uri = None;
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems + plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisVm`]: build its render-side entry on
-/// first sight, apply queued writes, then (re-)attach it as its target's
-/// `DataContext`.
+/// Builds each view's [`VmEntry`] on first sight (or on a changed def), applies
+/// queued writes, then attaches pending entries as `DataContext`.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_view_models(
     mut views: Query<(Entity, &mut NoesisVm)>,
@@ -409,8 +393,7 @@ pub(crate) fn sync_view_models(
     };
     for (entity, mut vm) in &mut views {
         state.ensure_view_model(entity, vm.def(), &changed);
-        // Only touch the component mutably when there are queued writes, so an
-        // idle frame doesn't falsely mark `NoesisVm` changed downstream.
+        // Deref-mut only with queued writes, so idle frames don't mark `NoesisVm` changed.
         if vm.has_pending() {
             let writes = vm.take_pending();
             state.apply_view_model_writes_for(entity, &writes);
@@ -419,7 +402,8 @@ pub(crate) fn sync_view_models(
     state.attach_view_models();
 }
 
-/// Drain the shared change queue into [`NoesisViewModelChanged`] messages.
+/// Drains [`SharedVmChangedQueue`] into [`NoesisViewModelChanged`] messages.
+/// Runs in `PreUpdate`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_vm_changed_queue(
     queue: Res<SharedVmChangedQueue>,
@@ -436,8 +420,7 @@ impl ReapOnRemove for NoesisVm {
     }
 }
 
-/// Wires the per-view `ViewModel` / `DataContext` bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Wires the [`NoesisVm`] bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisViewModelPlugin;
 
 impl Plugin for NoesisViewModelPlugin {

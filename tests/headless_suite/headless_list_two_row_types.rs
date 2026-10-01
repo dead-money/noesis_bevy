@@ -1,15 +1,12 @@
-//! Regression for the multi-row-type clobber (audit P0.3).
+//! Regression for two row types clobbering each other's lists.
 //!
-//! Two [`NoesisView`]s each own a `ListBox` bound by a [`UiList`], but the two
-//! lists carry *different* row component types: view 1 lists `RowA`, view 2 lists
-//! `RowB`. Both types are registered with [`NoesisListAppExt::add_noesis_list`], so
-//! each gets its own `diff_list::<T>` system iterating **every** list. The bug: a
-//! type with no rows in a given list still overwrote that list's `schema` / `rows`
-//! / `selected`, so whichever `diff_list` ran last emptied the other type's list
-//! (and could freeze the row class with the wrong field layout).
-//!
-//! After the fix only the owning type writes a slot, so both lists realize their
-//! rows regardless of scheduler order.
+//! Two [`NoesisView`]s each own a `ListBox` bound by a [`UiList`], with different
+//! row component types: view 1 lists `RowA`, view 2 lists `RowB`. Both types are
+//! registered with [`NoesisListAppExt::add_noesis_list`], so each gets its own
+//! `diff_list::<T>` system iterating every list. Only the owning type may write a
+//! list's `schema` / `rows` / `selected`; otherwise whichever `diff_list` runs last
+//! empties the other type's list (and can freeze the row class with the wrong
+//! field layout). Both lists must realize their rows regardless of scheduler order.
 
 use std::sync::{Arc, Mutex};
 
@@ -135,9 +132,7 @@ fn two_row_types_do_not_clobber_each_others_lists() {
         }
     });
 
-    // Exit once both lists have realized all their own rows (A: 2, B: 3). If one
-    // type's diff_list clobbered the other's slot, its adds never arrive and this
-    // times out.
+    // A clobbered list never sees its adds, so this times out.
     let pred_a = Arc::clone(&adds_a);
     let pred_b = Arc::clone(&adds_b);
     let realized = run_until(&mut app, 160, move |_app| {

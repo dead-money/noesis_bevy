@@ -1,8 +1,8 @@
-//! `#[derive(NoesisViewModel)]` generates the glue that binds a plain Rust
-//! struct to XAML `{Binding field_name}` by field name, with two-way
-//! writeback, through `noesis_bevy`'s plain-VM bridge.
+//! `#[derive(NoesisViewModel)]` for `noesis_bevy`: bind a plain Rust struct to
+//! XAML `{Binding ...}` by field name, with two-way writeback.
 //!
-//! The derive maps each field to a Noesis-reflected property:
+//! Use it through the `noesis_bevy` re-export, which documents the full flow
+//! (`noesis_bevy::plain_vm`). Each field maps to a Noesis property type:
 //!
 //! | Rust field type        | Noesis property type |
 //! |------------------------|----------------------|
@@ -11,22 +11,23 @@
 //! | `bool`                 | `Bool`               |
 //! | `String`               | `String`             |
 //!
+//! `f32` and `u32` round-trip through `f64` and `i32` with `as` casts, so a
+//! `u32` above `i32::MAX` wraps.
+//!
 //! Two struct shapes are supported:
 //!
-//! * **Named struct**: each field maps to a property named after the *field*
-//!   (`title: String` → `{Binding title}`). `#[noesis(skip)]` excludes a field;
-//!   `#[noesis(rename = "Title")]` binds a `snake_case` field to a different XAML
-//!   property name (e.g. `PascalCase`).
-//! * **Newtype tuple struct**: a single-field tuple struct
-//!   (`struct Health(f32);`) maps to one property named after the *type*
-//!   (`{Binding Health}`). This is the shape the `UiPanel` primitive expects:
+//! * **Named struct**: each field becomes a property named after the field
+//!   (`title: String` binds as `{Binding title}`). `#[noesis(skip)]` excludes a
+//!   field; `#[noesis(rename = "Title")]` gives it a different XAML name.
+//! * **Newtype tuple struct**: `struct Health(f32);` becomes one property named
+//!   after the type (`{Binding Health}`). This is the shape `UiPanel` expects:
 //!   spawn `Health(100.0)` on a panel entity and bind `{Binding Health}`.
+//!   `#[noesis(as = "Name")]` on the struct overrides the property name.
 //!
-//! Unsupported field types are a compile error; annotate them `#[noesis(skip)]`
-//! to exclude them from the view model. The Noesis type name defaults to the
-//! struct's identifier; override with `#[noesis(name = "...")]`. A newtype's
-//! property name defaults to the type identifier; override with
-//! `#[noesis(as = "Name")]`.
+//! The Noesis type name defaults to the struct's identifier; override it with
+//! `#[noesis(name = "...")]`. A field of any other type is a compile error
+//! unless it is marked `#[noesis(skip)]`. Types are matched by their last path
+//! segment, so a type alias such as `type Hp = f32` is rejected.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -138,8 +139,8 @@ fn field_rename(attrs: &[syn::Attribute]) -> Option<String> {
 }
 
 /// Read a `#[noesis(as = "Name")]` property-name override (newtype shape). `as`
-/// is a Rust keyword, so it never parses as a `syn` meta path; we scan the
-/// attribute's raw tokens for the `as = "<lit>"` triple instead.
+/// is a keyword and never parses as a `syn` meta path, so this scans the raw
+/// tokens for `as = "<lit>"`.
 fn prop_name_override(attrs: &[syn::Attribute]) -> Option<String> {
     use proc_macro2::TokenTree;
     for attr in attrs {
@@ -151,7 +152,6 @@ fn prop_name_override(attrs: &[syn::Attribute]) -> Option<String> {
         };
         let mut trees = list.tokens.clone().into_iter().peekable();
         while let Some(tree) = trees.next() {
-            // keywords are plain idents at the token level, so `as` matches here
             let TokenTree::Ident(ident) = &tree else {
                 continue;
             };
@@ -204,6 +204,31 @@ fn unsupported_type_error(span: proc_macro2::Span) -> TokenStream {
     .into()
 }
 
+/// Implements `noesis_bevy::plain_vm::NoesisViewModel` for a named struct or a
+/// single-field newtype, exposing its fields to XAML bindings by name.
+///
+/// Supported field types are `f32`, `f64`, `i32`, `u32`, `bool` and `String`.
+/// Attributes: `#[noesis(skip)]` and `#[noesis(rename = "...")]` on fields,
+/// `#[noesis(name = "...")]` (Noesis type name) and `#[noesis(as = "...")]`
+/// (newtype property name) on the struct.
+///
+/// The struct must also be a Bevy `Component`. Register the type once: with
+/// `App::add_noesis_view_model::<T>()` to bind it on a view entity, or
+/// `App::add_noesis_panel_field::<T>()` to bind it on a `UiPanel` entity.
+///
+/// ```ignore
+/// use bevy::prelude::*;
+/// use noesis_bevy::NoesisViewModel;
+///
+/// #[derive(Component, NoesisViewModel)]
+/// struct SettingsVm {
+///     volume: f32,
+///     #[noesis(rename = "IsMuted")]
+///     muted: bool,
+///     #[noesis(skip)]
+///     dirty: bool,
+/// }
+/// ```
 #[proc_macro_derive(NoesisViewModel, attributes(noesis))]
 pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -247,7 +272,6 @@ pub fn derive_noesis_view_model(input: TokenStream) -> TokenStream {
                 );
             }
         }
-        // Newtype: one property named after the *type* (override: `#[noesis(as)]`).
         Fields::Unnamed(unnamed) => {
             if unnamed.unnamed.len() != 1 {
                 return syn::Error::new(

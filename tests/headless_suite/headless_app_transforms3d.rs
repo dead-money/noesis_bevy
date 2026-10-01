@@ -1,5 +1,5 @@
-//! Integration test for the [`NoesisTransform3D`] bridge, run through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for the [`NoesisTransform3D`] bridge, run headless through
+//! the real bridge plugins.
 //!
 //! `Transform3D` (`UIElement::SetTransform3D`) is a post-layout property whose
 //! value lives on a nested `CompositeTransform3D` object, not reachable through
@@ -13,9 +13,7 @@
 //! - `Other` is never given a transform and must never appear in any
 //!   [`NoesisTransform3DChanged`].
 //!
-//! Only the data-model bridge is asserted here. Visual compositing (perspective
-//! pixels) requires Downsample/Upsample effect shaders not yet implemented; the
-//! ignored test below gates that path.
+//! Only the data-model bridge is asserted here; there is no perspective-pixel test.
 
 use std::sync::{Arc, Mutex};
 
@@ -62,8 +60,6 @@ fn transform3d_bridge_reads_back_assigned_transform() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Starts empty (no-op); filled after the scene exists so the
-                    // one-shot apply isn't lost.
                     NoesisTransform3D::new(),
                 ))
                 .id();
@@ -98,8 +94,6 @@ fn transform3d_bridge_reads_back_assigned_transform() {
         },
     );
 
-    // Stop once Box has reported its assigned transform back, rather than padding a
-    // fixed frame count. The transform is assigned at SET_AT_FRAME.
     let pred_view = Arc::clone(&view_entity);
     let pred_observed = Arc::clone(&observed);
     let converged = run_until(&mut app, 240, move |_app| {
@@ -162,10 +156,9 @@ fn transform3d_bridge_reads_back_assigned_transform() {
     );
 }
 
-/// Compositing a `Transform3D` (perspective-projected pixels) requires the
-/// offscreen effects/projection render path: Downsample/Upsample and effect
-/// shaders. The wgpu render device does not implement these yet
-/// (`Shader(49)=DOWNSAMPLE` panics). Re-enable once the effect shaders land.
+/// Empty placeholder for a `Transform3D` perspective-compositing pixel test. The
+/// wgpu device implements the Downsample/Upsample effect shaders, so the ignore
+/// reason is stale; a real test would need `render_app`.
 #[test]
 #[ignore = "Transform3D perspective compositing needs the unimplemented Downsample/Upsample effect shaders"]
 fn transform3d_visual_render_is_gated_on_effect_shaders() {}

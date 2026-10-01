@@ -1,31 +1,25 @@
-//! Per-view focus-navigation and input-binding bridge: the directional,
-//! engagement, and key-chord layer on top of the one-shot [`crate::NoesisFocus`] bridge.
+//! Focus navigation and key bindings for a view: directional moves, focus
+//! engagement, key chords, and focus prediction.
 //!
-//! [`NoesisFocus`](crate::focus::NoesisFocus) answers "give *this* named element
-//! keyboard focus". This module answers the rest of the `FocusManager` /
+//! [`NoesisFocus`](crate::focus::NoesisFocus) gives one named element keyboard
+//! focus. [`NoesisFocusControl`] covers the rest of the `FocusManager` /
 //! `KeyboardNavigation` surface:
 //!
-//!  * **directional / tab move** ([`FocusMove`]): `UIElement::MoveFocus` away
-//!    from a named element in a [`FocusNavigationDirection`] (gamepad D-pad,
-//!    Tab traversal). A one-shot action, applied once per component change.
-//!  * **focus engagement** ([`FocusEngage`]): `UIElement::Focus(engage)`, the
-//!    console focus-engagement model where directional input drives *into* an
-//!    element rather than moving focus off it. One-shot action.
-//!  * **key bindings** ([`KeyBindingSpec`]): add a `KeyBinding` (a [`Key`] +
-//!    [`ModifierKeys`] chord bound to a command) to a named element's
-//!    `InputBindings`. When the chord is matched while that element (or its
-//!    focus subtree) has focus, a [`NoesisFocusBindingFired`] message is
-//!    emitted carrying the originating `view`. Reconciled every frame so it
-//!    installs once the scene exists and persists across frames.
-//!  * **focus prediction** ([`FocusPredict`]): poll `UIElement::PredictFocus`
-//!    every frame (read-watch) and emit [`NoesisFocusPredicted`] when the
-//!    answer changes: whether a candidate exists in that direction, the
-//!    predicted element's actual `x:Name`, and (if an `expect` name was given)
-//!    whether the predicted element *is* that one.
+//! * [`FocusMove`]: `UIElement::MoveFocus` away from a named element in a
+//!   [`FocusNavigationDirection`] (gamepad D-pad, Tab traversal). One-shot.
+//! * [`FocusEngage`]: `UIElement::Focus(engage)`, the console engagement model
+//!   where directional input drives *into* an element instead of moving focus
+//!   off it. One-shot.
+//! * [`KeyBindingSpec`]: a [`Key`] + [`ModifierKeys`] chord added to a named
+//!   element's `InputBindings`. When the chord matches while that element (or
+//!   something in its focus subtree) has focus, a [`NoesisFocusBindingFired`]
+//!   is emitted. Retained: installed once the scene exists and kept.
+//! * [`FocusPredict`]: polls `UIElement::PredictFocus` every frame and emits
+//!   [`NoesisFocusPredicted`] when the answer changes.
 //!
-//! Attach a [`NoesisFocusControl`] to the view's camera entity. It is purely
-//! additive: the existing [`NoesisFocus`](crate::focus::NoesisFocus) bridge is
-//! untouched and the two coexist on the same entity.
+//! Add [`NoesisFocusControl`] to the [`NoesisView`](crate::NoesisView) camera
+//! entity. It can sit next to [`NoesisFocus`](crate::focus::NoesisFocus) on the
+//! same entity.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
@@ -36,11 +30,13 @@
 //! );
 //! ```
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives
-//! there): the reconcile systems read each view's component and act against
-//! that view's live scene. Key-binding callbacks fire (also on the main thread,
-//! during `View::Update`) onto a [`SharedFocusBindingQueue`], drained into
-//! messages the next frame, like the click/keydown event bridges.
+//! Moves and engages also work on a [`UiPanel`](crate::panel::UiPanel) entity,
+//! resolving names in the panel fragment. Key bindings and predictions only act
+//! on a view's own scene.
+//!
+//! All systems run on the main thread in [`NoesisSet::Apply`]. Key-binding
+//! commands fire during `View::Update` and are queued; the queue is drained
+//! into [`NoesisFocusBindingFired`] messages in the next frame's `PreUpdate`.
 
 use std::sync::{Arc, Mutex};
 
@@ -52,14 +48,10 @@ use noesis_runtime::view::Key;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Spec value types
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One directional / tab focus move: move keyboard focus away from the element
-/// named `from`, in `direction`, wrapping at the ends when `wrapped`. Backs
-/// `UIElement::MoveFocus`. `Next` / `Previous` / `First` / `Last` are tab-order
-/// traversal; `Left` / `Right` / `Up` / `Down` are spatial.
+/// Moves keyboard focus away from the element named `from` (`UIElement::MoveFocus`).
+///
+/// `Next` / `Previous` / `First` / `Last` traverse tab order; `Left` / `Right` /
+/// `Up` / `Down` are spatial. A move that shifts nothing logs a warning.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusMove {
     /// `x:Name` of the element to move focus away from.
@@ -70,9 +62,7 @@ pub struct FocusMove {
     pub wrapped: bool,
 }
 
-/// One focus-engagement action: `UIElement::Focus(engage)` on the named element.
-/// `engage = true` enters the element so directional input drives it; `false`
-/// focuses without engaging.
+/// Focuses the named element with `UIElement::Focus(engage)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusEngage {
     /// `x:Name` of the element to focus.
@@ -82,9 +72,9 @@ pub struct FocusEngage {
     pub engage: bool,
 }
 
-/// One key binding: a [`Key`] + [`ModifierKeys`] chord added to the named
-/// element's `InputBindings`. When matched (while the element or its focus
-/// subtree has focus), it fires a [`NoesisFocusBindingFired`].
+/// A [`Key`] + [`ModifierKeys`] chord added to the named element's
+/// `InputBindings`. When it matches while the element or its focus subtree has
+/// focus, a [`NoesisFocusBindingFired`] is emitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyBindingSpec {
     /// `x:Name` of the element whose `InputBindings` the chord is added to.
@@ -96,21 +86,21 @@ pub struct KeyBindingSpec {
 }
 
 impl KeyBindingSpec {
-    /// Stable identity key for the per-scene installed-binding map. `Key` and
-    /// `ModifierKeys` are both `#[repr(i32)]`-style mirrors, so their ordinals
-    /// make a cheap, hashable tuple alongside the element name.
+    /// Identity of this binding as `(name, key ordinal, modifier bits)`. Two
+    /// specs with the same ident are the same installed binding.
     #[must_use]
     pub fn ident(&self) -> (String, i32, i32) {
         (self.name.clone(), self.key as i32, self.modifiers.bits())
     }
 }
 
-/// One focus-prediction watch: poll `UIElement::PredictFocus` from `from` in
-/// `direction`. The emitted message always carries the predicted element's
-/// actual `x:Name` (via `FrameworkElement::predict_focus_name`). If `expect` is
-/// set, the message additionally reports whether that name equals `expect`.
-/// `PredictFocus` only answers the spatial directions; `Next` / `Previous` /
-/// `First` / `Last` always report no candidate.
+/// Watches `UIElement::PredictFocus` from `from` in `direction`, polled every
+/// frame.
+///
+/// [`NoesisFocusPredicted`] carries the predicted element's `x:Name` and, when
+/// `expect` is set, whether it equals `expect`. `PredictFocus` only answers the
+/// spatial directions; `Next` / `Previous` / `First` / `Last` always report no
+/// candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusPredict {
     /// `x:Name` of the element to predict focus from.
@@ -124,7 +114,8 @@ pub struct FocusPredict {
 }
 
 impl FocusPredict {
-    /// Stable identity key for the per-scene prediction snapshot map.
+    /// Identity of this watch as `(from, direction ordinal, expect)`, used to
+    /// dedupe [`NoesisFocusPredicted`] emissions.
     #[must_use]
     pub fn ident(&self) -> (String, i32, Option<String>) {
         (
@@ -135,26 +126,24 @@ impl FocusPredict {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view focus-navigation + input-binding bridge. Attach to a
-/// [`NoesisView`](crate::NoesisView) entity. Additive to
-/// [`NoesisFocus`](crate::focus::NoesisFocus); both may live on one entity.
+/// Focus navigation and key bindings for one view. Add it to the
+/// [`NoesisView`](crate::NoesisView) camera entity (or a
+/// [`UiPanel`](crate::panel::UiPanel) entity for moves and engages).
 ///
-/// `moves` and `engages` are **one-shot actions**: applied once when the
-/// component changes (Bevy change detection), then drained, so they neither
-/// accumulate nor replay on a later change or a scene rebuild. As with
-/// [`crate::NoesisFocus`], fill them in *after* the scene exists or the apply is
-/// lost. `bindings` is **reconciled every frame** (installs once the scene
-/// appears, persists thereafter): retained config that survives a rebuild.
-/// `predicts` is **polled every frame** and surfaces changes as messages.
+/// `moves` and `engages` are one-shot: they apply once, then the lists are
+/// cleared. Actions queued before the scene is built or the panel is mounted
+/// wait for that frame instead of being dropped. They are not replayed after a
+/// later scene rebuild.
+///
+/// `bindings` is retained and reconciled every frame: a binding installs once
+/// the scene exists, is reinstalled after a rebuild, and removing a spec
+/// detaches it from its element. `predicts` is polled every frame and reports
+/// changes as [`NoesisFocusPredicted`].
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisFocusControl {
-    /// One-shot directional / tab moves, applied on change.
+    /// One-shot moves. Cleared once applied.
     pub moves: Vec<FocusMove>,
-    /// One-shot focus-engagement actions, applied on change.
+    /// One-shot engagement actions. Cleared once applied.
     pub engages: Vec<FocusEngage>,
     /// Key bindings, reconciled each frame against the live scene.
     pub bindings: Vec<KeyBindingSpec>,
@@ -163,14 +152,13 @@ pub struct NoesisFocusControl {
 }
 
 impl NoesisFocusControl {
-    /// An empty control with no moves, engages, bindings, or predictions.
-    /// Chain the builder methods to fill it in.
+    /// An empty control. Chain the builder methods to fill it in.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: queue a directional / tab [`FocusMove`] from `from`.
+    /// Queues a [`FocusMove`] from `from`.
     #[must_use]
     pub fn move_focus(
         mut self,
@@ -186,7 +174,7 @@ impl NoesisFocusControl {
         self
     }
 
-    /// Builder: queue a [`FocusEngage`] on `name`.
+    /// Queues a [`FocusEngage`] on `name`.
     #[must_use]
     pub fn engage(mut self, name: impl Into<String>, engage: bool) -> Self {
         self.engages.push(FocusEngage {
@@ -196,7 +184,7 @@ impl NoesisFocusControl {
         self
     }
 
-    /// Builder: install a [`KeyBindingSpec`] (chord → command) on `name`.
+    /// Adds a [`KeyBindingSpec`] on `name`.
     #[must_use]
     pub fn key_binding(
         mut self,
@@ -212,8 +200,8 @@ impl NoesisFocusControl {
         self
     }
 
-    /// Builder: watch focus prediction from `from` in `direction` (no expected
-    /// target, so the message only reports whether a candidate exists).
+    /// Watches focus prediction from `from` in `direction`, with no expected
+    /// target.
     #[must_use]
     pub fn predict(mut self, from: impl Into<String>, direction: FocusNavigationDirection) -> Self {
         self.predicts.push(FocusPredict {
@@ -224,8 +212,8 @@ impl NoesisFocusControl {
         self
     }
 
-    /// Builder: watch focus prediction from `from` in `direction`, additionally
-    /// reporting whether the predicted element is the one named `expect`.
+    /// Watches focus prediction from `from` in `direction` and reports whether
+    /// the predicted element is the one named `expect`.
     #[must_use]
     pub fn predict_to(
         mut self,
@@ -241,10 +229,8 @@ impl NoesisFocusControl {
         self
     }
 
-    /// Queue a directional / tab [`FocusMove`] from a system holding
-    /// `&mut NoesisFocusControl`. The runtime counterpart of
-    /// [`move_focus`](Self::move_focus): the next reconcile applies it once to
-    /// the live scene.
+    /// In-place form of [`move_focus`](Self::move_focus), for systems holding
+    /// `&mut NoesisFocusControl`. Applied once in the next [`NoesisSet::Apply`].
     pub fn request_move(
         &mut self,
         from: impl Into<String>,
@@ -258,9 +244,8 @@ impl NoesisFocusControl {
         });
     }
 
-    /// Queue a [`FocusEngage`] on `name` from a system holding
-    /// `&mut NoesisFocusControl`. The runtime counterpart of
-    /// [`engage`](Self::engage): the next reconcile applies it once.
+    /// In-place form of [`engage`](Self::engage). Applied once in the next
+    /// [`NoesisSet::Apply`].
     pub fn request_engage(&mut self, name: impl Into<String>, engage: bool) {
         self.engages.push(FocusEngage {
             name: name.into(),
@@ -268,10 +253,7 @@ impl NoesisFocusControl {
         });
     }
 
-    /// Install a [`KeyBindingSpec`] (chord to command) on `name` from a system
-    /// holding `&mut NoesisFocusControl`. The runtime counterpart of
-    /// [`key_binding`](Self::key_binding): reconciled into the live scene next
-    /// frame and kept thereafter.
+    /// In-place form of [`key_binding`](Self::key_binding).
     pub fn add_key_binding(&mut self, name: impl Into<String>, key: Key, modifiers: ModifierKeys) {
         self.bindings.push(KeyBindingSpec {
             name: name.into(),
@@ -280,10 +262,7 @@ impl NoesisFocusControl {
         });
     }
 
-    /// Watch focus prediction from `from` in `direction` from a system holding
-    /// `&mut NoesisFocusControl` (no expected target, so the message only reports
-    /// whether a candidate exists). The runtime counterpart of
-    /// [`predict`](Self::predict).
+    /// In-place form of [`predict`](Self::predict).
     pub fn watch_predict(&mut self, from: impl Into<String>, direction: FocusNavigationDirection) {
         self.predicts.push(FocusPredict {
             from: from.into(),
@@ -292,10 +271,7 @@ impl NoesisFocusControl {
         });
     }
 
-    /// Watch focus prediction from `from` in `direction` from a system holding
-    /// `&mut NoesisFocusControl`, additionally reporting whether the predicted
-    /// element is the one named `expect`. The runtime counterpart of
-    /// [`predict_to`](Self::predict_to).
+    /// In-place form of [`predict_to`](Self::predict_to).
     pub fn watch_predict_to(
         &mut self,
         from: impl Into<String>,
@@ -310,11 +286,8 @@ impl NoesisFocusControl {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Messages
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when a [`KeyBindingSpec`] chord matches and fires its command.
+/// Emitted when a [`KeyBindingSpec`] chord matches. Arrives the frame after the
+/// key press.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisFocusBindingFired {
     /// The [`NoesisView`](crate::NoesisView) entity whose element holds the binding.
@@ -327,7 +300,8 @@ pub struct NoesisFocusBindingFired {
     pub modifiers: ModifierKeys,
 }
 
-/// Emitted when a [`FocusPredict`] watch's answer changes (deduped per scene).
+/// Emitted when a [`FocusPredict`] watch's answer changes. The first poll after
+/// a watch is added (or the scene is rebuilt) always reports.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisFocusPredicted {
     /// The [`NoesisView`](crate::NoesisView) entity this prediction was run on.
@@ -338,23 +312,18 @@ pub struct NoesisFocusPredicted {
     pub direction: FocusNavigationDirection,
     /// Whether `PredictFocus` found any candidate in that direction.
     pub candidate: bool,
-    /// The predicted element's actual `x:Name`, as reported by
-    /// `FrameworkElement::predict_focus_name`. `None` when there is no candidate
-    /// or the predicted element is unnamed / not a `FrameworkElement`.
+    /// The predicted element's `x:Name`. `None` when there is no candidate or
+    /// the predicted element is unnamed or not a `FrameworkElement`.
     pub predicted_name: Option<String>,
-    /// Whether the predicted element's name equals the watch's `expect` target.
-    /// Always `false` when the watch had no `expect`, or when there is no
-    /// candidate / the predicted element is unnamed.
+    /// Whether [`predicted_name`](Self::predicted_name) equals the watch's
+    /// `expect`. Always `false` when the watch has no `expect` or
+    /// `predicted_name` is `None`.
     pub matches_expected: bool,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Key-binding fire queue
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Queue between the (main-thread) key-binding command callbacks and the drain
-/// system. `Clone` is an `Arc` clone. Entries carry the originating view entity.
-/// Mirrors [`SharedClickQueue`](crate::events::NoesisClickWatch)'s role.
+/// Fired key bindings waiting to become [`NoesisFocusBindingFired`] messages.
+/// Filled by the binding commands during `View::Update`, drained by
+/// [`drain_focus_binding_queue`]. Cloning shares the same queue.
 #[derive(Resource, Clone, Default)]
 pub struct SharedFocusBindingQueue(pub(crate) Arc<Mutex<Vec<(Entity, String, Key, ModifierKeys)>>>);
 
@@ -377,14 +346,8 @@ impl SharedFocusBindingQueue {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Apply the one-shot actions ([`FocusMove`] / [`FocusEngage`]) when the
-/// component changed, then drain them. Write-only: each queued action fires
-/// exactly once. Unlike the retained bridges these are *not* reapplied on a
-/// scene rebuild — they are transient requests, not config to replay.
+/// Applies queued [`FocusMove`]s and [`FocusEngage`]s once the target root is
+/// ready, then clears them so each fires exactly once.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_focus_control(
     mut views: Query<(Entity, Mut<NoesisFocusControl>)>,
@@ -394,9 +357,6 @@ pub(crate) fn sync_focus_control(
         return;
     };
     for (entity, mut ctl) in &mut views {
-        // Fire on change, or on the frame the scene (re)builds or a panel
-        // fragment mounts (so actions queued before the named element existed
-        // still land, once), but never with an empty queue.
         if (!ctl.is_changed()
             && !state.scene_rebuilt_this_frame(entity)
             && !state.panel_mounted_this_frame(entity))
@@ -404,13 +364,9 @@ pub(crate) fn sync_focus_control(
         {
             continue;
         }
-        // Only drain once the target root was actually ready to receive the
-        // actions; a component inserted before the scene builds / fragment mounts
-        // keeps its queue for the mount frame instead of being silently dropped.
-        // Both applies gate on the same root readiness, so they agree except for
-        // an empty half (which reports ready) — no double-fire on retry. Bypass
-        // change detection so the clear doesn't re-trigger this system next frame
-        // (only this system reads the change flag).
+        // Both applies gate on the same root readiness (an empty half reports
+        // ready), so a retry never double-fires. Bypass change detection so the
+        // clear doesn't re-trigger this system next frame.
         let moves_applied = state.apply_focus_moves_for(entity, &ctl.moves);
         let engages_applied = state.apply_focus_engages_for(entity, &ctl.engages);
         if moves_applied && engages_applied {
@@ -421,10 +377,8 @@ pub(crate) fn sync_focus_control(
     }
 }
 
-/// Reconcile every view's key bindings against its live scene. Runs every frame
-/// (not gated on change) so a binding installs as soon as the scene exists and
-/// persists afterwards, like
-/// [`sync_click_subscriptions`](crate::events).
+/// Reconciles every view's key bindings against its live scene. Ungated, so a
+/// binding installs as soon as the scene exists.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_focus_bindings(
     views: Query<(Entity, &NoesisFocusControl)>,
@@ -439,8 +393,8 @@ pub(crate) fn sync_focus_bindings(
     }
 }
 
-/// Poll every view's focus predictions, emitting [`NoesisFocusPredicted`] on
-/// change (deduped against the per-scene snapshot).
+/// Polls every view's focus predictions and emits [`NoesisFocusPredicted`] on
+/// change.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn poll_focus_predictions(
     views: Query<(Entity, &NoesisFocusControl)>,
@@ -466,7 +420,8 @@ pub(crate) fn poll_focus_predictions(
     }
 }
 
-/// Drain the fired-binding queue into [`NoesisFocusBindingFired`] messages.
+/// Drains [`SharedFocusBindingQueue`] into [`NoesisFocusBindingFired`]
+/// messages. Runs in `PreUpdate`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_focus_binding_queue(
     queue: Res<SharedFocusBindingQueue>,
@@ -482,8 +437,8 @@ pub fn drain_focus_binding_queue(
     }
 }
 
-/// Wires the per-view focus-navigation + input-binding bridge. Added
-/// transitively by [`crate::NoesisPlugin`].
+/// Registers [`NoesisFocusControl`]'s systems and messages. Added by
+/// [`NoesisPlugin`](crate::NoesisPlugin).
 pub struct NoesisFocusControlPlugin;
 
 impl Plugin for NoesisFocusControlPlugin {
@@ -491,13 +446,8 @@ impl Plugin for NoesisFocusControlPlugin {
         app.add_message::<NoesisFocusBindingFired>()
             .add_message::<NoesisFocusPredicted>()
             .insert_resource(SharedFocusBindingQueue::default())
-            // Drain last frame's fires before user systems read them (mirrors
-            // the click/keydown drains).
             .add_systems(PreUpdate, drain_focus_binding_queue)
-            // After `sync_panels` so a panel's `NoesisFocusControl` acts the same
-            // frame its fragment mounts (the reconcile reads
-            // `panel_mounted_this_frame`, set by `sync_panels`); mirrors the focus
-            // bridge's ordering.
+            // After `sync_panels`, which sets `panel_mounted_this_frame`.
             .add_systems(
                 PostUpdate,
                 (

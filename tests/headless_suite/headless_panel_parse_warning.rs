@@ -1,12 +1,11 @@
-//! F5b regression: a [`UiPanel`] fragment that is malformed but *loadable* (Noesis
-//! returns a partial tree and only warns) is surfaced as a Bevy `error!` naming the
-//! panel entity and URI, instead of a silent half-render.
+//! A [`UiPanel`] fragment that is malformed but loadable (Noesis returns a
+//! partial tree and only warns) is surfaced as a Bevy `error!` naming the panel
+//! entity and URI, instead of a silent half-render.
 //!
 //! What this asserts: no panic, the malformed fragment still builds a `PanelEntry`
-//! (`live_panels == 2`, distinguishing the lenient-parse path from F5's hard
-//! `None` case), and a valid sibling panel is unaffected. The `error!` surfacing
-//! is exercised by this path (a tag-mismatch fragment); the ERROR-level tracing
-//! event is captured on the reconcile thread and asserted below.
+//! (`live_panels == 2`, unlike the missing-URI case in `headless_panel_parse_error`
+//! where load returns `None`), a valid sibling panel is unaffected, and an
+//! ERROR-level tracing event names the malformed URI.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,7 +20,7 @@ use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 use crate::common::{headless_app, run_until};
 
-/// Collects ERROR-level tracing messages so the test can assert F5b surfaced one.
+/// Collects ERROR-level tracing messages.
 struct ErrorCapture(Arc<Mutex<Vec<String>>>);
 impl<S: Subscriber> Layer<S> for ErrorCapture {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
@@ -69,9 +68,8 @@ fn malformed_fragment_loads_partial_and_is_surfaced() {
     let captured: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // Capture ERROR events on this thread (where the NonSend reconcile runs) so we
-    // can assert F5b actually logged. The headless harness installs no LogPlugin,
-    // so ours is the sink.
+    // Thread-local subscriber: the NonSend reconcile runs on this thread, and the
+    // headless harness installs no LogPlugin.
     let _log_guard = tracing::subscriber::set_default(
         tracing_subscriber::registry().with(ErrorCapture(Arc::clone(&errors))),
     );
@@ -127,8 +125,6 @@ fn malformed_fragment_loads_partial_and_is_surfaced() {
         },
     );
 
-    // Terminal success: both panels mounted (malformed loads a partial tree), the
-    // good sibling bound, and the F5b error! surfaced the malformed URI.
     let pred_captured = Arc::clone(&captured);
     let pred_errors = Arc::clone(&errors);
     let done = run_until(&mut app, 240, move |app| {
@@ -156,8 +152,7 @@ fn malformed_fragment_loads_partial_and_is_surfaced() {
         "F5b scenario never reached terminal state within 240 frames; \
          live_panels={live}, reads {good:?}, errors {errs:?}",
     );
-    // Both built a PanelEntry: the malformed one still LOADS (partial tree), unlike
-    // F5's missing-URI case where load returns None and the panel never mounts.
+    // Both built a PanelEntry: the malformed one still loads as a partial tree.
     assert_eq!(
         live, 2,
         "expected both panels to mount (malformed fragment loads as a partial tree); got {live}",
@@ -167,8 +162,7 @@ fn malformed_fragment_loads_partial_and_is_surfaced() {
         Some("42"),
         "the valid sibling's binding did not reach the UI; reads {good:?}",
     );
-    // F5b: the malformed fragment's parser warning surfaced as a Bevy error! naming
-    // the panel's URI, instead of vanishing into the Noesis log.
+    // The parser warning surfaced as a Bevy error! naming the panel's URI.
     assert!(
         errs.iter()
             .any(|e| e.contains("bad.xaml") && e.contains("parser warning")),

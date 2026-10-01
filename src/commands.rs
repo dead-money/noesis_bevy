@@ -1,27 +1,19 @@
-//! Per-view Rust-owned `ICommand` bridge.
+//! Rust-owned `ICommand`s: let XAML `Command="{Binding Name}"` controls invoke
+//! Rust code.
 //!
-//! Lets XAML `Command="{Binding Name}"` controls (a `Button`, a `MenuItem`, an
-//! `InputBinding`/`MouseBinding`, …) invoke Rust logic without touching Noesis
-//! pointers. Add a [`NoesisCommands`] component to the view's camera entity: it
-//! declares the named commands (a [`CommandsDef`]); the bridge registers a
-//! Noesis class whose dependency properties are each a
-//! [`PropType::BaseComponent`] holding a Rust-backed
-//! [`Command`], creates an instance, and
-//! attaches it as the view's (or a named element's) `DataContext`. Authoring
-//! `Command="{Binding Fire}"` then resolves `Fire` to that command.
+//! Add a [`NoesisCommands`] component, built from a [`CommandsDef`], to a
+//! [`NoesisView`](crate::NoesisView) camera entity. The bridge registers a
+//! Noesis class with one property per declared command, fills each with a
+//! Rust-backed [`Command`], and sets an instance of the class as the
+//! `DataContext` of the view root or a named element. A `Button`, `MenuItem` or
+//! `InputBinding` bound with `Command="{Binding Fire}"` then invokes `Fire`.
 //!
-//! When the UI invokes a command, the command's `Execute` runs on the
-//! view-driving thread and the bridge surfaces a [`NoesisCommandInvoked`]
-//! message carrying the originating `view` entity and the command `name`.
-//!
-//! This is the read-watch counterpart of the write-only
-//! [`viewmodel`](crate::viewmodel) bridge: a declarative per-view component plus
-//! a render-state entry attached as a `DataContext`. The payload is a
-//! `BaseComponent` command object rather than a scalar value, and flow runs from
-//! UI to Rust.
+//! Each invocation arrives as a [`NoesisCommandInvoked`] message in the next
+//! frame's `PreUpdate`, carrying the view entity, the command name, and the
+//! `CommandParameter` if one was set.
 //!
 //! ```ignore
-//! use noesis_bevy::commands::{NoesisCommands, CommandsDef, NoesisCommandInvoked};
+//! use noesis_bevy::commands::{CommandsDef, NoesisCommandInvoked, NoesisCommands};
 //!
 //! commands.entity(view).insert(NoesisCommands::new(
 //!     CommandsDef::new("MainMenu.Commands")
@@ -29,7 +21,6 @@
 //!         .command("Quit"),
 //! ));
 //!
-//! // observe UI -> Rust:
 //! fn on_command(mut invoked: MessageReader<NoesisCommandInvoked>) {
 //!     for ev in invoked.read() {
 //!         match ev.name.as_str() {
@@ -41,23 +32,18 @@
 //! }
 //! ```
 //!
-//! # The binding mechanism (how XAML reaches a Rust command)
+//! # `DataContext` conflicts
 //!
-//! Noesis exposes a command to a control's `Command` property the same way it
-//! exposes any object to a binding: the bound source must be a
-//! `DependencyObject` carrying the value under the bound path. The runtime's
-//! [`Instance::set_command`](noesis_runtime::classes::Instance::set_command) sets
-//! a `BaseComponent`-typed DP to a Rust [`Command`] (whose runtime type is an
-//! `ICommand`). A control bound `Command="{Binding Fire}"` against that instance
-//! as its `DataContext` reads the DP and invokes it on activation.
+//! The command host replaces the `DataContext` of its target. A
+//! [`NoesisVm`](crate::viewmodel::NoesisVm) or plain view model on the same view
+//! that targets the same element competes for it: the last one attached wins,
+//! and the other's bindings stop resolving. The bridge logs a warning when this
+//! happens. Attach one of them to a named element with
+//! [`CommandsDef::attach_to`] to keep both.
 //!
-//! # Threading & lifetime
-//!
-//! The class registration + instance + per-command [`Command`] objects are
-//! created on the main thread (Noesis is thread-affine to the `View`) and owned
-//! per-view in [`NoesisRenderState`](crate::render), released before
-//! `noesis_runtime::shutdown`. A command's `Execute` fires on the main thread;
-//! the forwarder pushes onto a [`SharedCommandQueue`] drained into messages.
+//! The bridge acts on view entities only. Changing the [`CommandsDef`] of a
+//! re-inserted component rebuilds the host; removing the component tears it
+//! down.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,16 +58,12 @@ use noesis_runtime::ffi::{ClassBase, PropType};
 use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 use crate::viewmodel::AttachTarget;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CommandsDef: declarative recipe
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A declarative recipe for a view's commands: a Noesis class name, the ordered
-/// set of command names, and where to attach the instance as a `DataContext`.
+/// The commands a view exposes: a Noesis class name, the command names, and
+/// which element's `DataContext` receives them.
 ///
-/// Build with the chained setters, then hand to [`NoesisCommands::new`]. Each
-/// command name must be unique within the def and match the `{Binding <name>}`
-/// paths authored in the XAML's `Command="…"` attributes.
+/// Build it with the chained setters and pass it to [`NoesisCommands::new`].
+/// Command names must be unique within the def and match the `{Binding name}`
+/// paths in the XAML.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandsDef {
     class_name: String,
@@ -90,12 +72,12 @@ pub struct CommandsDef {
 }
 
 impl CommandsDef {
-    /// Begin a def for the Noesis class `class_name`. Defaults to attaching at
-    /// the view root; override with [`Self::attach_to`].
+    /// Start a def for the Noesis class `class_name`, attached at the view root
+    /// unless you call [`Self::attach_to`].
     ///
-    /// `class_name` must be globally unique: Noesis class registration is keyed
-    /// by name, so two views needing the same commands must use distinct class
-    /// names (e.g. `"MainMenu.Commands.A"` / `"…B"`).
+    /// `class_name` must be unique across the process. Two views with the same
+    /// commands need distinct class names (`"MainMenu.Commands.A"`, `".B"`); a
+    /// duplicate fails to register and logs a warning.
     #[must_use]
     pub fn new(class_name: impl Into<String>) -> Self {
         Self {
@@ -105,8 +87,7 @@ impl CommandsDef {
         }
     }
 
-    /// Declare a named command. `name` is the `{Binding name}` path authored on
-    /// the control's `Command` property.
+    /// Declare a command, bound in XAML as `Command="{Binding name}"`.
     #[must_use]
     pub fn command(mut self, name: impl Into<String>) -> Self {
         self.commands.push(name.into());
@@ -133,14 +114,9 @@ impl CommandsDef {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-view component
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view command-host component. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity. Holds the [`CommandsDef`] and a queue of pending enabled-state edits;
-/// mutate it (`set_enabled`) to gate a command, which applies on the next frame
-/// and re-queries any bound control's `IsEnabled`.
+/// Per-view command host. Add it to a [`NoesisView`](crate::NoesisView) entity;
+/// see the [module docs](self). Enable or disable individual commands at runtime
+/// with [`set_enabled`](Self::set_enabled).
 #[derive(Component)]
 pub struct NoesisCommands {
     def: CommandsDef,
@@ -148,9 +124,9 @@ pub struct NoesisCommands {
 }
 
 impl NoesisCommands {
-    /// Build a command host from its [`CommandsDef`]. The class registration,
-    /// instantiation, and `DataContext` attach happen on a later frame (retained
-    /// until the view exists), so this is safe from `Startup`.
+    /// A command host for `def`. Registration and the `DataContext` attach run
+    /// in the reconcile system once the view's scene exists, so inserting it from
+    /// `Startup` is fine. All commands start enabled.
     #[must_use]
     pub fn new(def: CommandsDef) -> Self {
         Self {
@@ -159,24 +135,19 @@ impl NoesisCommands {
         }
     }
 
-    /// Queue an enabled-state change for command `name`. A disabled command's
-    /// `CanExecute` reports `false`, so a bound `Button` greys out and stops
-    /// invoking it. Applies on the next frame.
+    /// Queue an enabled-state change for command `name`, applied by the next
+    /// reconcile. A disabled command's `CanExecute` returns `false`, so bound
+    /// controls grey out and stop invoking it. An unknown name logs a warning.
     pub fn set_enabled(&mut self, name: impl Into<String>, enabled: bool) {
         self.pending_enables.push((name.into(), enabled));
     }
 
-    /// Enable command `name` from a system holding `&mut NoesisCommands`, so a
-    /// bound control becomes interactive again. Shorthand for
-    /// [`set_enabled(name, true)`](Self::set_enabled).
+    /// Shorthand for [`set_enabled(name, true)`](Self::set_enabled).
     pub fn enable(&mut self, name: impl Into<String>) {
         self.set_enabled(name, true);
     }
 
-    /// Disable command `name` from a system holding `&mut NoesisCommands`. Its
-    /// `CanExecute` then reports `false`, so a bound `Button` greys out and
-    /// stops invoking it. Shorthand for
-    /// [`set_enabled(name, false)`](Self::set_enabled).
+    /// Shorthand for [`set_enabled(name, false)`](Self::set_enabled).
     pub fn disable(&mut self, name: impl Into<String>) {
         self.set_enabled(name, false);
     }
@@ -185,31 +156,23 @@ impl NoesisCommands {
         &self.def
     }
 
-    /// Whether any enabled-state edits are queued. Read via `&self` so the
-    /// reconcile system can gate its mutable access and avoid tripping change
-    /// detection.
+    /// Read through `&self` so idle frames don't trip change detection.
     pub(crate) fn has_pending_enables(&self) -> bool {
         !self.pending_enables.is_empty()
     }
 
-    /// Take the queued enabled-state edits (called by the reconcile system).
     pub(crate) fn take_pending_enables(&mut self) -> Vec<(String, bool)> {
         std::mem::take(&mut self.pending_enables)
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Invocation: shared queue, message, forwarding handler
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Queue between the (main-thread) [`CommandForwarder`] callbacks and the drain
-/// system. Entries carry the originating view entity, the command name, and the
-/// decoded command parameter.
+/// Command invocations waiting to become [`NoesisCommandInvoked`] messages, as
+/// `(view, name, parameter)`. Filled by [`CommandForwarder`] during
+/// `PostUpdate` and drained in `PreUpdate`.
 #[derive(Resource, Clone, Default)]
 pub struct SharedCommandQueue(Arc<Mutex<Vec<(Entity, String, Option<String>)>>>);
 
 impl SharedCommandQueue {
-    /// Push an invocation from a forwarder.
     pub(crate) fn push(&self, view: Entity, name: String, parameter: Option<String>) {
         self.0
             .lock()
@@ -217,8 +180,12 @@ impl SharedCommandQueue {
             .push((view, name, parameter));
     }
 
-    /// Take the pending invocations. Drained into [`NoesisCommandInvoked`]; also
-    /// exposed so headless tests can read the queue directly.
+    /// Take every pending invocation. [`drain_command_queue`] calls this each
+    /// frame; tests can call it directly.
+    ///
+    /// # Panics
+    ///
+    /// If the queue's mutex was poisoned by an earlier panic.
     #[must_use]
     pub fn drain(&self) -> Vec<(Entity, String, Option<String>)> {
         let mut guard = self.0.lock().expect("SharedCommandQueue poisoned");
@@ -230,26 +197,24 @@ impl SharedCommandQueue {
     }
 }
 
-/// Emitted when a UI control invokes one of a view's declared commands.
+/// Sent when a control invokes one of a view's declared commands. Arrives in the
+/// `PreUpdate` after the invocation.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisCommandInvoked {
     /// The [`NoesisView`](crate::NoesisView) entity whose command was invoked.
     pub view: Entity,
     /// The command's name, as declared in [`CommandsDef::command`].
     pub name: String,
-    /// The command parameter the bound control supplied, decoded to a string
-    /// (the usual XAML `CommandParameter="..."` literal). `None` when no
-    /// parameter was supplied. Non-string boxed parameters (`i32`/`f64`/`bool`)
-    /// are stringified; an unsupported boxed type also yields `None`. Decoded
-    /// via [`CommandParameterValue`].
+    /// The control's `CommandParameter` as a string. `i32`, `f64` and `bool`
+    /// parameters are formatted with `to_string`. `None` when there is no
+    /// parameter or it has another type.
     pub parameter: Option<String>,
 }
 
-/// Main-thread [`CommandHandler`] that forwards a single command's `Execute`
-/// onto a [`SharedCommandQueue`], tagged with the owning view entity and the
-/// command name. `can_execute` gates the command on a shared [`AtomicBool`] the
-/// reconcile system flips for [`NoesisCommands::set_enabled`]. `pub` so headless
-/// tests can wire the same forwarding.
+/// [`CommandHandler`] that pushes each `Execute` onto a [`SharedCommandQueue`],
+/// tagged with its view and command name. `CanExecute` reads a shared
+/// [`AtomicBool`]. Apps use [`NoesisCommands`]; this is `pub` for headless
+/// tests.
 pub struct CommandForwarder {
     view: Entity,
     name: String,
@@ -258,8 +223,7 @@ pub struct CommandForwarder {
 }
 
 impl CommandForwarder {
-    /// Build a forwarder for `name`'s command owned by `view`. `enabled` gates
-    /// `can_execute`; flip it then call
+    /// A forwarder for command `name` on `view`. After flipping `enabled`, call
     /// [`Command::raise_can_execute_changed`](noesis_runtime::commands::Command::raise_can_execute_changed)
     /// so bound controls re-query.
     #[must_use]
@@ -289,9 +253,7 @@ impl CommandHandler for CommandForwarder {
     }
 }
 
-/// Decode a boxed command parameter to a string for [`NoesisCommandInvoked`].
-/// XAML `CommandParameter="..."` literals box as strings (the common case);
-/// `i32`/`f64`/`bool` are stringified; anything else (or no parameter) is `None`.
+/// XAML `CommandParameter="..."` literals box as strings; other types fall through.
 fn decode_command_param(param: &CommandParameterValue) -> Option<String> {
     if param.is_none() {
         return None;
@@ -311,49 +273,36 @@ fn decode_command_param(param: &CommandParameterValue) -> Option<String> {
     None
 }
 
-/// No-op [`PropertyChangeHandler`] for the command-host class. Command DPs are
-/// set once at build time and never written from XAML, so there's nothing to
-/// observe, but [`ClassBuilder::new`] requires a handler.
+/// [`ClassBuilder::new`] requires a handler; command properties are only set at build.
 struct NoCommandChanges;
 
 impl PropertyChangeHandler for NoCommandChanges {
     fn on_changed(&self, _instance: Instance, _prop_index: u32, _value: PropertyValue<'_>) {}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Render-world entry: CommandEntry
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One live command host, owned per-view by [`NoesisRenderState`]. Field order
-/// matters: `instance` drops before `registration`, mirroring the C++ refcount
-/// rule that a class's instances release before the class unregisters. The
-/// owned [`Command`]s drop after the instance has released its DP references.
+/// One view's live command host. Field order is drop order: `instance` must
+/// release before `_registration` unregisters the class, and the [`Command`]s
+/// drop after the instance has released its property references.
 pub(crate) struct CommandEntry {
     instance: ClassInstance,
     _registration: ClassRegistration,
-    /// The Rust-backed command objects, one per declared name (DP addition
-    /// order). Held so we can call `raise_can_execute_changed` after an enabled
-    /// flip; the DP also holds its own reference, so the command stays live
-    /// while bound regardless.
+    /// One per declared name, in property order. Held for
+    /// `raise_can_execute_changed`; each property holds its own reference too.
     commands: Vec<Command>,
     /// Per-command enabled flag shared with the matching [`CommandForwarder`].
     enabled: Vec<Arc<AtomicBool>>,
-    /// The def this host was built from. Retained as the rebuild fingerprint
-    /// (class + commands + target) *and* as the name→dense-index (DP /
-    /// `commands` / `enabled` order) map: a re-inserted [`NoesisCommands`] with
-    /// a changed def rebuilds (see [`Self::matches`]).
+    /// Rebuild fingerprint ([`Self::matches`]) and the name-to-index map for
+    /// `commands` and `enabled`.
     def: CommandsDef,
-    /// URI of the scene this host is currently attached to, or `None` when not
-    /// yet attached / detached by a scene rebuild.
+    /// URI of the scene this host is attached to; `None` until attached or after
+    /// a rebuild.
     attached_for_uri: Option<String>,
 }
 
 impl CommandEntry {
-    /// Register the Noesis class (one `BaseComponent` DP per command), create an
-    /// instance, build a Rust [`Command`] per name (its forwarder tagged with
-    /// `view` and pushing to `queue`), and assign each to its DP. `None` if
-    /// registration / instantiation is rejected (e.g. a duplicate class name).
-    /// Main-thread only.
+    /// Register the class, instantiate it, and set one [`Command`] per declared
+    /// name. `None` if Noesis rejects the registration (e.g. a duplicate class
+    /// name) or the instance.
     pub(crate) fn build(
         view: Entity,
         def: &CommandsDef,
@@ -374,8 +323,6 @@ impl CommandEntry {
             let forwarder =
                 CommandForwarder::new(view, name.clone(), queue.clone(), Arc::clone(&flag));
             let command = Command::new(forwarder);
-            // Set the BaseComponent DP at `idx` to the command (the C++ side
-            // takes its own reference; `command` keeps ours).
             instance.handle().set_command(idx as u32, &command);
             commands.push(command);
             enabled.push(flag);
@@ -391,9 +338,8 @@ impl CommandEntry {
         })
     }
 
-    /// Whether this host was built from an equivalent def. `false` means a
-    /// re-inserted [`NoesisCommands`] changed the class, commands, or target and
-    /// the host must be rebuilt.
+    /// `false` when a re-inserted [`NoesisCommands`] changed the def and the host
+    /// must be rebuilt.
     pub(crate) fn matches(&self, def: &CommandsDef) -> bool {
         &self.def == def
     }
@@ -402,12 +348,11 @@ impl CommandEntry {
         &self.def.target
     }
 
-    /// Borrow the instance for `set_data_context`. Lives as long as the entry.
     pub(crate) fn instance(&self) -> &ClassInstance {
         &self.instance
     }
 
-    /// Apply an enabled-state edit by command name, re-querying bound controls.
+    /// Set command `name`'s enabled flag and make bound controls re-query.
     /// `false` when the host has no such command.
     pub(crate) fn set_enabled(&self, name: &str, value: bool) -> bool {
         let Some(idx) = self.def.commands.iter().position(|n| n == name) else {
@@ -426,20 +371,14 @@ impl CommandEntry {
         self.attached_for_uri = Some(uri.to_owned());
     }
 
-    /// Detach (logically) so the next attach pass re-binds against the rebuilt
-    /// scene. Called from scene teardown.
+    /// Mark detached so the next attach pass targets the rebuilt scene.
     pub(crate) fn reset_attach(&mut self) {
         self.attached_for_uri = None;
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems + plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisCommands`]: build its render-side entry on
-/// first sight, apply queued enabled-state edits, then (re-)attach it as its
-/// target's `DataContext`.
+/// Build or rebuild each view's command host, apply queued enabled-state edits,
+/// then attach any host not yet attached to the current scene.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_commands(
     mut views: Query<(Entity, &mut NoesisCommands)>,
@@ -451,8 +390,6 @@ pub(crate) fn sync_commands(
     };
     for (entity, mut cmds) in &mut views {
         state.ensure_commands(entity, cmds.def(), &queue);
-        // Only touch the component mutably when there are queued edits, so an
-        // idle frame doesn't falsely mark `NoesisCommands` changed downstream.
         if cmds.has_pending_enables() {
             let enables = cmds.take_pending_enables();
             state.apply_command_enables_for(entity, &enables);
@@ -461,7 +398,8 @@ pub(crate) fn sync_commands(
     state.attach_commands();
 }
 
-/// Drain the shared invocation queue into [`NoesisCommandInvoked`] messages.
+/// Turn queued invocations into [`NoesisCommandInvoked`] messages. Runs in
+/// `PreUpdate`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_command_queue(
     queue: Res<SharedCommandQueue>,
@@ -482,8 +420,8 @@ impl ReapOnRemove for NoesisCommands {
     }
 }
 
-/// Wires the per-view `ICommand` bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the [`NoesisCommands`] systems, [`SharedCommandQueue`] and
+/// [`NoesisCommandInvoked`]. Added by [`crate::NoesisPlugin`].
 pub struct NoesisCommandsPlugin;
 
 impl Plugin for NoesisCommandsPlugin {

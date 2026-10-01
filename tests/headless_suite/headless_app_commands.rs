@@ -9,8 +9,6 @@
 //! and decoded parameter, and that no message arrives before the first click.
 //!
 //! Theme-free / font-free XAML so the scene builds with no font gate.
-//!
-//!   `cargo test -p noesis_bevy --test headless_app_commands -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 
@@ -129,9 +127,7 @@ fn ui_command_invocation_surfaces_message_with_decoded_parameter() {
         },
     );
 
-    // Event-driven exit: stop once both commands have surfaced for the view (the
-    // parameterless Fire and the parameterized FireParam). Both clicks are frame-
-    // gated in the Update system above, so this passes only after they fire.
+    // Exit once both Fire (no parameter) and FireParam have surfaced.
     let pred_collected = Arc::clone(&collected);
     let pred_view = Arc::clone(&view_id);
     let both_invoked = run_until(&mut app, 240, move |_app| {

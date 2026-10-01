@@ -3,7 +3,7 @@
 //! recovered with no `x:Name` by walking the clicked element's `DataContext` to
 //! the row's hidden `__entity` field.
 //!
-//! Drives a real headless [`NoesisPlugin`] app: an `ItemsControl` (`x:Name="Inv"`)
+//! Drives a headless app with the real bridge plugins: an `ItemsControl` (`x:Name="Inv"`)
 //! bound by [`UiList`] to three rows spawned as entities with [`ListedIn`]. After
 //! the rows realize, a left mouse down-then-up is injected over the top row, and a
 //! global observer must receive a `UiClicked` targeting that row's entity.
@@ -149,7 +149,6 @@ fn list_row_click_triggers_uiclicked_targeting_the_row() {
         },
     );
 
-    // Exit as soon as the observer sees a UiClicked targeting the top row (A).
     let pred_obs = Arc::clone(&observed);
     let pred_entities = Arc::clone(&entities);
     let fired = run_until(&mut app, 160, move |_app| {

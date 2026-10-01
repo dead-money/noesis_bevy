@@ -1,4 +1,4 @@
-//! Integration test for `NoesisFocusControl` focus-navigation through the real `NoesisPlugin` pipeline (headless).
+//! Integration test for `NoesisFocusControl` focus navigation on the headless harness.
 //!
 //! Two assertions, each verified against the un-applied default:
 //!
@@ -63,7 +63,7 @@ fn focus_control_moves_focus_and_predicts() {
                         size: UVec2::new(80, 32),
                         ..default()
                     },
-                    // start empty; one-shot applies fire after the scene exists
+                    // Filled at FOCUS_AT_FRAME, after the scene exists.
                     NoesisFocus::new(),
                     NoesisFocusControl::new(),
                     watcher(),
@@ -119,8 +119,7 @@ fn focus_control_moves_focus_and_predicts() {
         },
     );
 
-    // Event-driven exit: stop once the move has focused Second (First lost focus)
-    // and the matching prediction has surfaced. The move is frame-gated above.
+    // Exit once Second has focus, First lost it, and the prediction has surfaced.
     let pred_dp = Arc::clone(&dp_seen);
     let pred_predict = Arc::clone(&predict_seen);
     let pred_view = Arc::clone(&view_entity);

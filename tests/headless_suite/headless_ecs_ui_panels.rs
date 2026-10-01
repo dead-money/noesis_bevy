@@ -1,10 +1,7 @@
-//! ECS-UI integration proof, **Primitive 1 (panel = entity)**: two `UiPanel`
-//! instances of the *same* component set bind independently, and despawning one
-//! reaps it with no leak. Asserted against the [`ecs_ui`] example's own scene +
-//! component types, so this pins the exact code a user runs.
-//!
-//! One `#[test]` per file: each headless Noesis app owns the thread-affine runtime
-//! for its whole process, so the integration tests never share a binary.
+//! ECS-UI integration test for the `ecs_ui` example's Primitive 1 (panel =
+//! entity): two `UiPanel` instances of the same component set bind
+//! independently, and despawning one reaps it with no leak. Asserted against the
+//! example's own scene and component types, so this pins the code a user runs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,8 +16,7 @@ use crate::common::{headless_app, run_until};
 
 use crate::ecs_ui::{Health, Score};
 
-// Stimulus timings: heal p1, then despawn p2. The run's exit is the terminal
-// predicate (both panels' values read back, isolated, and p2 reaped).
+// Heal p1, then despawn p2.
 const HEAL_AT: usize = 16;
 const DESPAWN_AT: usize = 30;
 
@@ -124,8 +120,6 @@ fn panels_multi_instance_isolate_and_reap() {
         },
     );
 
-    // Exit once both panels' values have read back, p1's mutation is isolated from
-    // p2, and the despawned p2 has been reaped (2 live before -> 1 after).
     let pred_captured = Arc::clone(&captured);
     let pred_panels = Arc::clone(&panels);
     let pred_before = Arc::clone(&live_before);

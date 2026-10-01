@@ -1,14 +1,11 @@
-//! Integration test for XAML *dependency* hot-reload through the real
-//! `NoesisPlugin` pipeline.
+//! Integration test for XAML dependency hot-reload on the headless harness.
 //!
-//! The view's root markup (`main.xaml`) never changes; only a merged
-//! `ResourceDictionary` it pulls via `Source="styles.xaml"` is edited. A no-op
-//! (root-only) reload would keep reporting the original value; the dependency
-//! fetch-log is what lets `ensure_scene` notice the merged dictionary's bytes
-//! changed and rebuild the view against them.
+//! The root markup (`main.xaml`) never changes; only the `ResourceDictionary` it
+//! merges via `Source="styles.xaml"` is edited. The view records which URIs it
+//! fetched while building, so the edit must rebuild it.
 //!
-//! Observes the `Text` a `Style` setter (defined in the dictionary) applies to
-//! a named `TextBlock` — no glyph rendering, so no font setup is needed.
+//! Observes the `Text` a `Style` setter from the dictionary applies to a named
+//! `TextBlock`. No glyph rendering, so no font setup.
 
 use std::sync::{Arc, Mutex};
 
@@ -21,8 +18,6 @@ const ROOT_URI: &str = "main.xaml";
 const DEP_URI: &str = "styles.xaml";
 const RELOAD_AT_FRAME: usize = 25;
 
-// Root merges the dictionary and applies its style to `Label`. The root bytes
-// are identical across the whole test — only `styles.xaml` is edited.
 const ROOT: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="64" Height="32">
@@ -86,8 +81,7 @@ fn xaml_dependency_reload_rebuilds_dependent_view() {
               mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
 
-            // Edit ONLY the merged dictionary, leaving the root untouched. A
-            // fresh `Arc` is what the fetch-log compares against.
+            // A fresh `Arc` is what the dependency check compares by pointer.
             if *frame == RELOAD_AT_FRAME {
                 reg.insert(DEP_URI.to_string(), Arc::new(dep("DEP TWO").into_bytes()));
             }

@@ -1,11 +1,7 @@
-//! The motivating case for **list = entity**: two [`UiList`]s bound to the *same*
-//! [`NoesisView`] (two `ListBox`es in one scene) each realize their own rows.
-//!
-//! When `UiList` was a component on the view entity, a view could bind exactly one
-//! list (one component of a type per entity), even though the render store was
-//! already keyed `(view, name)`. Making the list its own entity lifts that cap: two
-//! `UiList` entities, same `view`, different `x:Name`, populated from the same row
-//! type via [`ListedIn`] pointing at each list entity.
+//! Two [`UiList`]s bound to the same [`NoesisView`] (two `ListBox`es in one scene)
+//! each realize their own rows. This is why a list is its own entity rather than a
+//! component on the view: two `UiList` entities, same `view`, different `x:Name`,
+//! populated from the same row type via [`ListedIn`] pointing at each list entity.
 //!
 //! Drives both lists to steady state and asserts each realized exactly its own rows
 //! (Left: 2, Right: 3) and the render state tracks two live bindings for the one
@@ -118,7 +114,6 @@ fn two_lists_in_one_view_each_realize_their_own_rows() {
         },
     );
 
-    // Exit once both lists realized all their own rows (Left: 2, Right: 3).
     let pred_left = Arc::clone(&adds_left);
     let pred_right = Arc::clone(&adds_right);
     let realized = run_until(&mut app, 160, move |_app| {

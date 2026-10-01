@@ -1,25 +1,13 @@
-//! Per-view code-built property animations: the runtime-driven counterpart to a
-//! XAML `<Storyboard>`/`<DoubleAnimation>` declared inline in a `ControlTemplate`
-//! or `Style.Triggers`.
+//! Code-built property animations: start a `DoubleAnimation` on a named
+//! element's scalar property from Rust, without a XAML `<Storyboard>`.
 //!
-//! Noesis owns the whole animation system (timelines, easing, the per-view
-//! `TimeManager` clock); the SDK's one entry point for starting a single
-//! animation against an element's dependency property from code is
-//! `BeginAnimation` / `ApplyAnimationClock`, surfaced by the runtime as
-//! [`Animation::begin_on`](noesis_runtime::animation::Animation::begin_on). This
-//! bridge builds a [`DoubleAnimation`](noesis_runtime::animation::DoubleAnimation)
-//! per element `x:Name` and begins it on a named scalar property (e.g. `Width`,
-//! `Height`, `Opacity`), so gameplay code can pulse a HUD element or slide a panel
-//! without authoring a Storyboard in XAML or routing a fake trigger.
-//!
-//! Add a [`NoesisAnimation`] component to the view's camera entity. Its
-//! `animations` map is the desired [`AnimationSpec`] per `x:Name` (each
-//! `(From?, To, Duration)` on a target property), begun against the view's
-//! elements whenever the component changes (Bevy change detection). The animation
-//! then advances off the view clock pumped by `View::Update`; with the default
-//! `HoldEnd` fill behavior the property holds its `To` value after the duration
-//! elapses. This is a write-only bridge: there is no read-back message. Observe
-//! the animated value through a [`NoesisDp`](crate::dp::NoesisDp) watch.
+//! Add a [`NoesisAnimation`] component to the [`NoesisView`](crate::NoesisView)
+//! camera entity. Its `animations` map holds one [`AnimationSpec`] per element
+//! `x:Name`. When the component changes, or the view's scene is rebuilt, the
+//! reconcile system in [`NoesisSet::Apply`] begins every listed animation through
+//! [`Animation::begin_on`](noesis_runtime::animation::Animation::begin_on). The
+//! animation then runs on the view's own clock and holds its `to` value when it
+//! finishes.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
@@ -27,15 +15,15 @@
 //! );
 //! ```
 //!
-//! Re-begin is the update model: assigning the component again (Bevy change
-//! detection) restarts every animation it lists, replacing any clock already
-//! running on that property (`HandoffBehavior::SnapshotAndReplace`). Naming an
-//! element that doesn't exist, or a property the element doesn't expose as a
-//! `float` dependency property, is a no-op and warns once per apply.
+//! Each change restarts every entry in the map, not only the one you edited, and
+//! replaces any animation already running on that property
+//! (`HandoffBehavior::SnapshotAndReplace`). Remove entries you don't want
+//! replayed. An unknown `x:Name`, or a property that isn't a `float` dependency
+//! property, logs a warning each time the map is applied.
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and begins the animations
-//! against that view's live scene, no cross-world queues.
+//! The bridge has no read-back message; watch the animated value with
+//! [`NoesisDp`](crate::dp::NoesisDp). It acts on view entities only; on a
+//! [`UiPanel`](crate::UiPanel) entity it does nothing.
 
 use std::collections::HashMap;
 
@@ -43,9 +31,8 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// A single code-built `float` animation: interpolate `property` to `to` over
-/// `duration_secs`, optionally starting from an explicit `from` (otherwise from
-/// the property's current base value).
+/// One `float` animation: interpolate `property` to `to` over `duration_secs`,
+/// starting from `from` or, when `None`, from the property's current value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationSpec {
     /// The element's scalar dependency property to drive (e.g. `"Width"`,
@@ -59,12 +46,12 @@ pub struct AnimationSpec {
     pub duration_secs: f64,
 }
 
-/// Per-view animation bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Per-view animation bridge. Add it to a [`NoesisView`](crate::NoesisView)
+/// entity; see the [module docs](self) for when animations start.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisAnimation {
-    /// Desired [`AnimationSpec`] per element `x:Name`. Begun against the view's
-    /// elements whenever this component changes.
+    /// [`AnimationSpec`] per element `x:Name`, one animation per element. Every
+    /// entry restarts whenever this component changes.
     pub animations: HashMap<String, AnimationSpec>,
 }
 
@@ -125,8 +112,8 @@ impl NoesisAnimation {
     }
 }
 
-/// Reconcile every view's [`NoesisAnimation`]: begin the requested animations
-/// when the component changed. Write-only: no read-back message.
+/// Begin each view's animations when its [`NoesisAnimation`] changed or its
+/// scene was rebuilt.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_animation_bridge(
     views: Query<(Entity, Ref<NoesisAnimation>)>,
@@ -142,7 +129,7 @@ pub(crate) fn sync_animation_bridge(
     }
 }
 
-/// Wires the per-view animation bridge. Added transitively by
+/// Registers the [`NoesisAnimation`] reconcile system. Added by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisAnimationPlugin;
 

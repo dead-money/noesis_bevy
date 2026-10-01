@@ -5,19 +5,17 @@
 //! watch on a derived property the write changes; the element default is the
 //! negative control, so a missing apply reads back the default and fails.
 //!
-//! * visibility: `Panel.IsVisible` (`false` after hide, default `true`);
-//!   `Visibility` enum isn't reachable via `get_i32`/`get_string`,
-//!   but the derived `IsVisible` bool reflects it.
+//! * visibility: `Panel.IsVisible` (`false` after hide, default `true`). The
+//!   `Visibility` enum can't be watched directly; `IsVisible` reflects it.
 //! * focus: `Input.IsFocused` (`true` after focus, default `false`);
 //!   `Other.IsFocused` stays `false` (proves only the target is focused).
 //! * layout: `Float.ActualWidth` (40 after Margin=[8,0,16,0] on 64-wide, default 64).
 //! * geometry: `Trace.ActualWidth` (~40 after [0,0]->[40,20] polyline, default 0).
-//! * dp set: `Input.ActualWidth` (40 after Width=40, default 20);
-//!   a DP read can't observe its own write (bridge snapshots self-writes),
-//!   so we watch the derived `ActualWidth` the re-layout changes.
+//! * dp set: `Input.ActualWidth` (40 after Width=40, default 20). A watch doesn't
+//!   report the bridge's own writes, so the test watches the re-layout instead.
 //!
-//! Write-only components are spawned empty and mutated at `SET_AT_FRAME` so
-//! change-detection fires after the scene is built.
+//! Write-only components are spawned empty and filled at `SET_AT_FRAME`, after the
+//! scene is built.
 
 use std::sync::{Arc, Mutex};
 
@@ -29,8 +27,6 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Frame-gated stimulus: apply the write-only mutations once the scene exists.
-// Frames are instant under run_until; the exit predicate is the read-back state.
 const SET_AT_FRAME: usize = 10;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -77,13 +73,10 @@ fn write_only_bridges_apply_their_effect() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Write-only components start empty (no-op); filled in after
-                    // the scene exists so their one-shot apply isn't lost.
                     NoesisVisibility::new(),
                     NoesisFocus::new(),
                     NoesisLayout::new(),
                     NoesisGeometry::new(),
-                    // The DP watcher polls every frame regardless of changes.
                     watcher(),
                 ))
                 .id();
@@ -111,7 +104,7 @@ fn write_only_bridges_apply_their_effect() {
                     *focus = NoesisFocus::new().focus("Input");
                     *layout = NoesisLayout::new().margin("Float", [8.0, 0.0, 16.0, 0.0]);
                     *geom = NoesisGeometry::new().path("Trace", vec![[0.0, 0.0], [40.0, 20.0]]);
-                    // keep watches; add a width write whose re-layout (ActualWidth 20->40) is observable
+                    // Keep the watches and add the Width write.
                     *dp = watcher().set_f32("Input", "Width", 40.0);
                 }
             }
@@ -133,12 +126,10 @@ fn write_only_bridges_apply_their_effect() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // Trace's ActualWidth lands in a band, not an exact value: converged once it
-    // is inside it (a no-op reads 0, a stretched cell reads 64; both are outside).
+    // Stroke makes Trace's width inexact. A no-op reads 0 and a stretched cell 64.
     let trace_ok =
         |v: &Option<DpValue>| matches!(v, Some(DpValue::F32(w)) if (38.0..=43.0).contains(w));
 
-    // Exit once every write-only bridge's derived effect has been read back.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let converged = run_until(&mut app, 240, |_app| {
@@ -177,7 +168,6 @@ fn write_only_bridges_apply_their_effect() {
         Some(DpValue::Bool(true)),
         "focus: focusing the TextBox should set IsFocused=true (default false)",
     );
-    // Negative control: focus bridge must touch only its target; "focus everything" or auto-focus regressions would flip Other.
     assert_eq!(
         latest(&got, view, "Other", "IsFocused"),
         Some(DpValue::Bool(false)),
@@ -189,8 +179,6 @@ fn write_only_bridges_apply_their_effect() {
         "layout: Margin [8,0,16,0] on a 64-wide stretchy element => ActualWidth 40 \
          (default 64)",
     );
-    // Left/Top-aligned, Stretch=None: empty default measures 0; [0,0]->[40,20] gives ~40 (+ stroke).
-    // A no-op apply reads 0; a stretched cell reads 64. Both alternatives fail.
     match latest(&got, view, "Trace", "ActualWidth") {
         Some(DpValue::F32(w)) => assert!(
             (38.0..=43.0).contains(&w),

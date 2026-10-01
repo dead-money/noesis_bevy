@@ -1,5 +1,5 @@
 //! Integration test for the typed `ItemsSource` bridge (`noesis_bevy::items`),
-//! run headless through the full `NoesisPlugin` pipeline.
+//! run headless through the real bridge plugins.
 //!
 //! Sets three `i32` items `[10, 20, 30]` on a `ListBox` and drives selection to
 //! index 1. Asserts the round-trip via `NoesisItemsCurrent`:
@@ -23,14 +23,13 @@ use crate::common::{headless_app, run_until};
 const VIEW_W: u32 = 120;
 const VIEW_H: u32 = 80;
 
-// wait for scene to be live; one-shot change-detection apply is lost before the control exists
 const SET_AT_FRAME: usize = 12;
 
 const XAML: &str = r##"<ListBox xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="Ports" Width="120" Height="80"/>"##;
 
-// (frame, entity, name, count, selected_index, current); frame retained to verify drive ordering
+// (frame, entity, name, count, selected_index, current); frame checks drive ordering
 type Observed = Vec<(usize, Entity, String, usize, i32, Option<ItemValue>)>;
 
 #[test]
@@ -54,7 +53,6 @@ fn typed_items_populate_select_and_read_back() {
                         size: UVec2::new(VIEW_W, VIEW_H),
                         ..default()
                     },
-                    // empty; filled at SET_AT_FRAME once the scene is live
                     NoesisItems::new(),
                 ))
                 .id();

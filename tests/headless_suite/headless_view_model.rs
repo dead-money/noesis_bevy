@@ -8,8 +8,6 @@
 //! is `Nullable<bool>` and cannot be asserted headlessly without a real click.
 //!
 //! Drives Noesis directly via `View::update`; no render device or GPU needed.
-//!
-//!   `cargo test -p noesis_bevy --test headless_view_model -- --nocapture`
 
 use std::collections::HashMap;
 use std::sync::Arc;
