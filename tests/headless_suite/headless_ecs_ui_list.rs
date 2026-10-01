@@ -1,11 +1,9 @@
-//! ECS-UI integration proof, **Primitive 2 (list = query)** plus the per-row half
-//! of **Primitive 3**: add / update-in-place / reorder-via-Move / remove all
-//! surface as the minimal op tally (never a Reset), a real row click fires a
-//! [`UiClicked`] targeting that row's *entity*, and selection round-trips through
-//! the [`Selected`] marker, surviving a reorder. Driven on the [`ecs_ui`]
+//! ECS-UI integration test for the `ecs_ui` example's Primitive 2 (list = query)
+//! plus the per-row half of Primitive 3. Add, update-in-place, reorder-via-Move
+//! and remove each surface as the minimal op tally (never a Reset), a real row
+//! click fires a [`UiClicked`] targeting that row's entity, and selection
+//! round-trips through the [`Selected`] marker, surviving a reorder. Uses the
 //! example's own `Item` row type and [`crate::ecs_ui::on_row_click`] observer.
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
 
@@ -47,9 +45,8 @@ struct OpFlags {
     removes: bool,
 }
 
-// A fresh ICollectionView starts with the FIRST row (A) current, so the bridge
-// marks A Selected by default. We click the SECOND row (B) to prove the click
-// actually drives selection; B is not the default.
+// Clicks the second row (B), not the first, so a selection on B can only come
+// from the click.
 const PRESS_AT: usize = 24; // click row B (y=60) after rows realize
 const RELEASE_AT: usize = 26;
 const CAPTURE_SEL_AT: usize = 32;
@@ -152,7 +149,6 @@ fn list_reconciles_minimally_and_row_click_selects() {
                     f.update_only = true;
                 }
             }
-            // Drain the UI-selection message stream (a real app would react here).
             for _ in sel_msgs.read() {}
 
             // Real click on the second row (B at y=60): a per-row UiClicked.
@@ -182,7 +178,7 @@ fn list_reconciles_minimally_and_row_click_selects() {
             {
                 row.name = "BB".into();
             }
-            // Flip the sort: A,B,C -> C,B,A. Selection (B) must ride the Move.
+            // Flip the sort: A,B,C -> C,B,A. Selected (B) must survive.
             if *frame == REORDER_AT
                 && let Ok(mut list) = lists.single_mut()
             {
@@ -200,8 +196,6 @@ fn list_reconciles_minimally_and_row_click_selects() {
         },
     );
 
-    // Exit once the scenario has fully played out: all reconcile op shapes seen,
-    // the row-B click captured, and selection survived the reorder onto B.
     let pred_flags = Arc::clone(&flags);
     let pred_clicks = Arc::clone(&row_clicks);
     let pred_reorder = Arc::clone(&sel_after_reorder);
@@ -248,9 +242,8 @@ fn list_reconciles_minimally_and_row_click_selects() {
         clicks.contains(&b),
         "row click did not fire a UiClicked targeting the clicked row entity (B={b:?}); got {clicks:?}",
     );
-    // Selection round-trip: the click moved selection off the default (A) onto B
-    // (via the example's observer), and B stayed selected across the reorder;
-    // currency rode the Move, no Reset.
+    // Selection round-trip: the click landed Selected on B (via the example's
+    // observer), and B stayed selected across the reorder.
     assert_eq!(
         after_click,
         Some(b),

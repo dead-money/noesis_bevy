@@ -1,16 +1,13 @@
 //! Regression test proving the Noesis UI actually *composites into pixels*.
 //!
-//! The other `render_suite` tests assert render-world bookkeeping (an intermediate
-//! is published, a stale one is torn down) but none read the final image back, so
-//! all four stay green even with the blit stubbed out. This one closes that gap:
-//! a `Camera2d` renders to an offscreen `Image`, a solid-red XAML fills the view,
-//! and a `Screenshot` of that image target is read back so we can assert the red
-//! landed in the pixels.
+//! The other `render_suite` tests assert bookkeeping (an intermediate is
+//! published, a stale one is torn down) but none read the final image back, so
+//! they stay green with the blit stubbed out. Here a `Camera2d` renders to an
+//! offscreen `Image`, a solid-red XAML fills the view, and a `Screenshot` of that
+//! image target is read back to assert the red landed in the pixels.
 //!
-//! It fails if the `Core2d` blit system (`noesis_blit_2d`) is not registered: with
-//! no blit the image keeps its black clear colour and the red centre pixel never
-//! appears, so `run_until` times out and the assert fires. (Verified by commenting
-//! the `.add_systems(Core2d, …)` wiring: the test goes red.)
+//! Without the `Core2d` blit system (`noesis_blit_2d`) the image keeps its black
+//! clear colour, the red centre pixel never appears, and `run_until` times out.
 //!
 //! Read-back is via the one-shot `Screenshot` component, not the persistent
 //! `Readback`: a `Screenshot` self-despawns after it fires, so no per-frame GPU
@@ -19,8 +16,7 @@
 //! so any last in-flight capture completes before the app drops.
 //!
 //! Runs on the real render graph (`render_app`) because compositing is a
-//! render-world blit. One `#[test]` per file (thread-affine Noesis runtime, one
-//! app per process). Font-free XAML so the scene builds without a font folder.
+//! render-world blit. Font-free XAML so the scene builds without a font folder.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,7 +44,7 @@ const SCREENSHOT_EVERY: usize = 6;
 // before the app drops (dropping mid-work segfaults the GPU driver).
 const SETTLE_FRAMES: usize = 60;
 
-// A solid-red Grid filling the whole view (cribbed from assets/test.xaml).
+// A solid-red Grid filling the whole view.
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     Background="Red"/>"##;
 

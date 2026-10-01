@@ -1,37 +1,33 @@
-//! Faithful Bevy-idiomatic port of the Noesis SDK **Scoreboard** sample
+//! Port of the Noesis SDK Scoreboard sample
 //! (`$NOESIS_SDK_DIR/Src/Packages/Samples/Scoreboard`).
 //!
-//! Unlike the other example ports, this one is a **conformance** test: it renders
-//! the genuine reference UI. The sample's real `MainWindow.xaml` and its two
-//! fonts are read **at runtime** from `$NOESIS_SDK_DIR` (the SDK is per-developer
-//! licensed and is never vendored into this repo, the same rule as `assets/Data`).
-//! Nothing here is a simplified re-creation of the layout: the emblem geometries,
-//! gradient/radial brushes, `ComboBox`/`ScrollViewer` control templates, the
-//! per-player `DataTemplate` with its `DataTrigger`s, and the `b:Interaction`
-//! behaviors are all the SDK's own XAML, byte-for-byte.
+//! This example renders the sample's own UI unmodified. Its `MainWindow.xaml` and
+//! two fonts are read at runtime from `$NOESIS_SDK_DIR`, not vendored: the emblem
+//! geometries, brushes, `ComboBox`/`ScrollViewer` templates, the per-player
+//! `DataTemplate` with its `DataTrigger`s, and the `b:Interaction` behaviors are
+//! all the SDK's XAML.
 //!
-//! The reference C++ sample exposes a `Game` view model (`Name`, `ElapsedTime`,
+//! The C++ sample exposes a `Game` view model (`Name`, `ElapsedTime`,
 //! `AllianceScore`, `HordeScore`, `SelectedTeam`, a `Players` collection and a
-//! `VisibleTeams` collection) reflected to XAML. This port reproduces that data
-//! through the crate's safe bridges, never raw FFI:
+//! `VisibleTeams` collection). This port supplies the same data through the
+//! crate's bridges:
 //!
-//!   * [`NoesisVm`] attaches a DO-backed `Scoreboard.Game` instance as the view
-//!     root `DataContext`, supplying the scalar bindings (`{Binding Name}`,
-//!     `{Binding AllianceScore}`, `{Binding HordeScore}`, `{Binding ElapsedTime}`,
-//!     `{Binding SelectedTeam}`).
-//!   * [`NoesisItems::with_objects`] supplies the `Players` `ItemsControl` with
-//!     ten **bindable object** items (one Rust-backed Noesis class per row), so
-//!     the per-player `DataTemplate` bindings (`{Binding Name}`, `{Binding Score}`,
-//!     `{Binding Kills}`, `{Binding Team}`, `{Binding Class}`, ...) resolve and
-//!     the team/class `DataTrigger`s fire, matching the reference exactly.
-//!   * [`NoesisItems::with`] supplies the `VisibleTeam` `ComboBox` with the three
-//!     team strings; its `SelectedIndex` binds to `Game.SelectedTeam`.
+//! - [`NoesisVm`] attaches a `Scoreboard.Game` instance as the view root
+//!   `DataContext` for the scalar bindings (`{Binding Name}`,
+//!   `{Binding AllianceScore}`, `{Binding HordeScore}`, `{Binding ElapsedTime}`,
+//!   `{Binding SelectedTeam}`).
+//! - [`NoesisItems::with_objects`] fills the `Players` `ItemsControl` with ten
+//!   bindable object rows, so the per-player template bindings (`{Binding Name}`,
+//!   `{Binding Score}`, `{Binding Kills}`, `{Binding Team}`, `{Binding Class}`, ...)
+//!   resolve and the team/class `DataTrigger`s fire.
+//! - [`NoesisItems::with`] fills the `VisibleTeam` `ComboBox` with the three team
+//!   strings; its `SelectedIndex` binds to `Game.SelectedTeam`.
 //!
-//! The seed dataset is the SDK's own `SampleData/ScoreboardSampleData.xaml`
-//! (10 players, "Silvershard Mines", 16 minutes), so the rendered scoreboard
-//! matches the reference's design-time view.
+//! The seed data is the SDK's `SampleData/ScoreboardSampleData.xaml` (10 players,
+//! "Silvershard Mines", 16 minutes), so the result matches the sample's
+//! design-time view.
 //!
-//! Run it windowed (requires `$NOESIS_SDK_DIR`):
+//! Requires `$NOESIS_SDK_DIR`:
 //!
 //! ```sh
 //! cargo run -p noesis_bevy --example scoreboard
@@ -40,9 +36,8 @@
 //!   cargo run -p noesis_bevy --example scoreboard
 //! ```
 //!
-//! The headless data round-trip is asserted by
-//! `tests/headless_example_scoreboard.rs`, which reuses this file's staging +
-//! spawn helpers.
+//! `tests/headless_suite/headless_example_scoreboard.rs` reuses this file's
+//! staging and spawn helpers to assert the data round-trip.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,19 +50,17 @@ use noesis_bevy::{
     NoesisWindowCompatPlugin, ObjectRow, ViewModelDef, XamlRegistry,
 };
 
-/// View / intermediate-target size. The XAML wraps a 900x600 layout in a
-/// `Viewbox`. The SDK sample sets no explicit window size (its X11 display just
-/// fills ~74% of the desktop), so we render at Full HD 1080p; the `Viewbox`
-/// scales the authored 1000x700 layout (a `<Grid Width="900" Height="600"
-/// Margin="50">`) crisply to fill it.
+/// View and window width in pixels. The sample sets no window size; its
+/// `Viewbox` scales the authored 1000x700 layout (a 900x600 `Grid` with a 50 px
+/// margin) to fill 1920x1080.
 pub const VIEW_W: u32 = 1920;
+/// View and window height in pixels. See [`VIEW_W`].
 pub const VIEW_H: u32 = 1080;
 
 /// URI the sample XAML is registered under in [`XamlRegistry`].
 pub const SCOREBOARD_URI: &str = "scoreboard/MainWindow.xaml";
 
-/// `x:Name` of the per-player `ItemsControl` whose `ItemsSource` we drive with
-/// bindable object items.
+/// `x:Name` of the per-player `ItemsControl`, filled with bindable object rows.
 pub const PLAYERS_NAME: &str = "Players";
 
 /// `x:Name` of the team-filter `ComboBox`.
@@ -196,18 +189,19 @@ const SAMPLE_PLAYERS: [PlayerSeed; 10] = [
     },
 ];
 
-/// The seed game name + elapsed minutes, from the same sample-data file.
+/// Seed `Game.Name`, from the sample-data file.
 pub const GAME_NAME: &str = "Silvershard Mines";
+/// Seed `Game.ElapsedTime` in minutes, from the sample-data file.
 pub const ELAPSED_MINUTES: i32 = 16;
 
 /// `Game.SelectedTeam` seed: index into `["Overall", "Alliance", "Horde"]`.
 /// "Overall" (0) shows every player, matching the reference's default.
 pub const SELECTED_TEAM: i32 = 0;
 
-/// Build the ten bindable player rows (object items). Each field name matches a
-/// `{Binding ...}` path in the SDK's per-player `DataTemplate`. `Class` and
-/// `Team` are strings so the template's `DataTrigger`s (which compare against
-/// `"Fighter"`, `"Alliance"`, ...) fire exactly as in the reference.
+/// Builds the ten bindable player rows. Each field name matches a `{Binding ...}`
+/// path in the sample's per-player `DataTemplate`. `Class` and `Team` are strings
+/// because the template's `DataTrigger`s compare against `"Fighter"`,
+/// `"Alliance"`, ...
 #[must_use]
 pub fn player_rows() -> Vec<ObjectRow> {
     SAMPLE_PLAYERS
@@ -227,7 +221,7 @@ pub fn player_rows() -> Vec<ObjectRow> {
         .collect()
 }
 
-/// Total score of the Alliance team (mirrors `Game::GetAllianceScore`).
+/// Total score of the Alliance players.
 #[must_use]
 pub fn alliance_score() -> i32 {
     SAMPLE_PLAYERS
@@ -237,7 +231,7 @@ pub fn alliance_score() -> i32 {
         .sum()
 }
 
-/// Total score of the Horde team (mirrors `Game::GetHordeScore`).
+/// Total score of the Horde players.
 #[must_use]
 pub fn horde_score() -> i32 {
     SAMPLE_PLAYERS
@@ -247,17 +241,18 @@ pub fn horde_score() -> i32 {
         .sum()
 }
 
-/// Resolve the sample's data directory inside the SDK, or `None` when
-/// `$NOESIS_SDK_DIR` is unset (the example/test then skips).
+/// The sample's `Data` directory inside the SDK, or `None` when `$NOESIS_SDK_DIR`
+/// is unset.
 #[must_use]
 pub fn sample_data_dir() -> Option<PathBuf> {
     let sdk = std::env::var_os("NOESIS_SDK_DIR")?;
     Some(PathBuf::from(sdk).join("Src/Packages/Samples/Scoreboard/Data"))
 }
 
-/// Read the SDK's real `MainWindow.xaml` + its two fonts at runtime and register
-/// them. Returns `true` on success; `false` (with a warning) when the SDK isn't
-/// reachable, so callers should then skip spawning. No SDK bytes are vendored.
+/// Reads the sample's `MainWindow.xaml` and its two fonts from the SDK and
+/// registers them. Returns `false` (with a warning) when `$NOESIS_SDK_DIR` is
+/// unset or the XAML can't be read; callers should then skip spawning. A missing
+/// font only warns.
 #[must_use]
 pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
     let Some(data) = sample_data_dir() else {
@@ -278,9 +273,8 @@ pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
     };
     xaml.insert(SCOREBOARD_URI.to_string(), Arc::new(bytes));
 
-    // The two sample fonts, read from the SDK at runtime (never vendored).
-    // Family names embedded in the files: "Cheboygan" (Cheboyga.ttf) and
-    // "PerryGothic" (PERRYGOT.TTF), matched by the XAML's FontFamily refs.
+    // Family names inside the files: "Cheboygan" (Cheboyga.ttf) and "PerryGothic"
+    // (PERRYGOT.TTF), which the XAML's FontFamily references name.
     let mut staged_any = false;
     for filename in ["Cheboyga.ttf", "PERRYGOT.TTF"] {
         let path = data.join("Fonts").join(filename);
@@ -298,9 +292,9 @@ pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
     true
 }
 
-/// Spawn the scoreboard view entity wired with the Game `DataContext` VM, the
-/// bindable player items, the team `ComboBox` items, and a DP watch on the
-/// combo's `SelectedIndex` (proving `Game.SelectedTeam` reached a named element).
+/// Spawns the scoreboard view with the `Game` view model as `DataContext`, the
+/// player rows, the team `ComboBox` items, and a [`NoesisDp`] watch on the
+/// combo's `SelectedIndex` (which shows `Game.SelectedTeam` reached the control).
 pub fn spawn_scoreboard(commands: &mut Commands) -> Entity {
     let mut game = NoesisVm::new(
         ViewModelDef::new(GAME_CLASS)
@@ -335,9 +329,8 @@ pub fn spawn_scoreboard(commands: &mut Commands) -> Entity {
                 ..default()
             },
             game,
-            // Players: ten bindable object items → the per-player DataTemplate.
-            // VisibleTeam: the three team strings (SelectedIndex binds to
-            // Game.SelectedTeam, so we don't drive selection here).
+            // VisibleTeam's SelectedIndex binds to Game.SelectedTeam, so selection
+            // is not driven here.
             NoesisItems::new()
                 .with_objects(PLAYERS_NAME, PLAYER_CLASS, player_rows())
                 .with(VISIBLE_TEAM_NAME, ["Overall", "Alliance", "Horde"]),
@@ -346,12 +339,13 @@ pub fn spawn_scoreboard(commands: &mut Commands) -> Entity {
         .id()
 }
 
-/// Shared app config both the windowed `main` and the headless test boot.
+/// Adds [`NoesisPlugin`] and [`NoesisWindowCompatPlugin`], and a startup system
+/// that stages the SDK assets and spawns the view. Shared by `main` and the
+/// headless test.
 pub fn configure_scoreboard(app: &mut App) {
     app.add_plugins(NoesisPlugin::default())
-        // The SDK sample's root is a `<Window>` (an App-framework type absent from
-        // the core runtime we link); this registers a content-host stand-in so the
-        // genuine XAML parses unmodified.
+        // The sample's root is a `<Window>`, an App-framework type the core runtime
+        // lacks; this registers a stand-in so the XAML parses unmodified.
         .add_plugins(NoesisWindowCompatPlugin)
         .add_systems(
             Startup,
@@ -365,12 +359,9 @@ pub fn configure_scoreboard(app: &mut App) {
         );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Windowed entry point (+ optional headless screenshot)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Headless screenshot driver: when `NOESIS_VIEWER_EXIT_AFTER` is set, wait a few
-/// frames, capture `NOESIS_SCREENSHOT` (default `scoreboard.png`), then exit.
+/// Headless screenshot driver: when `NOESIS_VIEWER_EXIT_AFTER` is set, waits
+/// `NOESIS_SCREENSHOT_FRAMES` frames (default 120), captures `NOESIS_SCREENSHOT`
+/// (default `scoreboard.png`), then exits.
 #[derive(Resource)]
 struct Headless {
     capture_at: u32,

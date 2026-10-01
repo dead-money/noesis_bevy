@@ -1,12 +1,9 @@
 //! Integration test for the raw 3D matrix transform path of [`NoesisTransform3D`]
-//! ([`Matrix3DSpec`] / `MatrixTransform3D`), run end-to-end through the Noesis
-//! bridge pipeline on the headless harness.
+//! ([`Matrix3DSpec`] / `MatrixTransform3D`) on the headless harness.
 //!
-//! `MatrixTransform3D` is a post-layout property whose value lives on a nested
-//! object, not reachable through a scalar `NoesisDp` watch. The bridge reads the
-//! element's live `Transform3D` back from Noesis after assignment and emits
-//! [`NoesisMatrixTransform3DChanged`], gated on pointer identity with the assigned
-//! object.
+//! The matrix lives on a nested object that a scalar `NoesisDp` watch can't reach.
+//! The bridge reads the element's live `Transform3D` back after assignment and emits
+//! [`NoesisMatrixTransform3DChanged`] only when it is the object it assigned.
 //!
 //! Positive: assigning a non-trivial affine matrix to `Box` reads those exact 12
 //! floats back. A no-op apply, wrong-entity routing, or inverted change-detection
@@ -14,12 +11,11 @@
 //! fails. Negative: `Other` is never given a transform and must never appear in
 //! any [`NoesisMatrixTransform3DChanged`].
 //!
-//! The component starts empty and is filled in after the scene is built so
-//! change-detection fires on the real assignment, not on spawn.
+//! The component starts empty and is filled once the scene is built, so change
+//! detection fires on the real assignment.
 //!
-//! Visual compositing of `Transform3D` (perspective pixels) is not asserted here:
-//! it routes through the offscreen effects path whose Shadow/Blur shaders are not
-//! yet implemented. The `#[ignore]`d test below gates that aspect.
+//! The rendered perspective pixels are not asserted; the empty `#[ignore]`d test
+//! below is a placeholder for that check.
 
 use std::sync::{Arc, Mutex};
 
@@ -31,8 +27,6 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Frame-gated stimulus: fill the transform once the scene exists. Frames are
-// instant under run_until; the exit predicate is the read-back, not this count.
 const SET_AT_FRAME: usize = 10;
 
 const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -42,8 +36,7 @@ const XAML: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml
   <Border x:Name="Other" Width="20" Height="10"/>
 </Grid>"##;
 
-// Non-trivial affine Transform3: anisotropic scale, off-diagonal shear, and
-// translation. A missing apply reads back nothing.
+// Anisotropic scale, off-diagonal shear, and translation.
 #[rustfmt::skip]
 const MATRIX: [f32; 12] = [
     2.0, 0.5, 0.0,
@@ -78,8 +71,7 @@ fn matrix_transform3d_bridge_reads_back_assigned_matrix() {
                         size: UVec2::new(64, 32),
                         ..default()
                     },
-                    // Starts empty (no-op); filled after the scene exists so the
-                    // one-shot apply isn't lost.
+                    // Filled at SET_AT_FRAME, after the scene exists.
                     NoesisTransform3D::new(),
                 ))
                 .id();
@@ -110,7 +102,6 @@ fn matrix_transform3d_bridge_reads_back_assigned_matrix() {
         },
     );
 
-    // Exit once Box has reported its assigned matrix back from the live Transform3D.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let converged = run_until(&mut app, 240, |_app| {

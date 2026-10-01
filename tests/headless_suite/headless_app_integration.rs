@@ -2,9 +2,8 @@
 //! ([`NoesisCursorRequested`]), open-URL ([`NoesisOpenUrl`]), and play-audio
 //! ([`NoesisPlayAudio`]). Single headless app (one Noesis init/shutdown per process).
 //!
-//! Mouse input goes directly onto [`NoesisInputQueue`] rather than through
-//! `NoesisInputPlugin` because the windowed forwarders need a `PrimaryWindow`.
-//! Font-free XAML; no font gate.
+//! Mouse input goes directly onto [`NoesisInputQueue`]; the window forwarders need
+//! a `PrimaryWindow`, which the headless app lacks. Font-free XAML; no font gate.
 
 use std::sync::{Arc, Mutex};
 
@@ -16,9 +15,6 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Frame-gated stimulus: the view is built on first PostUpdate, so move the mouse
-// once it exists, then trigger the open-URL / play-audio calls. Frames are instant
-// under run_until; the exit predicate is the captured callbacks, not a count.
 const MOVE_AT_FRAME: usize = 12;
 const TRIGGER_AT_FRAME: usize = 16;
 
@@ -74,7 +70,7 @@ fn integration_callbacks_surface_as_messages() {
               mut audio: MessageReader<NoesisPlayAudio>| {
             *frame += 1;
 
-            // Repeated across frames to guarantee an enter/move firing.
+            // Repeated over three frames so an enter/move fires.
             if (MOVE_AT_FRAME..MOVE_AT_FRAME + 3).contains(&*frame) {
                 queue.push(NoesisInputEvent::MouseMove { x: 100, y: 100 });
             }
@@ -97,7 +93,6 @@ fn integration_callbacks_surface_as_messages() {
         },
     );
 
-    // Exit once all three callbacks have surfaced as messages.
     let pred_cap = Arc::clone(&captured);
     let converged = run_until(&mut app, 240, |_app| {
         let c = pred_cap.lock().unwrap();

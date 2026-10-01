@@ -1,17 +1,14 @@
-//! ECS-UI integration proof: a [`NoesisEventWatch`] placed on a mounted
-//! [`UiPanel`] entity resolves `x:Name`s inside the panel's *own* fragment
+//! ECS-UI integration test: a [`NoesisEventWatch`] placed on a mounted
+//! [`UiPanel`] entity resolves `x:Name`s inside the panel's own fragment
 //! namescope and fires a [`UiRoutedEvent`] that targets the panel entity,
-//! carrying the host as its `view` — the generic-routed-event twin of
+//! carrying the host as its `view`. The generic-routed-event twin of
 //! `headless_panel_click.rs`. Two instances of the same fragment XAML stay
 //! isolated: moving the mouse over one panel's element never fires the other's
 //! watch. Watches `MouseMove` (`MouseEnter` generation is not exercised by the
 //! headless input pump; move is the hover primitive that provably fires).
 //!
-//! This is what makes fragment-internal hover (e.g. a palette button's
-//! mouse-over preview) reachable from Rust: before, a `NoesisEventWatch` on a
-//! panel entity was silently ignored (the panel isn't a `scene`).
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
+//! This makes fragment-internal hover (e.g. a palette button's mouse-over
+//! preview) reachable from Rust.
 
 use std::sync::{Arc, Mutex};
 
@@ -43,8 +40,8 @@ const FRAG_XAML: &str = r##"<Border xmlns="http://schemas.microsoft.com/winfx/20
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="PanelHot" Background="#FF224488"/>"##;
 
-// Panels mount + seal over the first frames; move the mouse in once they are
-// live. Stimulus timing, not the exit condition.
+// Panels mount and seal over the first frames; move the mouse in once they are
+// live.
 const ENTER_AT: usize = 25;
 
 #[test]
@@ -128,7 +125,6 @@ fn event_watch_on_panel_entity_resolves_fragment_internal_name() {
         },
     );
 
-    // Exit as soon as the left panel's fragment-internal element has fired.
     let pred_obs = Arc::clone(&observed);
     let pred_ids = Arc::clone(&ids);
     let entered = run_until(&mut app, 120, move |_app| {
@@ -145,8 +141,7 @@ fn event_watch_on_panel_entity_resolves_fragment_internal_name() {
     eprintln!("--- observed UiRoutedEvent: {got:?}; view={view:?} p1={p1:?} p2={p2:?} ---");
 
     // The fragment-internal element fired: a UiRoutedEvent targeting its panel
-    // entity, carrying the host view. Before the fix, the watch on a panel
-    // entity was silently ignored (the panel isn't a `scene`).
+    // entity, carrying the host view.
     assert!(
         entered,
         "expected a MouseMove UiRoutedEvent from the left panel's fragment element \

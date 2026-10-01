@@ -1,6 +1,9 @@
-//! **Primitive 1: panel = entity.** A [`UiPanel`] is a Bevy entity that mounts a
-//! sub-XAML fragment as a hosted child of a [`NoesisView`](crate::NoesisView)
-//! scene; the *bound components* on that same entity **are** its `DataContext`.
+//! Panels: XAML fragments mounted into a view, with ECS components as their
+//! `DataContext`.
+//!
+//! A [`UiPanel`] entity loads a sub-XAML fragment and mounts it as a child of a
+//! named `Panel` in a [`NoesisView`](crate::NoesisView)'s scene. The bound
+//! components on the same entity together form the fragment's `DataContext`.
 //!
 //! ```ignore
 //! use bevy::prelude::*;
@@ -24,56 +27,46 @@
 //! // ));
 //! ```
 //!
-//! Ordinary systems drive the UI: `Query<&mut Health, With<UiPanel>>` mutates the
-//! component, change detection re-snapshots it into the bound `{Binding Health}`,
-//! and a `TwoWay` edit rides back into the component. Two `UiPanel` entities of
-//! the same component set bind **independently**: each loads its own fragment
-//! with its own aggregated `DataContext`, isolated by Noesis namescope.
+//! Ordinary systems drive the UI. Mutating `Health` through a
+//! `Query<&mut Health, With<UiPanel>>` pushes the new value to `{Binding Health}`
+//! through change detection, and a `TwoWay` edit in the UI writes back into the
+//! component. Two panels with the same components bind independently: each
+//! loads its own fragment with its own `DataContext` and its own namescope.
 //!
-//! Show/hide a fragment element the same way: give the component a `String` field,
-//! bind it with `Visibility="{Binding MyVis}"`, and set it to one of
-//! [`visibility::VISIBLE`](crate::visibility::VISIBLE) /
-//! [`COLLAPSED`](crate::visibility::COLLAPSED) /
+//! To show or hide a fragment element, give a component a `String` field, bind
+//! it with `Visibility="{Binding MyVis}"`, and set it to
+//! [`visibility::VISIBLE`](crate::visibility::VISIBLE),
+//! [`COLLAPSED`](crate::visibility::COLLAPSED) or
 //! [`HIDDEN`](crate::visibility::HIDDEN). Noesis's enum converter parses the
-//! string, so no `bool`-to-`Visibility` plumbing is needed.
+//! string.
 //!
-//! # How the aggregation works
+//! Despawning the entity or removing [`UiPanel`] unmounts the fragment and
+//! releases it.
 //!
-//! A panel entity may carry *several* bound components (`Health`, `Score`, …). They
-//! must collapse into **one** `DataContext`, not fight over it. So the bridge
-//! builds a single synthetic plain-VM class whose properties are the *union* of
-//! every bound component's [`NoesisViewModel::noesis_properties`], concatenated at
-//! stable index offsets:
+//! # How the components combine
 //!
-//! 1. **Collect (parallel).** A per-type `collect_panel_field` system notes each
-//!    registered field type present on the panel and, when the component changed,
-//!    stashes its snapshot, all into a plain `Send` `PanelAggregate` component.
-//! 2. **Push (serial).** `sync_panels` freezes the layout on first sight, then
-//!    drives [`NoesisRenderState::sync_panel`](crate::render): build the class +
-//!    fragment, push the changed properties, mount the fragment into the host
-//!    scene, and drain UI→Rust writebacks (keyed by *global* property index).
-//! 3. **Writeback (parallel).** A per-type `apply_panel_writeback` system routes
-//!    each writeback back to the originating component by its frozen index range.
+//! The bridge builds one class whose properties are every bound component's
+//! [`NoesisViewModel::noesis_properties`], concatenated in registration order.
+//! Property names must be unique across a panel's components; duplicates are not
+//! detected. Each frame, a per-type system in [`NoesisPanelSet::Collect`]
+//! records changed components, the serial push in [`NoesisSet::Apply`] builds
+//! and mounts the fragment and pushes the changes, and a per-type system in
+//! [`NoesisPanelSet::Writeback`] routes UI edits back to the component they came
+//! from. See [`crate::reconcile`] for why the work is split this way.
 //!
-//! This mirrors the "diff in parallel, push serially" convention in
-//! [`crate::reconcile`]: only the FFI pushes run on the serial Noesis thread.
+//! # Layout freeze
 //!
-//! # When fields come from multiple modules
+//! The `DataContext` layout freezes the first time the panel is reconciled,
+//! with whatever bound components are present then. A component inserted later
+//! is never bound (a warning is logged once). Spawning the panel and all its
+//! components in one bundle is the reliable shape: everything is present when
+//! the push runs in `PostUpdate`, so the panel binds on its first frame.
 //!
-//! The `DataContext` layout **freezes on the panel's first reconcile** with
-//! whatever bound components are present then. An atomic
-//! `spawn((UiPanel, CompA, CompB))` is fine: by the time `sync_panels` runs in
-//! `PostUpdate` every component is present, so the panel binds on frame 1 with no
-//! flicker. This is the recommended shape.
-//!
-//! If fields are contributed by *separate modules*, prefer **one owning component
-//! that holds all the fields**, with the other modules writing into it, so the
-//! whole `DataContext` still ships in one spawn bundle and never races the freeze.
-//!
-//! Only when that isn't possible (a module spawns the panel and another adds its
-//! component a frame later, after the spawn flushes) reach for
-//! [`UiPanel::deferred_seal`] + [`SealPanel`]: the panel waits to freeze until you
-//! insert `SealPanel` from a system ordered `.after()` the contributors.
+//! If several modules contribute fields, prefer one owning component that holds
+//! all of them, with the other modules writing into it. When that isn't
+//! possible (one module spawns the panel and another adds its component a frame
+//! later), use [`UiPanel::deferred_seal`] and insert [`SealPanel`] from a system
+//! ordered after every contributor.
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -84,32 +77,32 @@ use bevy::prelude::*;
 use crate::plain_vm::{NoesisViewModel, PlainType, PlainValue};
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// A panel entity: a sub-XAML fragment mounted as a hosted child of a host
-/// [`NoesisView`](crate::NoesisView) scene, with the entity's bound components as
-/// its `DataContext`. See the [module docs](self).
+/// A XAML fragment mounted into a host [`NoesisView`](crate::NoesisView)'s
+/// scene, with this entity's bound components as its `DataContext`. See the
+/// [module docs](self).
 ///
 /// Add the bound components (each a `#[derive(Component, NoesisViewModel)]`
-/// registered via [`NoesisPanelAppExt::add_noesis_panel_field`]) to the same
-/// entity. The set of bound components is captured the first frame the panel is
-/// reconciled and fixed thereafter.
+/// registered with [`NoesisPanelAppExt::add_noesis_panel_field`]) to the same
+/// entity. The set of bound components is fixed the first frame the panel is
+/// reconciled.
+///
+/// If the fragment fails to load, an error is logged once and the panel retries
+/// each frame. If the host element is missing or not a `Panel`, the fragment
+/// stays unmounted and a warning is logged each frame.
 #[derive(Component, Clone, Debug)]
 #[require(PanelAggregate)]
 pub struct UiPanel {
     uri: String,
     host: Entity,
     host_name: String,
-    /// Mount even with an empty `DataContext` (no bound components). See
-    /// [`Self::static_context`].
     static_data: bool,
-    /// Suppress freeze-on-first-sight; wait for an explicit [`SealPanel`]. See
-    /// [`Self::deferred_seal`].
     deferred: bool,
 }
 
 impl UiPanel {
-    /// Begin a panel that loads `uri` (a key into [`XamlRegistry`](crate::XamlRegistry)).
-    /// Call [`mount_into`](Self::mount_into) to choose where it mounts; until then
-    /// it has no host and never mounts.
+    /// A panel that loads `uri` (a key into [`XamlRegistry`](crate::XamlRegistry)).
+    /// Call [`mount_into`](Self::mount_into) as well: without a host the panel
+    /// never mounts, and nothing warns.
     #[must_use]
     pub fn new(uri: impl Into<String>) -> Self {
         Self {
@@ -121,10 +114,11 @@ impl UiPanel {
         }
     }
 
-    /// Mount this panel's fragment into the `Panel` named `host_name` (an
-    /// `x:Name`) within `host`'s scene. `host` is the [`NoesisView`](crate::NoesisView)
-    /// entity. Two panels can target the same host (siblings in one collection) or
-    /// different hosts; each binds independently.
+    /// Mounts the fragment as a child of the `Panel` with `x:Name` `host_name`
+    /// in the scene of `host`, a [`NoesisView`](crate::NoesisView) entity.
+    /// `host_name` may be scope-qualified (`"Host/Leaf"`). Several panels can
+    /// share one host `Panel`; each binds independently. The fragment remounts
+    /// after the host scene rebuilds.
     #[must_use]
     pub fn mount_into(mut self, host: Entity, host_name: impl Into<String>) -> Self {
         self.host = host;
@@ -132,30 +126,25 @@ impl UiPanel {
         self
     }
 
-    /// Mount even when the entity carries no bound components: a *static* fragment
-    /// with an empty `DataContext` (e.g. a button-only toolbar or a fixed help
-    /// overlay). Without this, a panel whose `DataContext` never gains a field is
-    /// held back (the reconcile waits for components before freezing the layout, so
-    /// it can't tell "no data yet" from "no data ever").
+    /// Mounts the panel even with no bound components, for a static fragment
+    /// such as a button-only toolbar or a help overlay. Without this, a panel
+    /// waits for its first bound component before it mounts, so a panel that
+    /// never gets one never appears.
     #[must_use]
     pub fn static_context(mut self) -> Self {
         self.static_data = true;
         self
     }
 
-    /// Defer the `DataContext` freeze until a [`SealPanel`] marker is inserted on
-    /// this entity, instead of freezing on the first bound component (the default).
+    /// Delays the `DataContext` freeze, and so the mount, until a [`SealPanel`]
+    /// is inserted on this entity. By default the layout freezes as soon as one
+    /// bound component is present.
     ///
-    /// You need this only for the rare cross-module case: one module spawns the
-    /// panel and another contributes a bound component a frame later (it can't see
-    /// the entity until the spawn flushes), which would otherwise race the freeze
-    /// and have its fields silently dropped. The owner inserts [`SealPanel`] from a
-    /// system ordered `.after()` every contributor, so the seal is deterministic
-    /// rather than frame-timing guesswork.
-    ///
-    /// Most panels don't need this. Prefer the simpler pattern: have **one** owning
-    /// component hold all the fields and let other modules write into it, so the
-    /// whole `DataContext` ships in one spawn bundle. See the [module docs](self).
+    /// Use this when one module spawns the panel and another adds a bound
+    /// component a frame later; without it that component would miss the freeze
+    /// and stay unbound. Insert [`SealPanel`] from a system ordered after every
+    /// contributor. Most panels don't need this; see the [module docs](self).
+    /// Takes precedence over [`static_context`](Self::static_context).
     #[must_use]
     pub fn deferred_seal(mut self) -> Self {
         self.deferred = true;
@@ -181,49 +170,37 @@ impl UiPanel {
     }
 }
 
-/// Seal request for a [`deferred_seal`](UiPanel::deferred_seal) panel: insert this
-/// marker once every contributing module has added its bound component, and the
-/// panel freezes its `DataContext` with the full set. Insert it from a system
-/// ordered `.after()` the contributors so the seal is deterministic. Inert on a
-/// non-deferred panel (which already freezes on first sight); removed once the
-/// seal is applied.
+/// Freezes a [`deferred_seal`](UiPanel::deferred_seal) panel's `DataContext`
+/// with the bound components present now. Insert it from a system ordered after
+/// every contributing module. The bridge removes it once applied. Has no effect
+/// on a panel without `deferred_seal`.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct SealPanel;
 
-/// One bound component's contribution, collected each frame before the serial push.
 struct FieldContribution {
-    /// Stable registration order (decides the field's offset in the union).
+    /// Registration order; decides the field's offset in the layout.
     reg_index: u32,
-    /// `(name, type)` metadata; the union of these across fields is the class.
     props: &'static [(&'static str, PlainType)],
 }
 
-/// Per-panel aggregation buffer (a plain `Send` component, auto-required by
-/// [`UiPanel`]). Bridges the parallel collect/writeback systems and the serial
-/// push: it holds the frozen union layout, this frame's changed snapshots, and the
-/// drained UI→Rust writebacks. Holds no Noesis handles.
+/// Per-panel state shared by the parallel collect/writeback systems and the
+/// serial push. Holds no Noesis handles.
 #[derive(Component, Default)]
 pub(crate) struct PanelAggregate {
-    /// Field types present on the panel, by `TypeId`. Collected until the layout
-    /// is frozen, then left untouched.
+    /// Only collected until the layout freezes.
     present: HashMap<TypeId, FieldContribution>,
-    /// This frame's changed snapshots, per field type. Expanded into global-index
-    /// pushes (and cleared) by [`Self::take_pushes`].
+    /// This frame's changed snapshots; cleared by [`Self::take_pushes`].
     pending: HashMap<TypeId, Vec<PlainValue>>,
-    /// Frozen union: `(name, type)` in global index order. Built once.
+    /// Frozen layout in global property-index order.
     layout: Vec<(String, PlainType)>,
-    /// Frozen per-type slot: `TypeId` → `(offset, len)` into [`Self::layout`], for
-    /// routing writebacks back to the originating component.
+    /// `(offset, len)` of each field type in [`Self::layout`].
     slots: HashMap<TypeId, (u32, u32)>,
-    /// UI→Rust writebacks drained from the instance last push (global index +
-    /// value); consumed by the per-type writeback systems this frame.
+    /// UI edits from this frame's push, keyed by global property index.
     writebacks: Vec<(u32, PlainValue)>,
-    /// Whether [`Self::layout`]/[`Self::slots`] are frozen.
     built: bool,
 }
 
 impl PanelAggregate {
-    /// Record that field type `tid` is present on the panel (pre-freeze only).
     fn note_present(
         &mut self,
         tid: TypeId,
@@ -234,14 +211,12 @@ impl PanelAggregate {
             .insert(tid, FieldContribution { reg_index, props });
     }
 
-    /// Stash field type `tid`'s changed snapshot for this frame's push.
     fn set_pending(&mut self, tid: TypeId, snapshot: Vec<PlainValue>) {
         self.pending.insert(tid, snapshot);
     }
 
-    /// Freeze the union layout from the collected fields, ordered by registration
-    /// index so the offsets are stable. Called once, when the panel is first
-    /// reconciled with at least one field present.
+    /// Orders fields by registration index so offsets don't depend on `HashMap`
+    /// iteration order.
     fn freeze(&mut self) {
         let mut fields: Vec<(&TypeId, &FieldContribution)> = self.present.iter().collect();
         fields.sort_by_key(|(_, c)| c.reg_index);
@@ -257,9 +232,8 @@ impl PanelAggregate {
         self.built = true;
     }
 
-    /// Expand this frame's pending snapshots into `(global_index, value)` pushes,
-    /// clearing pending. Skips any type not in the frozen layout (added after
-    /// freeze).
+    /// Drains pending snapshots into `(global_index, value)` pushes, skipping
+    /// field types that arrived after the freeze.
     fn take_pushes(&mut self) -> Vec<(u32, PlainValue)> {
         let mut out = Vec::new();
         for (tid, snapshot) in self.pending.drain() {
@@ -275,15 +249,13 @@ impl PanelAggregate {
         out
     }
 
-    /// The frozen `(offset, len)` slot for field type `tid`, if any.
     fn slot(&self, tid: TypeId) -> Option<(u32, u32)> {
         self.slots.get(&tid).copied()
     }
 }
 
-/// Stable registration order for panel field types, assigned by
-/// [`NoesisPanelAppExt::add_noesis_panel_field`]. Decides each field's offset in
-/// the aggregated union so the layout is deterministic across frames.
+/// Registration order of panel field types; decides each type's offset in a
+/// panel's layout.
 #[derive(Resource, Default)]
 pub(crate) struct PanelFieldOrder {
     indices: HashMap<TypeId, u32>,
@@ -291,7 +263,6 @@ pub(crate) struct PanelFieldOrder {
 }
 
 impl PanelFieldOrder {
-    /// Assign (or return the existing) registration index for `tid`.
     fn register(&mut self, tid: TypeId) -> u32 {
         if let Some(i) = self.indices.get(&tid) {
             return *i;
@@ -307,19 +278,18 @@ impl PanelFieldOrder {
     }
 }
 
-/// Ordering for the panel collect/writeback systems relative to the serial push
-/// in [`NoesisSet::Apply`].
+/// System sets for the per-type panel systems, ordered around the serial push
+/// in [`NoesisSet::Apply`] (all in `PostUpdate`). Order your own systems
+/// against these to see a panel's UI edits in the same frame.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NoesisPanelSet {
-    /// Per-type field collection (parallel); runs before [`NoesisSet::Apply`].
+    /// Collects changed bound components; runs before [`NoesisSet::Apply`].
     Collect,
-    /// Per-type writeback routing (parallel); runs after [`NoesisSet::Apply`].
+    /// Writes UI edits back into the bound components; runs after
+    /// [`NoesisSet::Apply`].
     Writeback,
 }
 
-/// Collect one registered field type `T` into each panel's `PanelAggregate`:
-/// note it present (pre-freeze) and, when it changed, stash its snapshot. Pure
-/// ECS, no Noesis state; parallelizes freely.
 #[allow(clippy::needless_pass_by_value)]
 fn collect_panel_field<T: NoesisViewModel + Component>(
     order: Res<PanelFieldOrder>,
@@ -331,9 +301,7 @@ fn collect_panel_field<T: NoesisViewModel + Component>(
         if !agg.built {
             agg.note_present(tid, reg, T::noesis_properties());
         } else if !agg.slots.contains_key(&tid) {
-            // Layout froze on the panel's first reconcile; a component added
-            // afterward can't join the DataContext (its bindings stay empty). Ref<T>
-            // filters to panels that have T, so this is a genuine late add.
+            // Ref<T> filters to panels that have T, so this is a genuine late add.
             bevy::log::warn_once!(
                 "NoesisPanel: bound component `{}` was inserted after the panel's \
                  DataContext froze on its first reconcile; its fields are not bound. \
@@ -348,9 +316,9 @@ fn collect_panel_field<T: NoesisViewModel + Component>(
     }
 }
 
-/// Serial push: freeze each panel's layout on first sight, then drive
-/// [`NoesisRenderState::sync_panel`] (build/mount the fragment, push changed
-/// properties, drain writebacks). The only system here that touches Noesis state.
+/// Freezes each panel's layout when it becomes ready, then builds, mounts and
+/// pushes it through [`NoesisRenderState::sync_panel`]. The only panel system
+/// that touches Noesis.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_panels(
     mut commands: Commands,
@@ -388,10 +356,8 @@ pub(crate) fn sync_panels(
     }
 }
 
-/// Route this frame's UI→Rust writebacks for field type `T` back into the
-/// originating component, by `T`'s frozen index range. Only deref-mutates the
-/// component when a writeback actually lands (so an idle frame doesn't trip change
-/// detection and echo the value back). Pure ECS, no Noesis state.
+/// Mutably derefs `T` only when an edit lands, so an idle frame doesn't trip
+/// change detection and echo the value back to the UI.
 #[allow(clippy::needless_pass_by_value)]
 fn apply_panel_writeback<T: NoesisViewModel + Component<Mutability = Mutable>>(
     mut panels: Query<(&PanelAggregate, &mut T), With<UiPanel>>,
@@ -409,14 +375,12 @@ fn apply_panel_writeback<T: NoesisViewModel + Component<Mutability = Mutable>>(
     }
 }
 
-/// Observe the `Text` of named elements **inside a panel's fragment**. Add to a
-/// [`UiPanel`] entity; changes surface as [`NoesisPanelTextChanged`].
+/// Watches the `Text` of named elements inside a panel's fragment. Add it to a
+/// [`UiPanel`] entity; changes arrive as [`NoesisPanelTextChanged`].
 ///
-/// A mounted fragment keeps a private namescope (its inner `x:Name`s are
-/// invisible to a host-root lookup), so this read-back resolves names against the
-/// fragment's *own* scope. List fragment-local names like `"HealthText"`. This is
-/// the panel counterpart of [`NoesisText`](crate::NoesisText)'s watch list, and
-/// the supported way to observe a binding's effect on a panel's UI.
+/// A mounted fragment has its own namescope, so list fragment-local names such
+/// as `"HealthText"`. This is the panel counterpart of
+/// [`NoesisText`](crate::NoesisText)'s watch list.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisPanelText {
     /// Fragment-scope element `x:Name`s whose `Text` to observe.
@@ -430,7 +394,7 @@ impl NoesisPanelText {
         Self::default()
     }
 
-    /// Builder: observe these fragment-scope elements' `Text`.
+    /// Adds `names` to the watch list.
     #[must_use]
     pub fn watching(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.watch.extend(names.into_iter().map(Into::into));
@@ -438,21 +402,19 @@ impl NoesisPanelText {
     }
 }
 
-/// Emitted when a watched fragment element's `Text` differs from the previous
-/// frame. Carries the originating panel entity.
+/// A watched fragment element's `Text` changed since the last poll. Polled in
+/// [`NoesisSet::Apply`] after the panel push, so a value pushed this frame is
+/// visible.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisPanelTextChanged {
     /// The [`UiPanel`] entity whose fragment element changed.
     pub panel: Entity,
     /// Fragment-scope `x:Name` of the element.
     pub name: String,
-    /// Current `Text`. Empty for an unset / cleared DP.
+    /// Current `Text`; empty when unset.
     pub text: String,
 }
 
-/// Poll each panel's [`NoesisPanelText`] watch list and emit
-/// [`NoesisPanelTextChanged`]. Runs after `sync_panels` so a freshly-pushed
-/// value is observable.
 #[allow(clippy::needless_pass_by_value)]
 fn poll_panel_text(
     panels: Query<(Entity, &NoesisPanelText), With<UiPanel>>,
@@ -473,12 +435,11 @@ fn poll_panel_text(
     }
 }
 
-/// `App` methods to register a panel field type. Add [`NoesisPlugin`](crate::NoesisPlugin)
-/// (which installs [`NoesisPanelPlugin`]) first, then register each
-/// `#[derive(Component, NoesisViewModel)]` type you bind on a panel.
+/// Registers component types that can be bound on a [`UiPanel`]. Add
+/// [`NoesisPlugin`](crate::NoesisPlugin) first.
 pub trait NoesisPanelAppExt {
-    /// Register `T` as a panel field: spawning `T` on a [`UiPanel`] entity adds
-    /// its property/properties to that panel's aggregated `DataContext`, two-way.
+    /// Registers `T` as a panel field: a `T` on a [`UiPanel`] entity adds its
+    /// properties to that panel's `DataContext`, two-way.
     fn add_noesis_panel_field<T: NoesisViewModel + Component<Mutability = Mutable>>(
         &mut self,
     ) -> &mut Self;
@@ -506,10 +467,8 @@ impl NoesisPanelAppExt for App {
     }
 }
 
-/// Installs the panel-reconcile pipeline: orders the collect/writeback sets around
-/// [`NoesisSet::Apply`] and adds the serial `sync_panels` push. Added by
-/// [`NoesisPlugin`](crate::NoesisPlugin); register field types with
-/// [`NoesisPanelAppExt::add_noesis_panel_field`].
+/// Installs the panel bridge. [`NoesisPlugin`](crate::NoesisPlugin) adds it;
+/// register field types with [`NoesisPanelAppExt::add_noesis_panel_field`].
 #[derive(Default)]
 pub struct NoesisPanelPlugin;
 

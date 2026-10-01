@@ -1,17 +1,11 @@
-//! Per-view code-built `Style` bridge: restyle named XAML elements with a
-//! `Noesis::Style` constructed in Rust, no XAML authoring required. The style
-//! counterpart of the [`crate::dp`] / [`crate::brushes`] write bridges.
+//! Restyles named elements of a [`NoesisView`](crate::NoesisView) with a
+//! `Style` built in Rust.
 //!
-//! Add a [`NoesisStyles`] component to the view's camera entity. Its `styles`
-//! map is the desired [`StyleSpec`] per `x:Name`, built into a fresh
-//! `Noesis::Style` and assigned to that element via
-//! [`FrameworkElement::set_style`](noesis_runtime::view::FrameworkElement::set_style)
-//! whenever the component changes (Bevy change detection). A [`StyleSpec`]
-//! carries a `TargetType` (the registered type name the style applies to, e.g.
-//! `"Border"`), a list of [setters](StyleSpec::setter) (each a `(property,
-//! value)` resolved on that target type), and optional property
-//! [triggers](StyleSpec::trigger) (apply extra setters while a watched property
-//! equals a value).
+//! Add a [`NoesisStyles`] to the view's camera entity. Its
+//! [`styles`](NoesisStyles::styles) map gives a [`StyleSpec`] for each
+//! `x:Name`. A spec has a target type (a registered type name such as
+//! `"Border"`), unconditional [setters](StyleSpec::setter), and optional
+//! triggers whose setters apply while a condition holds.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
@@ -24,31 +18,27 @@
 //! );
 //! ```
 //!
-//! This is a **write-only** bridge (like [`crate::focus`] / [`crate::layout`]):
-//! it pushes the built style into the live view and emits no read-back of its
-//! own. A `Noesis::Style` is *sealed* the first time it is applied, so the
-//! bridge builds a brand-new style on every change rather than mutating a
-//! retained one. Re-inserting a changed [`NoesisStyles`] re-styles the element.
-//! Observe a setter's effect through a [`NoesisDp`](crate::dp::NoesisDp) watch on
-//! the property the setter drives (the element's default value is the negative
-//! control).
+//! Noesis seals a `Style` the first time it is applied, so whenever the
+//! component changes, or the view's scene is rebuilt, every entry is built into
+//! a new `Style` and assigned with
+//! [`FrameworkElement::set_style`](noesis_runtime::view::FrameworkElement::set_style).
+//! Removing an entry leaves the last style on the element. Setters follow the
+//! usual dependency-property precedence: a value set locally on the element (in
+//! XAML or through [`NoesisDp`](crate::dp::NoesisDp)) beats a style setter.
+//! The bridge has no read-back; watch the affected property with
+//! [`NoesisDp`](crate::dp::NoesisDp) to observe it.
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and, when it changed, builds
-//! and applies the styles against that view's live scene.
+//! Unknown target types, names, and properties are skipped with a warning.
 //!
 //! # Scope
 //!
-//! This bridge covers per-element style application, including the deeper styling
-//! the runtime wraps: `BasedOn` inheritance ([`StyleSpec::based_on`], built into a
-//! chain of `Noesis::Style`s linked by `Style.BasedOn`), property
-//! [triggers](PropertyTrigger), [data triggers](DataTriggerSpec) (a binding's
-//! value drives the setters), and [multi triggers](MultiTriggerSpec) (all
-//! property conditions must hold). `EventTrigger` (needs `Storyboard` authoring),
-//! `ControlTemplate` / `DataTemplate` assignment, and `ResourceDictionary`
-//! get/add/merge are *not* wired here; reach for the runtime API
-//! ([`noesis_runtime::styles`] / [`noesis_runtime::resources`]) directly for
-//! those.
+//! Supported: `BasedOn` chains ([`StyleSpec::based_on`]), property
+//! [triggers](PropertyTrigger), [data triggers](DataTriggerSpec), and
+//! [multi triggers](MultiTriggerSpec). `EventTrigger`, `ControlTemplate` /
+//! `DataTemplate` assignment, and resource dictionaries are not covered here;
+//! use [`noesis_runtime::styles`] and [`noesis_runtime::resources`] directly,
+//! or [`NoesisResources`](crate::resources::NoesisResources) for application
+//! resources.
 
 use std::collections::HashMap;
 
@@ -57,19 +47,14 @@ use bevy::prelude::*;
 use crate::dp::DpValue;
 use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Spec
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A code-built property `Trigger`: while the dependency property `property`
-/// (resolved on the owning [`StyleSpec`]'s target type) equals `value`, the
-/// trigger's `setters` are applied to the styled element. The programmatic
-/// equivalent of a XAML `<Style.Triggers><Trigger Property=… Value=…>`.
+/// A property `Trigger`: while `property` equals `value`, its `setters` apply.
+/// The code form of `<Trigger Property="..." Value="...">`. Property names
+/// resolve on the owning [`StyleSpec`]'s target type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyTrigger {
-    /// Property the trigger watches (resolved on the style's target type).
+    /// Property the trigger watches.
     pub property: String,
-    /// Value the property is compared against to activate the trigger.
+    /// Value that activates the trigger.
     pub value: DpValue,
     /// `(property, value)` setters applied while the trigger is active.
     pub setters: Vec<(String, DpValue)>,
@@ -86,8 +71,7 @@ impl PropertyTrigger {
         }
     }
 
-    /// Builder: append a setter applied while the trigger is active. The
-    /// property resolves on the owning [`StyleSpec`]'s target type.
+    /// Builder: append a setter applied while the trigger is active.
     #[must_use]
     pub fn setter(mut self, property: impl Into<String>, value: DpValue) -> Self {
         self.setters.push((property.into(), value));
@@ -95,16 +79,13 @@ impl PropertyTrigger {
     }
 }
 
-/// A code-built `DataTrigger`: while the value produced by a `Binding` equals
-/// `value`, the trigger's `setters` are applied to the styled element. The
-/// programmatic equivalent of a XAML
-/// `<Style.Triggers><DataTrigger Binding="{Binding …}" Value=…>`.
+/// A `DataTrigger`: while a binding's value equals `value`, its `setters`
+/// apply. The code form of `<DataTrigger Binding="{Binding ...}" Value="...">`.
 ///
-/// The binding resolves against the element's `DataContext` by default. Call
-/// [`relative_source_self`](Self::relative_source_self) to instead bind a
-/// property on the styled element itself (`{Binding Path=…,
-/// RelativeSource={RelativeSource Self}}`). Useful for code-only scenes with no
-/// view model.
+/// The binding reads the element's `DataContext` by default.
+/// [`relative_source_self`](Self::relative_source_self) binds to the styled
+/// element itself instead (`RelativeSource Self`), which works in scenes with
+/// no view model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataTriggerSpec {
     /// The binding's property path (e.g. `"IsActive"`, `"Tag"`). Empty binds to
@@ -113,16 +94,15 @@ pub struct DataTriggerSpec {
     /// When `true`, bind relative to the styled element itself
     /// (`RelativeSource Self`) instead of its `DataContext`.
     pub relative_source_self: bool,
-    /// Value the bound value is compared against to activate the trigger.
+    /// Value that activates the trigger.
     pub value: DpValue,
-    /// `(property, value)` setters applied while the trigger is active
-    /// (resolved on the owning [`StyleSpec`]'s target type).
+    /// `(property, value)` setters applied while the trigger is active.
     pub setters: Vec<(String, DpValue)>,
 }
 
 impl DataTriggerSpec {
-    /// Start a data trigger that fires while the value at `binding_path` equals
-    /// `value`. The binding resolves against the element's `DataContext`.
+    /// Start a data trigger that is active while the value at `binding_path`
+    /// in the `DataContext` equals `value`.
     #[must_use]
     pub fn new(binding_path: impl Into<String>, value: DpValue) -> Self {
         Self {
@@ -149,10 +129,8 @@ impl DataTriggerSpec {
     }
 }
 
-/// A code-built `MultiTrigger`: while **every** property `condition` holds, the
-/// trigger's `setters` are applied. The programmatic equivalent of a XAML
-/// `<Style.Triggers><MultiTrigger><MultiTrigger.Conditions>…`. Conditions and
-/// setters both resolve on the owning [`StyleSpec`]'s target type.
+/// A `MultiTrigger`: while every condition holds, its `setters` apply.
+/// Conditions and setters resolve on the owning [`StyleSpec`]'s target type.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MultiTriggerSpec {
     /// `(property, value)` conditions; all must hold for the trigger to fire.
@@ -168,8 +146,7 @@ impl MultiTriggerSpec {
         Self::default()
     }
 
-    /// Builder: add a `property == value` condition (resolved on the target
-    /// type). The trigger fires only when every condition holds.
+    /// Builder: add a `property == value` condition.
     #[must_use]
     pub fn condition(mut self, property: impl Into<String>, value: DpValue) -> Self {
         self.conditions.push((property.into(), value));
@@ -184,36 +161,30 @@ impl MultiTriggerSpec {
     }
 }
 
-/// A code-built `Noesis::Style`, declarative side. Resolved into a live
-/// `Noesis::Style` only at apply time (on the Noesis thread), so the component
-/// stays plain data. `setters` apply unconditionally; each trigger applies its
-/// own setters while its condition holds. An optional [`based_on`](Self::based_on)
-/// style is built and linked via `Style.BasedOn` so this style inherits its
-/// setters and triggers.
+/// A `Style` described as plain data; the bridge builds the live `Style` when
+/// it applies it. Values are boxed from [`DpValue`], whose variant must match
+/// the property's type (see [`crate::dp`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyleSpec {
-    /// Registered type name the style targets (e.g. `"Border"`, `"TextBlock"`).
-    /// Setter / trigger property names resolve as DPs on this type.
+    /// Registered type name the style targets (`"Border"`, `"TextBlock"`).
+    /// Setter and trigger property names resolve on this type. An unknown type
+    /// skips the whole style with a warning.
     pub target_type: String,
-    /// Optional base style this style inherits from (`Style.BasedOn`). Built
-    /// into its own `Noesis::Style` and linked before this style's own setters /
-    /// triggers; chains arbitrarily deep.
+    /// Base style to inherit setters and triggers from (`Style.BasedOn`). May
+    /// itself have a base.
     pub based_on: Option<Box<StyleSpec>>,
     /// `(property, value)` setters applied unconditionally.
     pub setters: Vec<(String, DpValue)>,
     /// Property triggers in the style's `Triggers` collection.
     pub triggers: Vec<PropertyTrigger>,
-    /// Data triggers (binding-value driven) in the style's `Triggers`
-    /// collection.
+    /// Data triggers in the style's `Triggers` collection.
     pub data_triggers: Vec<DataTriggerSpec>,
-    /// Multi triggers (all-conditions-hold) in the style's `Triggers`
-    /// collection.
+    /// Multi triggers in the style's `Triggers` collection.
     pub multi_triggers: Vec<MultiTriggerSpec>,
 }
 
 impl StyleSpec {
-    /// Start a style targeting `target_type` (the registered type name whose DPs
-    /// the setters resolve against).
+    /// Start a style targeting the registered type `target_type`.
     #[must_use]
     pub fn new(target_type: impl Into<String>) -> Self {
         Self {
@@ -226,16 +197,14 @@ impl StyleSpec {
         }
     }
 
-    /// Builder: set the base style this style inherits setters and triggers from
-    /// (`Style.BasedOn`). Chains: the base may itself carry a `based_on`.
+    /// Builder: inherit setters and triggers from `base` (`Style.BasedOn`).
     #[must_use]
     pub fn based_on(mut self, base: StyleSpec) -> Self {
         self.based_on = Some(Box::new(base));
         self
     }
 
-    /// Builder: append an unconditional setter (`property` resolved on the
-    /// target type) with the boxed `value`.
+    /// Builder: append an unconditional setter.
     #[must_use]
     pub fn setter(mut self, property: impl Into<String>, value: DpValue) -> Self {
         self.setters.push((property.into(), value));
@@ -266,14 +235,12 @@ impl StyleSpec {
     }
 }
 
-/// Per-view code-built style bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Code-built styles for named elements. Add to a
+/// [`NoesisView`](crate::NoesisView) camera entity; see the
+/// [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisStyles {
-    /// Desired [`StyleSpec`] per `x:Name`. Built and assigned to the view's
-    /// elements whenever this component changes. Re-applying the same key
-    /// rebuilds and replaces the element's style (Noesis seals a style on first
-    /// apply, so each apply is a fresh style).
+    /// Style per element `x:Name` (may be scope-qualified, `"Host/Leaf"`).
     pub styles: HashMap<String, StyleSpec>,
 }
 
@@ -292,17 +259,13 @@ impl NoesisStyles {
         self
     }
 
-    /// Style element `name` with `spec` from a system holding `&mut NoesisStyles`.
-    /// The runtime counterpart of [`apply`](Self::apply): the next reconcile builds
-    /// and assigns it to the live element.
+    /// Style element `name` with `spec`. The `&mut` form of
+    /// [`apply`](Self::apply), for systems that update the component.
     pub fn restyle(&mut self, name: impl Into<String>, spec: StyleSpec) {
         self.styles.insert(name.into(), spec);
     }
 }
 
-/// Reconcile every view's [`NoesisStyles`]: build and apply the desired styles
-/// when the component changed. Write-only: styles are re-applied once per
-/// change.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_styles_bridge(
     views: Query<(Entity, Ref<NoesisStyles>)>,
@@ -318,8 +281,7 @@ pub(crate) fn sync_styles_bridge(
     }
 }
 
-/// Wires the per-view code-built style bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the styles bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisStylesPlugin;
 
 impl Plugin for NoesisStylesPlugin {

@@ -1,14 +1,11 @@
-//! Integration test for *panel fragment* hot-reload through the real
-//! `NoesisPlugin` pipeline.
+//! Integration test for panel fragment hot-reload on the headless harness.
 //!
-//! A `UiPanel` fragment is built by `sync_panel` (Apply phase) and cached in
-//! `NoesisRenderState::panels`, outside the scene fetch-log window — so without
-//! its own re-parse guard, editing a fragment's XAML would re-insert bytes that
-//! never reach the screen. This asserts the guard: editing the fragment file
-//! rebuilds the fragment tree against the new markup.
+//! A `UiPanel` fragment is parsed and cached separately from its host scene, so
+//! the scene's dependency tracking doesn't cover it. Editing the fragment's XAML
+//! must still re-parse the fragment against the new markup.
 //!
 //! Observes the fragment element's `Text` via `NoesisPanelText` (fragment-scope
-//! namescope) — no glyph rendering, so no font setup needed.
+//! names). No glyph rendering, so no font setup.
 
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +22,6 @@ const SLOT: &str = "Slot";
 const FRAG_NAME: &str = "Frag";
 const RELOAD_AT_FRAME: usize = 25;
 
-// Host scene: a named Panel the fragment mounts into. Unchanged across the test.
 const HOST: &str = r##"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Width="64" Height="32">
@@ -89,8 +85,7 @@ fn panel_fragment_reload_rebuilds_fragment_tree() {
               mut changes: MessageReader<NoesisPanelTextChanged>| {
             *frame += 1;
 
-            // Edit only the fragment file; the host scene is untouched. A fresh
-            // Arc is what the fragment's re-parse guard compares against.
+            // A fresh `Arc` is what the fragment's re-parse check compares by pointer.
             if *frame == RELOAD_AT_FRAME {
                 reg.insert(
                     FRAG_URI.to_string(),

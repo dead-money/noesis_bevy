@@ -1,9 +1,7 @@
-//! Regression test for two views carrying the *same* plain-struct view model
-//! type. The bridge keys entries `(entity, TypeId)` but must register each
-//! entity's reflection type under a per-entity unique name; otherwise the second
-//! view re-registers the shared global name, fails, retries, and warns every
-//! frame (audit P1.6). Here both views must seed their bound `TextBox`
-//! independently (Rust→UI), proving each got its own live instance.
+//! Regression test for two views carrying the same plain-struct view model type.
+//! Noesis class names are process-global, so the bridge registers each entity's
+//! reflection type under its own name; a shared name would make the second view's
+//! registration fail every frame. Both views must seed their bound `TextBox`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -74,7 +72,6 @@ fn two_views_same_plain_vm_type_both_bind() {
         },
     );
 
-    // Exit once both views have independently seeded their TextBox.
     let pred_texts = Arc::clone(&text_changes);
     let pred_views = Arc::clone(&views);
     let converged = run_until(&mut app, 240, |_app| {

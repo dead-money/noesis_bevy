@@ -1,14 +1,13 @@
-//! Regression test for Noesis teardown ordering and pipelined-cleanup deadlock.
+//! Driving and dropping a Noesis app on the real render graph must not hang.
 //!
-//! Guards two bugs:
-//!  1. Teardown ordering: `NoesisRenderState::drop` must release every Noesis handle
-//!     before the global `shutdown()` (it owns `shutdown()` for exactly this reason).
-//!  2. Pipelined-cleanup deadlock: no `NonSendMut<NoesisRenderState>` system may live in
-//!     the render schedule, or Bevy's pipelined render-thread cleanup handshake deadlocks.
+//! Guards two failure modes:
+//!  1. Teardown order: `NoesisRenderState::drop` must release every Noesis handle
+//!     before the global `shutdown()`, which is why it owns the `shutdown()` call.
+//!  2. Pipelined-cleanup deadlock: a `NonSendMut<NoesisRenderState>` system in the
+//!     render schedule deadlocks Bevy's pipelined render-thread cleanup handshake.
 //!
-//! If either regresses, driving or dropping the app hangs and the outer test timeout
-//! fails the run. Runs on the real render graph ([`render_app`]) so the pipelined
-//! render thread the deadlock lives on is actually spun up.
+//! A regression hangs the app and the outer test timeout fails the run. Uses
+//! [`render_app`] so the pipelined render thread actually runs.
 
 use std::sync::Arc;
 
@@ -17,9 +16,8 @@ use noesis_bevy::{NoesisCamera, NoesisIntermediate, NoesisView, XamlRegistry};
 
 use crate::common::{render_app, run_until, settle};
 
-// Frames to keep pumping after the scene is up, before the app drops. The scene
-// coming up can leave Bevy async-compiling a render pipeline on a driver thread;
-// dropping mid-compile segfaults the GPU driver, so we drain that first.
+// Frames pumped after the scene is up, before the app drops: a pipeline may still
+// be compiling on a driver thread, and dropping mid-compile segfaults the driver.
 const SETTLE_FRAMES: usize = 180;
 const CAP: usize = 240;
 
@@ -60,9 +58,7 @@ fn headless_drive_and_teardown_do_not_hang() {
         "view never published a NoesisIntermediate within {CAP} frames"
     );
 
-    // Drain any in-flight pipeline compile before the drop below tears down.
     settle(&mut app, SETTLE_FRAMES);
 
-    // Dropping `app` here exercises the teardown ordering + pipelined-cleanup path.
     drop(app);
 }

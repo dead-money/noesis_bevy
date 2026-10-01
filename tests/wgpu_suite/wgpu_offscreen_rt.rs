@@ -1,15 +1,15 @@
-//! Exercises the offscreen render-target path end to end.
+//! The offscreen render-target path, end to end:
 //!
 //! - `create_texture` + `update_texture` + `drop_texture` round-trip.
 //! - `create_render_target` (single-sampled, with stencil requested).
 //! - `begin_offscreen_render` → `set_render_target` → `begin_tile` (scissor)
 //!   → `map_vertices`/`map_indices` → `draw_batch` → `end_tile` →
-//!   `resolve_render_target` → `end_offscreen_render` → submit.
-//! - Readback confirms tile scissor clipped rendering and two batches in one
-//!   submit received distinct uniforms (ring-buffer regression).
+//!   `resolve_render_target` → `end_offscreen_render`.
+//! - Readback confirms the tile scissor clipped rendering and that two batches
+//!   in one submit read distinct uniforms (the uniform ring).
 //!
 //! The onscreen path is covered by `wgpu_first_triangle.rs` and
-//! `wgpu_multi_shader.rs`; this test exclusively exercises offscreen.
+//! `wgpu_multi_shader.rs`.
 
 use std::ffi::c_void;
 
@@ -60,11 +60,9 @@ async fn run_test() {
         })
         .await
         .expect("no wgpu device available");
-    // Offscreen path only; no onscreen target needed.
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
 
-    // Sanity-check texture lifecycle (no samplers; just allocation).
-    let texel = [0xAB_u8; 4 * 4 * 4]; // 4x4 RGBA dummy
+    let texel = [0xAB_u8; 4 * 4 * 4]; // 4x4 RGBA
     let data = [&texel[..]];
     let tex_binding = rd.create_texture(TextureDesc {
         label: "lifecycle tex",
@@ -101,8 +99,8 @@ async fn run_test() {
     });
     assert_eq!(rd.render_target_size(rt.handle), Some((RT_SIZE, RT_SIZE)));
 
-    // RenderDevice has no clear API; separate encoder clears before drawing
-    // so readback can distinguish clipped from unclipped pixels.
+    // RenderDevice has no clear call; pre-clear so readback can tell clipped
+    // pixels from drawn ones.
     {
         let resolve = rd
             .texture(rt.resolve_texture.handle)
@@ -137,11 +135,10 @@ async fn run_test() {
 
     // tile_a: red batch, scissored to left half  (x=0,  y=32, w=64, h=64)
     // tile_b: green batch, scissored to right half (x=64, y=32, w=64, h=64)
-    // Two batches verify both tiling (scissor) and the ring buffer (distinct uniforms).
-    // Tile origin lower-left; device converts to wgpu upper-left.
+    // Tile origin is lower-left; the device converts to wgpu's upper-left.
 
+    // Two identical fullscreen `Pos` quads; each tile's scissor limits its draw.
     let mut vb = Vec::with_capacity(96);
-    // Fullscreen quad (clip space -1..1): two triangles, 6 verts, Pos format.
     for v in [
         [-1.0f32, -1.0],
         [1.0, -1.0],
@@ -192,7 +189,6 @@ async fn run_test() {
     rd.map_indices(ib.len() as u32).copy_from_slice(&ib);
     rd.unmap_indices();
 
-    // Left tile: red.
     rd.begin_tile(
         rt.handle,
         noesis_runtime::render_device::types::Tile {
@@ -206,7 +202,6 @@ async fn run_test() {
     rd.draw_batch(&batch_left);
     rd.end_tile(rt.handle);
 
-    // Right tile: green.
     rd.begin_tile(
         rt.handle,
         noesis_runtime::render_device::types::Tile {
@@ -290,9 +285,8 @@ async fn run_test() {
         ]
     };
 
-    // Noesis lower-left vs wgpu upper-left: for this 128-tall RT, y=32..96
-    // maps identically (128 - 96 = 32 from top). Pre-clear survives outside
-    // [32, 96).
+    // The band y ∈ [32, 96) is symmetric in a 128-tall RT, so it lands on the
+    // same rows in lower-left and upper-left coordinates.
     assert_eq!(pixel(32, 16), CLEAR, "above the tile band should be clear");
     assert_eq!(pixel(32, 112), CLEAR, "below the tile band should be clear");
     assert_eq!(

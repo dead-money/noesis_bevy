@@ -1,10 +1,9 @@
-//! ECS-UI integration proof, **Primitive 3 (events = observers), named half**: a
-//! watched host `Button` fires a [`UiClicked`] re-targeted at a *panel entity* (via
-//! [`ClickWatchEntry::target`]); an observer recovers it through `event_target()`
-//! and heals only that panel. Proves the trigger target carries the entity an
-//! observer needs, and that re-targeting routes to the right one of two panels.
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
+//! ECS-UI integration test for the `ecs_ui` example's Primitive 3 (events =
+//! observers), named half: a watched host `Button` fires a [`UiClicked`]
+//! re-targeted at a panel entity (via [`ClickWatchEntry::target`]); an observer
+//! recovers it through `event_target()` and heals only that panel. Proves the
+//! trigger target carries the entity an observer needs, and that re-targeting
+//! routes to the right one of two panels.
 
 use std::sync::{Arc, Mutex};
 
@@ -38,8 +37,7 @@ fn heal_on_click(on: On<UiClicked>, mut huds: Query<&mut Health, With<UiPanel>>)
     }
 }
 
-// Stimulus timings: press once the panels are live, release two frames later.
-// The run's exit is the heal-observed predicate below.
+// Press once the panels are live, release two frames later.
 const PRESS_AT: usize = 18;
 const RELEASE_AT: usize = 20;
 
@@ -100,8 +98,8 @@ fn named_button_event_retargets_to_panel() {
                     Score(0),
                 ))
                 .id();
-            // Re-target each button's UiClicked at its panel entity (the crux: the
-            // observer reads the panel straight off event_target()).
+            // Re-target each button's UiClicked at its panel entity; the observer
+            // reads the panel straight off event_target().
             commands
                 .entity(view)
                 .insert(NoesisClickWatch::from_entries([
@@ -147,8 +145,6 @@ fn named_button_event_retargets_to_panel() {
         },
     );
 
-    // Exit once the targeted panel has been healed by its button click (p1 40 ->
-    // 65) with the other panel untouched.
     let pred_panels = Arc::clone(&panels);
     let pred_final = Arc::clone(&final_hp);
     let healed = run_until(&mut app, 240, move |_app| {

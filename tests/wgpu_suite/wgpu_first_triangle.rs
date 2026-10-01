@@ -1,10 +1,8 @@
-//! Drives [`WgpuRenderDevice`] directly to render a `Path_Solid` triangle,
-//! reads the target back, and asserts pixels inside are red and pixels outside
-//! keep the pre-clear color.
+//! Drives [`WgpuRenderDevice`] directly to render a `PATH_SOLID` triangle, then
+//! asserts pixels inside are red and pixels outside keep the pre-clear color.
 //!
-//! Noesis is only used for `init`/`shutdown`; the `Batch` is hand-built, so
-//! this test exercises the render device without `libNoesis.so` doing any
-//! rendering work.
+//! Noesis is only initialized and shut down; the `Batch` is hand-built, so the
+//! render device is tested without Noesis doing any rendering work.
 
 use std::ffi::c_void;
 
@@ -39,9 +37,8 @@ fn path_solid_first_triangle_fills_expected_pixels() {
     noesis_runtime::shutdown();
 }
 
-#[allow(clippy::too_many_lines)] // wgpu setup is verbose
+#[allow(clippy::too_many_lines)]
 async fn run_test() {
-    // ── wgpu init ──────────────────────────────────────────────────────────
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
@@ -64,7 +61,6 @@ async fn run_test() {
         .await
         .expect("no wgpu device available");
 
-    // ── Target texture ─────────────────────────────────────────────────────
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("noesis_runtime test target"),
         size: wgpu::Extent3d {
@@ -81,7 +77,6 @@ async fn run_test() {
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // ── Pre-clear pass ─────────────────────────────────────────────────────
     {
         let mut clear_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("pre-clear"),
@@ -114,9 +109,8 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // ── Build vertex / index / uniform data ────────────────────────────────
-    // Triangle in clip space:
-    //   v0 = (-0.5, -0.5)  → pixel (64, 192)  (Y inverted from clip→pixel)
+    // Triangle in clip space (clip Y up, pixel Y down):
+    //   v0 = (-0.5, -0.5)  → pixel (64, 192)
     //   v1 = ( 0.5, -0.5)  → pixel (192, 192)
     //   v2 = ( 0.0,  0.5)  → pixel (128, 64)
     // Centroid: pixel (128, 149).
@@ -129,7 +123,6 @@ async fn run_test() {
     ]);
     let indices: [u8; 6] = bytemuck::cast::<[u16; 3], [u8; 6]>([0u16, 1, 2]);
 
-    // Identity 4x4 (column-major == row-major for identity).
     let identity_mat: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
@@ -137,7 +130,6 @@ async fn run_test() {
         0.0, 0.0, 0.0, 1.0,
     ];
 
-    // ── Drive the device ───────────────────────────────────────────────────
     rd.begin_onscreen_render();
 
     rd.map_vertices(36).copy_from_slice(&vertices);
@@ -150,9 +142,7 @@ async fn run_test() {
 
     rd.end_onscreen_render();
 
-    // ── Read back ──────────────────────────────────────────────────────────
-    // bytes_per_row must be aligned to COPY_BYTES_PER_ROW_ALIGNMENT (256).
-    // 256 px * 4 bytes = 1024 bytes/row, which is already aligned.
+    // 256 px * 4 bytes = 1024 bytes/row, already a multiple of COPY_BYTES_PER_ROW_ALIGNMENT.
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(TARGET_H),
@@ -247,10 +237,8 @@ fn build_pos_color_vertices(verts: &[([f32; 2], [u8; 4])]) -> [u8; 36] {
 fn make_path_solid_batch(uniforms: &[f32; 16]) -> Batch {
     Batch {
         shader: Shader::PATH_SOLID,
-        // color_enable must be true: RenderState::default() is `RenderState(0)`,
-        // whose bit-0 colorEnable is *false*, so build_pipeline sets an empty
-        // color-write mask and the triangle renders zero pixels. Noesis only
-        // emits color_enable=false for stencil-only MASK draws.
+        // color_enable must be set: `RenderState::default()` has it off, which
+        // gives an empty color-write mask and a triangle with zero pixels.
         render_state: RenderState::new(true, BlendMode::Src, StencilMode::Disabled, false),
         stencil_ref: 0,
         single_pass_stereo: false,

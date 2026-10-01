@@ -1,9 +1,12 @@
-//! Headless diagnostic for nested-element rendering via a recording `RenderDevice`.
+//! Nested-element rendering and the `SetProjectionMatrix` culling quirk.
 //!
-//! Wraps `WgpuRenderDevice` in `RecordingDevice` to capture draw-batch counts and
-//! pixel readbacks across XAML variations. The assertions encode two things:
-//! `SetProjectionMatrix` culls child elements (captured regression) and omitting it
-//! restores correct child rendering.
+//! Wraps `WgpuRenderDevice` in a `RecordingDevice` and renders a set of XAML
+//! layouts, printing each one's device ops, draw count and center/corner pixels.
+//! Calling `View::set_projection_matrix` with a GL-style ortho makes Noesis's
+//! visibility pass cull child elements, which is why the crate never calls it.
+//! The assertions pin both sides: without the projection the children render,
+//! and with it `nested-grid-yellow-child` still shows only the outer red. Most
+//! scenarios set the projection and exist to narrow the cause in the trace.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -241,7 +244,7 @@ impl<D: RenderDevice> RenderDevice for RecordingDevice<D> {
         if self.scratch_vertices.len() < bytes as usize {
             self.scratch_vertices.resize(bytes as usize, 0);
         }
-        // scratch buffer; forwarded to the inner device on unmap
+        // Recorded on unmap, then copied into the inner device's mapping.
         &mut self.scratch_vertices[..bytes as usize]
     }
 
@@ -423,14 +426,14 @@ fn nested_child_grid_diagnostic() {
     noesis_runtime::init();
 
     let scenarios: &[(&str, &[u8], ScenarioOptions)] = &[
-        // Sanity check: 1 PATH_AA_SOLID batch expected, whole surface red.
+        // Baseline: one PATH_AA_SOLID batch, whole surface red.
         (
             "leaf-grid-red",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red"/>"#,
             ScenarioOptions::default(),
         ),
-        // Nested Grid with explicit Width/Height: expected outer-red + inner-yellow,
-        // observed outer-red only.
+        // Nested Grid with explicit Width/Height. With the projection set, only
+        // the outer red renders.
         (
             "nested-grid-yellow-child",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -438,8 +441,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Same scene, PPAA off. If this draws the inner, PPAA's tessellation
-        // / batch reordering is the culprit.
+        // Same scene, PPAA off: rules out PPAA tessellation.
         (
             "nested-grid-yellow-child-no-ppaa",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -447,8 +449,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions { ppaa: false, ..ScenarioOptions::default() },
         ),
-        // Drive multiple Update cycles. If this draws the inner, layout was
-        // not converged after one pass.
+        // Several Update cycles: rules out unconverged layout.
         (
             "nested-grid-yellow-child-multi-update",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -456,8 +457,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions { update_iterations: 4, ..ScenarioOptions::default() },
         ),
-        // Different inner element type. If Rectangle works where Grid doesn't,
-        // the issue is Grid-as-child-of-Grid specifically.
+        // Rectangle child: rules out a Grid-in-Grid issue.
         (
             "nested-grid-rectangle-child",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -465,8 +465,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Inner Grid stretched to fill (no explicit size, no alignment).
-        // Standard WPF Grid default is HorizontalAlignment=Stretch.
+        // Inner Grid stretched to fill (no explicit size, default Stretch alignment).
         (
             "nested-grid-yellow-child-stretch",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -481,9 +480,7 @@ fn nested_child_grid_diagnostic() {
                 </Border>"#,
             ScenarioOptions::default(),
         ),
-        // Margin-inset: clear inset that should reveal outer red around an
-        // inner yellow rectangle. Differentiates "inner not laid out at all"
-        // from "inner laid out somewhere unexpected".
+        // Margin inset: separates "inner not laid out" from "inner laid out elsewhere".
         (
             "nested-grid-margin",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -491,8 +488,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Inner positioned top-left: center reads outer-red, top-left reads inner-yellow.
-        // Disentangles "no draw" from "drew at unexpected position".
+        // Inner at top-left: separates "no draw" from "drew at an unexpected position".
         (
             "nested-grid-explicit-topleft",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -500,8 +496,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Inner larger than the view surface, forces overlap regardless of alignment.
-        // Yellow here means alignment math is wrong; no yellow means layout drops the inner.
+        // Inner larger than the surface, so it overlaps the samples whatever the alignment.
         (
             "nested-grid-larger-inner",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -509,9 +504,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Width/Height + explicit Center alignment. If this paints inner,
-        // confirms the bug is "default alignment (Stretch) + explicit Width
-        // drops the element from the render tree".
+        // Explicit size with explicit Center alignment.
         (
             "nested-grid-explicit-center",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -519,8 +512,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Just one explicit alignment axis. Helps isolate whether both axes
-        // need it or just one.
+        // Explicit alignment on one axis only.
         (
             "nested-grid-explicit-h-only",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -528,7 +520,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Canvas + absolute positioning, bypasses alignment entirely.
+        // Canvas absolute positioning bypasses alignment entirely.
         (
             "canvas-rectangle-absolute",
             br#"<Canvas xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -544,7 +536,7 @@ fn nested_child_grid_diagnostic() {
                 </StackPanel>"#,
             ScenarioOptions::default(),
         ),
-        // Outer with explicit Width/Height: checks whether the outer element itself renders.
+        // Outer element with explicit Width/Height and no children.
         (
             "outer-explicit-size",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red" Width="64" Height="64"/>"#,
@@ -558,8 +550,7 @@ fn nested_child_grid_diagnostic() {
                 </Grid>"#,
             ScenarioOptions::default(),
         ),
-        // Tests the hypothesis that SetProjectionMatrix causes child culling.
-        // These should draw the inner element if the projection call is the trigger.
+        // No projection: these draw the inner element (asserted below).
         (
             "no-projection-nested-yellow",
             br#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red">
@@ -632,8 +623,7 @@ fn nested_child_grid_diagnostic() {
         "no-projection canvas-rect: corner should be outer-Red, got {corner:?}",
     );
 
-    // SetProjectionMatrix culls children in Noesis's visibility pass (captured regression).
-    // A fix should flip this assertion.
+    // Pins the culling quirk: with the projection set, the child is not drawn.
     let (center, corner) = by_name("nested-grid-yellow-child");
     assert_eq!(
         center,
@@ -725,13 +715,11 @@ async fn run_scenario(xaml: &[u8], opts: ScenarioOptions) -> (Vec<Op>, [u8; 4], 
         renderer.init(&registered_device);
     }
 
-    // multi-tick to let layout converge
     for i in 0..opts.update_iterations {
         let _changed = view.update(f64::from(i) * 0.016);
         let mut renderer = view.renderer();
         let _new_tree = renderer.update_render_tree();
         if i + 1 < opts.update_iterations {
-            // only the final tick paints into the target
             continue;
         }
         let _off = renderer.render_offscreen();

@@ -1,16 +1,14 @@
-//! Component-removal reap regression for [`NoesisBinding`] (audit P0.9
-//! completion). Removing the binding component from a *live* view must detach the
-//! live XAML-wired binding off its target DP (via `ClearBinding`) and drain the
-//! render-side entries — symmetrically with entity-despawn teardown — not leave
-//! the binding driving the property forever.
+//! Component-removal reap regression for [`NoesisBinding`]. Removing the binding
+//! component from a live view must detach the binding from its target DP (via
+//! `ClearBinding`) and drain its `NoesisRenderState` entries, the same as entity-despawn
+//! teardown, instead of leaving the binding driving the property forever.
 //!
-//! `NoesisBinding` was the one bridge P0.9 excluded, because stopping a live
-//! binding needed the `clear_binding` FFI that has since landed. This drives a
-//! view whose binding upper-cases `Source.Text` into `Upper.Text` until it is
-//! live (`live_bindings == 1`, `Upper.Text == "HELLO"`), then `remove::<NoesisBinding>()`
-//! while keeping the view alive. After removal it mutates the source and asserts
-//! the target no longer follows (`Upper.Text != "WORLD"`) and the side table
-//! drained (`live_bindings == 0`) with the scene still live.
+//! Drives a view whose binding upper-cases `Source.Text` into `Upper.Text` until
+//! it is live (`live_bindings == 1`, `Upper.Text == "HELLO"`), then
+//! `remove::<NoesisBinding>()` while keeping the view alive. After removal it
+//! mutates the source and asserts the target no longer follows
+//! (`Upper.Text != "WORLD"`) and the side table drained (`live_bindings == 0`)
+//! with the scene still live.
 //!
 //! Font-free XAML; no glyph rendering involved.
 
@@ -24,8 +22,6 @@ use noesis_bevy::{
 
 use crate::common::{headless_app, run_until};
 
-// Stimulus sequence: settle the live binding, drop it, mutate the source past the
-// reap, then snapshot. The run's exit is the terminal post-removal predicate.
 const CAPTURE_PRE_AT: usize = 25;
 const REMOVE_AT: usize = 26;
 const MUTATE_AT: usize = 30;
@@ -134,8 +130,6 @@ fn removing_binding_from_a_live_view_reaps_and_stops_it() {
         },
     );
 
-    // Exit once the post-removal snapshot has been taken and shows the binding
-    // entries drained while the scene stayed live.
     let pred_post = Arc::clone(&post);
     let reaped = run_until(
         &mut app,

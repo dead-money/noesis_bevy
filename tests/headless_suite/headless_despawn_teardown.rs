@@ -1,13 +1,11 @@
 //! Despawn-teardown regression: despawning a `NoesisView` must reap its Noesis
 //! state, not leak it.
 //!
-//! Before the `teardown_removed_views` hook there was *no* removal handling in
-//! the crate, so a despawned view's `!Send` scene + side-table entry lived for
-//! the whole process. This test drives a view until its scene exists
-//! (`live_scenes == 1`), despawns the entity, and asserts the live-scene count
-//! drains back to 0, i.e. the side-table entry is gone. It also doubles as a
-//! smoke test for the FFI-hop instrumentation (a built scene must have resolved
-//! at least one name, so `ffi_hops > 0`).
+//! Drives a view until its scene exists (`live_scenes == 1`), despawns the
+//! entity, and asserts the live-scene count drains back to 0, so the `!Send`
+//! scene and its side-table entry are gone. Also a smoke test for the FFI-hop
+//! counter: a built scene must have resolved at least one name, so
+//! `ffi_hops > 0`.
 //!
 //! Font-free XAML so the scene builds without a font folder.
 
@@ -49,8 +47,7 @@ fn despawning_a_view_reaps_its_noesis_state() {
                     size: UVec2::new(128, 128),
                     ..default()
                 },
-                // A live DP write so the dp bridge resolves "Panel" every frame,
-                // exercising the FFI-hop instrumentation (resolve_named + DP set).
+                // DP write so the dp bridge resolves "Panel" and bumps ffi_hops.
                 NoesisDp::new().set_f32("Panel", "Opacity", 0.5),
             ));
         },
@@ -80,7 +77,6 @@ fn despawning_a_view_reaps_its_noesis_state() {
         },
     );
 
-    // Exit once the post-despawn snapshot shows the view's scene reaped.
     let pred_post = Arc::clone(&post);
     let reaped = run_until(
         &mut app,

@@ -1,10 +1,8 @@
-//! [`NoesisUi`]: ergonomic access to the single [`NoesisView`] in a one-UI app.
+//! [`NoesisUi`], a system parameter for apps with exactly one [`NoesisView`].
 //!
-//! The per-view bridges live as components on the view's camera entity, so a
-//! system that drives them needs that entity. For an app with one UI that means
-//! repeating `Single<&mut NoesisText, With<NoesisView>>` (and a separate lookup
-//! for the entity itself) on every system. [`NoesisUi`] folds both into one
-//! parameter:
+//! Bridge components live on the view's camera entity, so a system that drives
+//! them needs that entity. [`NoesisUi`] finds the one view and, optionally, a
+//! bridge component on it:
 //!
 //! ```ignore
 //! // Write a bridge component on the one view.
@@ -22,11 +20,10 @@
 //! }
 //! ```
 //!
-//! Unlike a bare [`Single`], `NoesisUi` does not
-//! skip the whole system when there isn't exactly one view: the accessors return
-//! [`None`] and the system decides. It is a single-view convenience; a multi-view
-//! app routes by the `view: Entity` each read-back message carries and queries
-//! the bridges directly.
+//! Unlike [`Single`], `NoesisUi` does not skip the system when there isn't
+//! exactly one view: the accessors return [`None`] and the system decides. A
+//! multi-view app queries the bridges directly and routes by the `view: Entity`
+//! each read-back message carries.
 
 use bevy::ecs::query::{QueryData, QueryItem, ROQueryItem};
 use bevy::ecs::system::SystemParam;
@@ -42,9 +39,8 @@ use crate::render::NoesisView;
 /// bridge component on that view. `D` can be any query data, so tuples work too:
 /// `NoesisUi<(&mut NoesisText, &mut NoesisVisibility)>`.
 ///
-/// Every accessor returns [`None`] when zero or more than one [`NoesisView`]
-/// exists, so the system still runs and chooses what to do. For multiple views,
-/// route by the `view: Entity` each read-back message carries instead.
+/// Every accessor returns [`None`] unless exactly one [`NoesisView`] entity
+/// matches `D`. A view that lacks `D` is not counted.
 #[derive(SystemParam)]
 pub struct NoesisUi<'w, 's, D: QueryData + 'static = ()> {
     view: Query<'w, 's, (Entity, D), With<NoesisView>>,
@@ -63,12 +59,11 @@ impl<'w, 's, D: QueryData + 'static> NoesisUi<'w, 's, D> {
     }
 
     /// Mutable access to `D` on the one view, or [`None`] if zero or more than
-    /// one view exists. This is the runtime write path: `ui.get_mut()` then call
-    /// the bridge's `&mut self` setters (`write`, `show`, `set_*`, ...).
+    /// one view exists. Call the bridge's `&mut self` setters (`write`, `show`,
+    /// `set_*`) on the result.
     ///
-    /// The extra `IterQueryData` bound tracks Bevy 0.19's `Query::single_mut`
-    /// signature; every real query data (`&mut T`, tuples, ...) satisfies it, so
-    /// the read-only accessors above stay unconstrained.
+    /// The `IterQueryData` bound comes from Bevy's `Query::single_mut`; every
+    /// ordinary query data (`&mut T`, tuples) satisfies it.
     pub fn get_mut(&mut self) -> Option<QueryItem<'_, 's, D>>
     where
         D: bevy::ecs::query::IterQueryData,

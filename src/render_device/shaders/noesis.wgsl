@@ -1,24 +1,16 @@
-// SDF_LCD_SOLID emits a dual-source fragment output (`@blend_src`), which WGSL
-// gates behind an enable directive. It must precede all other declarations, so
-// it lives at the very top — emitted only for the LCD variant so the other
-// shaders don't require the device's DUAL_SOURCE_BLENDING feature.
+// `@blend_src` needs this enable directive, which must precede every other
+// declaration. Gated so only the LCD variant requires DUAL_SOURCE_BLENDING.
 #ifdef EFFECT_SDF_LCD
 enable dual_source_blending;
 #endif
 
-// Unified shader source for the Noesis pipeline matrix. Variants are produced
-// at pipeline-build time by stripping #ifdef branches via shader_preproc.rs;
-// the active define set comes from shader_defines::defines_for_shader().
+// One source for every Noesis shader. shader_preproc.rs strips the #ifdef
+// branches using the define set from shader_defines::defines_for_shader().
 //
-// Mirrors Shader.140.{vert,frag} from $NOESIS_SDK_DIR/Src/Packages/Render/
-// GLRenderDevice/Src/. Cross-reference comments call out the GL line whose
-// behavior each block ports.
-//
-// Phase 3 coverage so far: PATH_SOLID, PATH_AA_SOLID, MASK, RGBA, CLEAR.
-// Pattern/Linear/Radial/SDF/Opacity/Shadow/Blur/Downsample/Upsample need
-// samplers + the resource map from Phase 4 → 6 and land in those phases.
+// Ported from Shader.140.{vert,frag} in $NOESIS_SDK_DIR/Src/Packages/Render/
+// GLRenderDevice/Src/; "GL ref" comments quote the GL code a block ports.
 
-// ─── Uniforms ──────────────────────────────────────────────────────────────
+// ─── Uniforms ───
 // cbuffer0_vs[16] (projection, 64B) + cbuffer1_vs[2] (glyph atlas size, 8B
 // padded to vec4) packed into one struct so a single dynamic-offset bind group
 // covers both. The SDF vertex shader needs cbuffer1_vs.xy to scale uv1 into
@@ -30,22 +22,19 @@ struct VsUniforms {
 
 @group(0) @binding(0) var<uniform> vs_uniforms: VsUniforms;
 
-// cbuffer0_ps[8] in Shader.140.frag — first eight pixel-shader floats. Only
-// EFFECT_RGBA reads from it directly so far (uses values[0] as an RGBA fill).
-// Always declared so every pipeline shares one bind-group layout.
+// cbuffer0_ps[8]: values[0] is the fill color for EFFECT_RGBA, and
+// values[0].x the opacity for the pattern and linear paints. PAINT_RADIAL
+// documents its own layout.
 struct PsUniforms0 {
     values: array<vec4<f32>, 2>,
 }
 
 @group(1) @binding(0) var<uniform> ps_uniforms0: PsUniforms0;
 
-// cbuffer1_ps in Shader.140.frag — a second pixel-shader constant block, only
-// read by EFFECT_SHADOW / EFFECT_BLUR. Noesis declares it as float[128] but the
-// shadow/blur effects touch at most the first 7 floats, so we bind two vec4s
-// (values[0] = cb[0..3], values[1] = cb[4..7]). Packed into group(1) binding(1)
-// rather than a new bind group so the layout stays within the 4-group
-// downlevel-defaults limit. Gated by HAS_CBUFFER1_PS; the shared pipeline
-// layout always declares the binding so non-shadow shaders just leave it unused.
+// cbuffer1_ps: read only by EFFECT_SHADOW / EFFECT_BLUR. Noesis declares
+// float[128], but those effects use at most the first 7 floats, so two vec4s
+// (values[0] = cb[0..3], values[1] = cb[4..7]). Shares group(1) to stay within
+// the downlevel 4-bind-group limit.
 #ifdef HAS_CBUFFER1_PS
 struct PsUniforms1 {
     values: array<vec4<f32>, 2>,
@@ -54,41 +43,31 @@ struct PsUniforms1 {
 @group(1) @binding(1) var<uniform> ps_uniforms1: PsUniforms1;
 #endif
 
-// Group(2) — a texture+sampler pair consumed by any paint variant that
-// reads from a 2D texture (PAINT_PATTERN binds `batch.pattern`, PAINT_LINEAR
-// binds `batch.ramps`, etc.). Shaders that don't need a texture still share
-// the same pipeline layout; the Rust side binds a dummy bind group at draw
-// time since wgpu requires every declared group to be set.
+// group(2): the paint texture. Holds `pattern`, `ramps`, or `glyphs`
+// depending on the shader, and the DOWNSAMPLE/UPSAMPLE source. Shaders that
+// don't read it get a dummy bind group.
 #ifdef HAS_PAINT_TEXTURE
 @group(2) @binding(0) var paint_texture: texture_2d<f32>;
 @group(2) @binding(1) var paint_sampler: sampler;
 #endif
 
-// Group(3) — second texture+sampler pair, used by EFFECT_OPACITY (and the
-// pending SHADOW_*, BLUR_*, UPSAMPLE_* effects) for the offscreen-rendered
-// "image" of the layer being composited. GL ref: `uniform sampler2D image`.
-// Distinct group so existing PATH / SDF pipelines don't have to reason
-// about a paint+image bind group; the Rust side binds a dummy at this
-// slot for shaders that don't read it.
+// group(3) bindings 0/1: `image`, the offscreen render of the layer being
+// composited. Read by EFFECT_OPACITY, UPSAMPLE, SHADOW, and BLUR.
 #ifdef HAS_IMAGE_TEXTURE
 @group(3) @binding(0) var image_texture: texture_2d<f32>;
 @group(3) @binding(1) var image_sampler: sampler;
 #endif
 
-// Group(3) bindings 2/3 — the `shadow` texture+sampler, co-bound with `image`
-// for EFFECT_SHADOW / EFFECT_BLUR (GL ref: `uniform sampler2D shadow`). Packed
-// into the same group as `image` to stay within the 4-bind-group limit. The
-// shared pipeline layout always declares these; OPACITY-class shaders that bind
-// only `image` leave them unused (the Rust side binds a dummy at 2/3).
+// group(3) bindings 2/3: the blurred `shadow` pass, read by EFFECT_SHADOW and
+// EFFECT_BLUR. Shares `image`'s group to stay within the 4-bind-group limit.
 #ifdef HAS_SHADOW_TEXTURE
 @group(3) @binding(2) var shadow_texture: texture_2d<f32>;
 @group(3) @binding(3) var shadow_sampler: sampler;
 #endif
 
-// ─── Vertex I/O ────────────────────────────────────────────────────────────
-// shader_location matches the VertexAttr enum index in noesis_bevy. Each
-// attribute is independently gated by its HAS_* define so we can produce all
-// 16 vertex-format combinations from one source.
+// ─── Vertex I/O ───
+// VsIn locations are the noesis_runtime VertexAttr indices (see
+// vertex_layout.rs); each attribute is gated by its own HAS_* define.
 
 struct VsIn {
     @location(0) pos: vec2<f32>,
@@ -118,7 +97,7 @@ struct VsIn {
 struct VsOut {
     @builtin(position) clip_position: vec4<f32>,
 #ifdef HAS_COLOR
-    // GL: `flat in vec4 color;` — match with @interpolate(flat).
+    // GL ref: `flat in vec4 color;`
     @location(0) @interpolate(flat) color: vec4<f32>,
 #endif
 #ifdef HAS_UV0
@@ -152,7 +131,7 @@ struct VsOut {
 #endif
 }
 
-// ─── Vertex shader ─────────────────────────────────────────────────────────
+// ─── Vertex shader ───
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
@@ -195,21 +174,18 @@ fn vs_main(in: VsIn) -> VsOut {
     out.image_pos = in.image_pos;
 #endif
 #ifdef HAS_ST1
-    // Mirrors GL ref `st1 = vec2(attr_uv1 * vec2(cbuffer1_vs[0], cbuffer1_vs[1]))`.
+    // GL ref: `st1 = vec2(attr_uv1 * vec2(cbuffer1_vs[0], cbuffer1_vs[1]))`
     out.st1 = in.uv1 * vs_uniforms.glyph_size.xy;
 #endif
     return out;
 }
 
-// ─── Fragment shader ───────────────────────────────────────────────────────
+// ─── Fragment shader ───
 //
-// Effect-only paths (RGBA, MASK, CLEAR) return immediately. Effects that
-// consume a paint (PATH, PATH_AA) compute the paint first and then apply.
-// The trailing `return vec4<f32>(0.0)` is a guaranteed-unreachable fallback
-// that keeps WGSL happy when the active branch is the only one with a return.
-//
-// EFFECT_SDF_LCD needs a dual-source fragment output, so it gets its own
-// `fs_main` below; the single-target body here is gated out for that variant.
+// Each variant keeps one PAINT_* block (defining `paint` and `opacity`) and
+// one EFFECT_* block that returns. The trailing `return vec4<f32>(0.0)` is
+// unreachable; it keeps the function well-formed for every define set.
+// EFFECT_SDF_LCD has its own dual-output `fs_main` below.
 #ifndef EFFECT_SDF_LCD
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -230,30 +206,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let opacity = 1.0;
 #endif
 
-// ─── PAINT_PATTERN × { plain | CLAMP | REPEAT | MIRROR_U | MIRROR_V | MIRROR } ──
-// Each variant below declares its own `paint` + `opacity`. The shader-define
-// set picks exactly one sub-variant, so after preprocessing only one block
-// survives and the remaining fn body references a single `paint` / `opacity`.
-//
-// The wrap variants (everything except PAINT_PATTERN_PLAIN) expect a `rect`
-// vertex attribute (normalized bounding rect the paint clamps to — drawn as
-// `inside * textureSample(...)`, so out-of-rect fragments contribute zero).
-// REPEAT / MIRROR* additionally consume a `tile` attribute giving the
-// per-primitive tile origin + size for the UV wrap math. GL reference:
-// Shader.140.frag — PAINT_PATTERN block, CLAMP_PATTERN / REPEAT_PATTERN /
-// MIRRORU_PATTERN / MIRRORV_PATTERN / MIRROR_PATTERN subblocks.
+// ─── Pattern paints ───
+// The wrap variants (all but PAINT_PATTERN_PLAIN) read a `rect` attribute, the
+// UV bounds of the pattern; fragments outside it contribute zero. REPEAT and
+// MIRROR* also read `tile`, the tile origin (xy) and size (zw) for the wrap.
+// GL ref: Shader.140.frag PAINT_PATTERN and its *_PATTERN subblocks.
 
 #ifdef PAINT_PATTERN_PLAIN
-    // Plain PAINT_PATTERN — the SamplerState handles wrap/filter.
+    // The sampler handles wrap and filtering.
     let paint = textureSample(paint_texture, paint_sampler, in.uv0);
     let opacity = ps_uniforms0.values[0].x;
 #endif
 
 #ifdef CLAMP_PATTERN
-    // Explicit clamp to `rect`. Fragments outside the rect discard (zero
-    // contribution) via the inside mask — cheaper than relying on the
-    // sampler's wrap mode, and lets Noesis place multiple atlased patterns
-    // in a single texture.
+    // Masking to `rect` in-shader lets Noesis atlas several patterns in one
+    // texture, which a sampler wrap mode can't do.
     let clamped_uv = clamp(in.uv0, in.rect.xy, in.rect.zw);
     let inside = select(0.0, 1.0, all(in.uv0 == clamped_uv));
     let paint = inside * textureSample(paint_texture, paint_sampler, in.uv0);
@@ -329,15 +296,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #endif
 
 #ifdef PAINT_RADIAL
-    // Mirrors Shader.140.frag PAINT_RADIAL block. cbuffer0_ps is packed
-    // into ps_uniforms0.values as (values[0] = cb[0..3], values[1] = cb[4..7]),
-    // so:
-    //   cb[0..2] — coefficients for the radial parameter `u`
-    //   cb[3]    — opacity
-    //   cb[4..5] — `dd` term coefficients (focal-offset radial)
-    //   cb[6]    — ramp atlas row (v coordinate into `ramps`)
-    // Noesis supplies uv0 in a focal-relative gradient space; the shader
-    // maps that to a radius and reads the ramp the rest.
+    // GL ref Shader.140.frag PAINT_RADIAL. cbuffer0_ps layout
+    // (values[0] = cb[0..3], values[1] = cb[4..7]):
+    //   cb[0..2]: coefficients for the gradient parameter `u`
+    //   cb[3]:    opacity
+    //   cb[4..5]: focal-offset `dd` coefficients
+    //   cb[6]:    ramp atlas row
+    // uv0 is in focal-relative gradient space.
     let cb0 = ps_uniforms0.values[0];
     let cb1 = ps_uniforms0.values[1];
     let dd = cb1.x * in.uv0.x - cb1.y * in.uv0.y;
@@ -358,13 +323,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #ifdef EFFECT_OPACITY
     // GL ref Shader.140.frag EFFECT_OPACITY:
     //   fragColor = texture(image, uv1) * (opacity_ * paint.a)
-    // The "image" texture is an offscreen-rendered pass of the layer
-    // being composited (Noesis writes it before this draw); `paint.a`
-    // is the per-pixel opacity multiplier (typically the layer's mask
-    // alpha or a solid color whose alpha is the opacity). The PATH /
-    // PATH_AA paths use `opacity * paint`; this one swaps `paint.rgb`
-    // for the offscreen sample, so colour comes from the layer and
-    // opacity from `(opacity * paint.a)`.
+    // Color comes from the layer; the paint only contributes its alpha
+    // (an opacity mask or a solid opacity).
     return textureSample(image_texture, image_sampler, in.uv1)
         * (opacity * paint.a);
 #endif
@@ -377,10 +337,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //   alpha       = mix(image(uv).a, shadow(uv).a, cbuffer1_ps[6])
     //   img         = image(clamp(uv1, rect.xy, rect.zw))
     //   fragColor   = (img + (1 - img.a) * (shadowColor * alpha)) * (opacity * paint.a)
-    // `image` is the layer's offscreen render; `shadow` is the blurred-alpha
-    // pass. The drop shadow is composited *under* the layer (premultiplied
-    // `1 - img.a` weight), then scaled by the effect's overall opacity (the
-    // paint alpha carries the per-pixel opacity, opacity_ the global scalar).
+    // The shadow composites under the layer (premultiplied `1 - img.a`).
     let shadow_color = ps_uniforms1.values[0];
     let shadow_offset = vec2<f32>(ps_uniforms1.values[1].x, -ps_uniforms1.values[1].y);
     let shadow_uv = clamp(in.uv1 - shadow_offset, in.rect.xy, in.rect.zw);
@@ -398,8 +355,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #ifdef EFFECT_BLUR
     // GL ref Shader.140.frag EFFECT_BLUR:
     //   fragColor = mix(image(uv1), shadow(uv1), cbuffer1_ps[0]) * (opacity * paint.a)
-    // `image` is the unblurred layer, `shadow` the blurred pass; cbuffer1_ps[0]
-    // crossfades between them (full blur = 1.0). Drives the blur resolve.
+    // cbuffer1_ps[0] crossfades from the unblurred layer (0) to the blur (1).
     return mix(
         textureSample(image_texture, image_sampler, in.uv1),
         textureSample(shadow_texture, shadow_sampler, in.uv1),
@@ -408,9 +364,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #endif
 
 #ifdef EFFECT_DOWNSAMPLE
-    // GL ref Shader.140.frag EFFECT_DOWNSAMPLE: average four taps of the
-    // source (`pattern`, group 2) at the offset UVs computed in the VS. Halves
-    // resolution per pass; the blur/effect resolve chain ping-pongs this.
+    // GL ref Shader.140.frag EFFECT_DOWNSAMPLE: box filter of four taps of
+    // the group(2) source at the VS-computed UVs.
     return (textureSample(paint_texture, paint_sampler, in.uv0)
         + textureSample(paint_texture, paint_sampler, in.uv1)
         + textureSample(paint_texture, paint_sampler, in.uv2)
@@ -421,8 +376,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #ifdef EFFECT_UPSAMPLE
     // GL ref Shader.140.frag EFFECT_UPSAMPLE:
     //   mix(texture(image, uv1), texture(pattern, uv0), color.a)
-    // `image` (group 3) is the lower-resolution accumulated pass; `pattern`
-    // (group 2) is the matching-resolution source; color.a is the blend weight.
+    // `image` (group 3) is the lower-resolution pass, group(2) the
+    // same-resolution source.
     return mix(
         textureSample(image_texture, image_sampler, in.uv1),
         textureSample(paint_texture, paint_sampler, in.uv0),
@@ -431,7 +386,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #endif
 
 #ifdef EFFECT_SDF
-    // Mirrors GL ref Shader.140.frag EFFECT_SDF block:
+    // GL ref Shader.140.frag EFFECT_SDF:
     //   distance = SDF_SCALE * (texture(glyphs, uv1).r - SDF_BIAS)
     //   gradLen  = length(dFdx(st1))
     //   scale    = 1 / gradLen
@@ -461,21 +416,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 #endif
 
-// ─── EFFECT_SDF_LCD — subpixel (LCD) text via dual-source blending ──────────
+// ─── EFFECT_SDF_LCD: subpixel text via dual-source blending ───
 //
-// Single-channel SDF text with per-subpixel-channel coverage. The SDK ships no
-// GL/VK reference for this path (those devices set `subpixelRendering = false`),
-// so this follows the standard single-channel-SDF LCD technique: sample the
-// distance field at three horizontally-staggered positions one-third of a
-// screen pixel apart, turn each into a coverage value with the same SDF
-// smoothstep `SDF_SOLID` uses, and emit those as the R/G/B subpixel coverages.
+// The SDK has no GL/VK reference for this path (those devices report no
+// subpixel rendering). This is the usual single-channel SDF LCD technique:
+// sample the distance field at three points a third of a screen pixel apart
+// horizontally, and use each one's SDF_SOLID-style coverage for one of R/G/B.
 //
-// Output is dual-source:
-//   blend_src(0) = paint.rgb premultiplied by per-channel coverage (+ paint.a)
-//   blend_src(1) = the per-channel coverage itself
-// composited with the `SrcOver_Dual` blend (`cs + cd*(1 - src1)` per channel),
-// giving `paint*cov + dst*(1 - cov)` independently for R/G/B — the subpixel
-// blend an LCD panel's stripe layout expects.
+// blend_src(0) is paint premultiplied by per-channel coverage; blend_src(1) is
+// the coverage. The SrcOver_Dual blend (`cs + cd*(1 - src1)`) then gives
+// `paint*cov + dst*(1 - cov)` per channel.
 #ifdef EFFECT_SDF_LCD
 struct FsLcdOut {
     @location(0) @blend_src(0) color: vec4<f32>,
@@ -493,7 +443,7 @@ fn fs_main(in: VsOut) -> FsLcdOut {
     let SDF_BASE_MAX: f32 = 0.25;
     let SDF_BASE_DEV: f32 = -0.65;
 
-    // AA window sizing — identical to EFFECT_SDF, from the st1 gradient.
+    // AA window sizing, as in EFFECT_SDF.
     let gradLen = length(dpdx(in.st1));
     let scale = 1.0 / gradLen;
     let base = SDF_BASE_DEV

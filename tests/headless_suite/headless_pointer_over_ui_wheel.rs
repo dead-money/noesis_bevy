@@ -1,9 +1,6 @@
-//! Regression: an *unhandled* mouse wheel (over a `Button`, or a
-//! `ScrollViewer` with nothing to scroll) must not lower
-//! [`NoesisPointerOverUi`] — wheel results carry handled-ness, not pointer
-//! position, so they may only raise the flag.
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
+//! An unhandled mouse wheel (over a `Button`, or a `ScrollViewer` with nothing
+//! to scroll) must not lower [`NoesisPointerOverUi`]. Wheel results carry
+//! handled-ness, not pointer position, so they may only raise the flag.
 
 use std::sync::{Arc, Mutex};
 
@@ -21,7 +18,7 @@ const XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/2006/xa
       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>"##;
 
 // Scene builds over the first frames; click latches the flag, then wheel and
-// resample. Stimulus timings; the exit is the terminal predicate.
+// resample.
 const MOVE_AT: usize = 15;
 const SAMPLE_OVER_AT: usize = 20;
 const WHEEL_AT: usize = 25;

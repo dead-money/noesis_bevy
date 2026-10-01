@@ -1,9 +1,8 @@
-//! Render-graph suite (audit R2): the few tests that need the real `DefaultPlugins` render graph.
+//! Render-graph suite: the tests that need the real `DefaultPlugins` render graph.
 //!
-//! Each source file in this directory is one `#[test]` module. The suite
-//! links Bevy + Noesis once for all of them instead of once per file, and
-//! runs under cargo-nextest so every test still gets its own process (Noesis
-//! state is process-global and thread-affine). See tests/README.md.
+//! Each source file in this directory is one `#[test]` module, linked into one
+//! binary. Run it under cargo-nextest so every test gets its own process; Noesis
+//! state is process-global and thread-affine. See `tests/README.md`.
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -1,5 +1,5 @@
-//! ECS-UI integration proof: a [`NoesisClickWatch`] placed on a mounted
-//! [`UiPanel`] entity resolves `x:Name`s inside the panel's *own* fragment
+//! ECS-UI integration test: a [`NoesisClickWatch`] placed on a mounted
+//! [`UiPanel`] entity resolves `x:Name`s inside the panel's own fragment
 //! namescope (a host-view `FindName` can't see them) and fires a [`UiClicked`]
 //! that targets the panel entity, carrying the host as its `view`. Two instances
 //! of the same fragment XAML stay isolated: clicking one panel's button never
@@ -7,8 +7,6 @@
 //!
 //! This is the buttons-inside-fragments case the `ecs_ui` example sidesteps (it
 //! only watches host-scene buttons and re-targets them at panel entities).
-//!
-//! One `#[test]` per file (thread-affine Noesis runtime, one app per process).
 
 use std::sync::{Arc, Mutex};
 
@@ -41,8 +39,8 @@ const FRAG_XAML: &str = r##"<Button xmlns="http://schemas.microsoft.com/winfx/20
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       x:Name="PanelBtn" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Content="X"/>"##;
 
-// Panels mount + seal over the first frames; press once they are live, release
-// two frames later. These are stimulus timings, not the exit condition.
+// Panels mount and seal over the first frames; press once they are live, release
+// two frames later.
 const PRESS_AT: usize = 25;
 const RELEASE_AT: usize = 27;
 
@@ -133,7 +131,6 @@ fn click_watch_on_panel_entity_resolves_fragment_internal_name() {
         },
     );
 
-    // Exit as soon as the left panel's fragment-internal button has fired.
     let pred_obs = Arc::clone(&observed);
     let pred_ids = Arc::clone(&ids);
     let clicked = run_until(&mut app, 120, move |_app| {
@@ -152,8 +149,7 @@ fn click_watch_on_panel_entity_resolves_fragment_internal_name() {
     eprintln!("--- observed UiClicked: {got:?}; view={view:?} p1={p1:?} p2={p2:?} ---");
 
     // The fragment-internal button fired: a UiClicked targeting its panel entity,
-    // carrying the host view. Before the fix, the watch on a panel entity was
-    // silently ignored (the panel isn't a `scene`), so nothing fired.
+    // carrying the host view.
     assert!(
         clicked,
         "expected a UiClicked from the left panel's fragment button targeting p1 \

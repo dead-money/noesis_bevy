@@ -1,31 +1,24 @@
-//! Opt-in filesystem hot-reload for XAML.
+//! Live XAML editing: watch files on disk and push their new bytes into
+//! [`XamlRegistry`].
 //!
-//! The render pipeline already rebuilds a view whenever the bytes behind its
-//! URI change: [`crate::render`]'s `ensure_scene` spots a fresh `Arc` by
-//! pointer identity and does a full teardown + rebuild, re-attaching every
-//! bridge. The only missing piece for live-editing is something that notices a
-//! file changed on disk and pushes the new bytes into [`XamlRegistry`]. That is
-//! this module.
+//! Requires the off-by-default `hot_reload` cargo feature, which pulls in
+//! `notify` and a background watcher thread. With it on,
+//! [`NoesisPlugin`](crate::NoesisPlugin) adds [`NoesisHotReloadPlugin`].
 //!
-//! Unlike Bevy's own asset file-watcher, this watches *real filesystem paths*
-//! wherever they live — including files loaded outside the `assets/` root via
-//! [`XamlRegistry::insert`] (the `xaml_viewer` example, standalone `.xaml`
-//! files, SDK data directories). Register a `(uri, path)` pair with
-//! [`NoesisHotReload::watch`]; on the next change to that file the bytes are
-//! re-read and re-inserted, and the view rebuilds on the following frame.
+//! Register each file with [`NoesisHotReload::watch`]. Any filesystem path
+//! works, including files outside `assets/` that were staged with
+//! [`XamlRegistry::insert`]. When a watched file changes, [`poll_hot_reload`]
+//! re-reads it and re-inserts the bytes under its URI. In the same frame,
+//! [`NoesisSet::Ensure`](crate::NoesisSet::Ensure) rebuilds every view whose
+//! scene used that URI, as its root or as a merged dictionary.
 //!
-//! Data flow (the second half already existed; hot-reload feeds its front):
-//!
-//! ```text
-//!   file change ─▶ notify thread ─▶ poll_hot_reload ─▶ XamlRegistry::insert
-//!                                                            │ sync_xaml_provider_map
-//!                                                            ▼
-//!                                     SharedXamlMap ─▶ ensure_scene (Arc-swap rebuild)
+//! ```ignore
+//! fn watch_root(hot: Option<Res<NoesisHotReload>>) {
+//!     if let Some(hot) = hot {
+//!         hot.watch("ui/root.xaml", "assets/ui/root.xaml");
+//!     }
+//! }
 //! ```
-//!
-//! Gated behind the off-by-default `hot_reload` cargo feature: it is a
-//! development aid and pulls the `notify` crate plus a background watcher
-//! thread, neither of which a shipped game wants.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -37,45 +30,29 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::xaml::XamlRegistry;
 
-/// Resource that owns the filesystem watcher and the map of watched files to
-/// the [`XamlRegistry`] URIs they back.
+/// The filesystem watcher and the files it maps to [`XamlRegistry`] URIs.
 ///
-/// Present only when the `hot_reload` feature is enabled and the watcher
-/// started successfully; systems should take it as `Option<Res<…>>` so a failed
-/// watcher (or a build that never registered anything) degrades to a no-op
-/// rather than a panic.
-///
-/// Everything mutable lives behind one [`Mutex`], so the resource is `Send +
-/// Sync` and [`watch`](Self::watch) takes `&self` — register files from an
-/// ordinary `Res<NoesisHotReload>` system. The lock is only ever taken on the
-/// main thread (registration and the poll system), so it is never contended;
-/// the `notify` thread only touches the channel, never this map.
+/// Inserted only if the platform watcher starts, so take it as
+/// `Option<Res<NoesisHotReload>>`. [`watch`](Self::watch) takes `&self`, so a
+/// plain `Res` is enough to register files.
 #[derive(Resource)]
 pub struct NoesisHotReload {
     inner: Mutex<Inner>,
 }
 
 struct Inner {
-    /// Kept alive for the lifetime of the resource: dropping it stops the
-    /// background thread and ends all watches.
     watcher: RecommendedWatcher,
-    /// Change events delivered by the `notify` thread. `Receiver` is `!Sync`,
-    /// which is why the whole `Inner` sits behind a `Mutex`.
+    /// `Receiver` is `!Sync`, hence the `Mutex` around `Inner`.
     rx: Receiver<notify::Result<notify::Event>>,
-    /// Canonicalized file path → the `XamlRegistry` URI it feeds. Canonical so
-    /// it matches the paths `notify` reports (which resolve symlinks and `..`).
+    /// Canonical so keys match the paths `notify` reports.
     files: HashMap<PathBuf, String>,
-    /// Directories already handed to `watcher.watch`. We watch parent
-    /// directories (not files) so editor atomic-saves — write-temp-then-rename,
-    /// which replaces the inode the file watch was bound to — still deliver.
-    /// De-duped so N scenes in one folder cost one watch.
+    /// Parent directories are watched, not files, so atomic saves
+    /// (write temp, rename over) still deliver after the inode changes.
     dirs: HashSet<PathBuf>,
 }
 
 impl NoesisHotReload {
-    /// Build a watcher and its resource. Returns `None` (after logging) if the
-    /// platform watcher cannot be created, so the plugin can skip inserting the
-    /// resource and leave hot-reload simply inert.
+    /// `None` (logged) when the platform watcher can't be created.
     fn new() -> Option<Self> {
         let (tx, rx) = channel();
         let watcher = match notify::recommended_watcher(tx) {
@@ -95,14 +72,13 @@ impl NoesisHotReload {
         })
     }
 
-    /// Watch `fs_path` and, whenever it changes on disk, re-read it and
-    /// re-insert its bytes into [`XamlRegistry`] under `uri` — which the render
-    /// pipeline turns into a live view rebuild.
+    /// Watches `fs_path`; on each change its bytes are re-inserted into
+    /// [`XamlRegistry`] under `uri`, which rebuilds the views that use it.
     ///
-    /// `uri` must match the key the scene was registered under (the same string
-    /// passed to [`XamlRegistry::insert`] or used with `AssetServer::load`).
-    /// Registering the same file twice is harmless. Paths that don't exist yet
-    /// (or can't be canonicalized) are logged and skipped rather than watched.
+    /// `uri` must be the registry key the XAML was loaded under (the string
+    /// given to [`XamlRegistry::insert`] or `AssetServer::load`). Watching a
+    /// file again replaces its URI. A path that doesn't exist yet is logged
+    /// and not watched.
     pub fn watch(&self, uri: impl Into<String>, fs_path: impl AsRef<Path>) {
         let uri = uri.into();
         let raw = fs_path.as_ref();
@@ -125,7 +101,6 @@ impl NoesisHotReload {
         };
 
         let mut inner = self.inner.lock().expect("NoesisHotReload mutex poisoned");
-        // First file in this directory: start a (non-recursive) watch on it.
         if inner.dirs.insert(parent.clone()) {
             if let Err(err) = inner.watcher.watch(&parent, RecursiveMode::NonRecursive) {
                 warn!(
@@ -140,22 +115,19 @@ impl NoesisHotReload {
     }
 }
 
-/// Drain pending filesystem events and refresh [`XamlRegistry`] for every
-/// watched file that changed. Runs in `Update`, upstream of the `PostUpdate`
-/// sync that feeds Noesis, so an edit lands in the view on the next frame.
+/// Drains watcher events and re-inserts every changed file into
+/// [`XamlRegistry`]. Runs in `Update`, so the view rebuilds in the same
+/// frame's `PostUpdate`.
 ///
-/// A single save can emit several events (write, chmod, rename); we collapse
-/// them to one re-read per file by URI. Read failures — common mid-save, when
-/// an editor has truncated the file before writing — are logged and dropped;
-/// the trailing event carries the final contents.
-#[allow(clippy::needless_pass_by_value)] // Bevy systems take Res<T> by value
+/// Several events for one save collapse into one re-read. A failed read
+/// (common mid-save) is logged and skipped; a later event carries the final
+/// contents.
+#[allow(clippy::needless_pass_by_value)]
 pub fn poll_hot_reload(hot: Option<Res<NoesisHotReload>>, mut registry: ResMut<XamlRegistry>) {
     let Some(hot) = hot else {
         return;
     };
 
-    // Collect (uri → path) for changed files, then release the watcher lock
-    // before touching the filesystem or the registry.
     let dirty: HashMap<String, PathBuf> = {
         let guard = hot.inner.lock().expect("NoesisHotReload mutex poisoned");
         let mut dirty = HashMap::new();
@@ -171,8 +143,7 @@ pub fn poll_hot_reload(hot: Option<Res<NoesisHotReload>>, mut registry: ResMut<X
                 continue;
             }
             for path in &event.paths {
-                // Canonicalize so a reported path matches our canonical keys;
-                // fall back to the raw path if the file is momentarily gone.
+                // Raw path if the file is momentarily gone mid-save.
                 let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
                 if let Some(uri) = guard.files.get(&key) {
                     dirty.insert(uri.clone(), key);
@@ -200,9 +171,8 @@ pub fn poll_hot_reload(hot: Option<Res<NoesisHotReload>>, mut registry: ResMut<X
     }
 }
 
-/// Which `notify` event kinds should trigger a re-read. Data-bearing changes
-/// (create — atomic saves land as one — and modify) count; metadata-only
-/// `Access` events and removals do not.
+/// `Create` counts because atomic saves arrive as one; `Access` and `Remove`
+/// don't.
 fn is_reload_trigger(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -210,12 +180,9 @@ fn is_reload_trigger(kind: &EventKind) -> bool {
     )
 }
 
-/// Installs [`NoesisHotReload`] and the [`poll_hot_reload`] system.
-///
-/// Added automatically by [`crate::NoesisPlugin`] when the `hot_reload` feature
-/// is on. Registering files to watch is left to the app (via
-/// [`NoesisHotReload::watch`]); this plugin only wires the resource and the
-/// polling.
+/// Inserts [`NoesisHotReload`] and adds [`poll_hot_reload`]. Added by
+/// [`NoesisPlugin`](crate::NoesisPlugin) when the `hot_reload` feature is on;
+/// the app registers the files to watch.
 pub struct NoesisHotReloadPlugin;
 
 impl Plugin for NoesisHotReloadPlugin {

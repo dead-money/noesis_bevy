@@ -1,32 +1,21 @@
-//! Per-view generic dependency-property get/set bridge, keyed by
-//! `(x:Name, property)`.
+//! Read and write any dependency property on a named element, by name.
 //!
-//! Where [`crate::text`] reads and writes the one fixed `Text` property, this
-//! reads and writes *any* named dependency property by name and value type. It's
-//! the binding-free fallback (poke `Slider.Value`, read `CheckBox.IsChecked`,
-//! flip `Button.IsEnabled`) for when wiring a full
-//! [`ViewModel`](crate::viewmodel) would be overkill.
+//! [`crate::text`] covers the `Text` property; this bridge reaches any property
+//! whose value type it supports. Use it for one-off pokes and reads (set
+//! `Slider.Value`, flip `Button.IsEnabled`, watch `ComboBox.SelectedIndex`) when
+//! a [`ViewModel`](crate::viewmodel) would be overkill.
 //!
-//! Add a [`NoesisDp`] component to the view's camera entity. Its `set` map is the
-//! desired value per `(x:Name, property)`, applied to the view's elements
-//! whenever the component changes (Bevy change detection). Its `watch` list names
-//! `(x:Name, property)` pairs to observe; changes surface as a
-//! [`NoesisDpChanged`] message carrying the originating `view` entity.
-//!
-//! # Value types
-//!
-//! Noesis is a float engine: many "numeric" properties (`Slider.Value`,
-//! `Width`, `Opacity`) are **`f32`**, not `f64`, so reach for [`DpKind::F32`] /
-//! [`NoesisDp::set_f32`] there; a `get_f64` against an `f32` property
-//! type-mismatches and reads nothing. `CheckBox.IsChecked` is `Nullable<bool>`
-//! and is *not* reachable through [`DpKind::Bool`]; bind it through a
-//! [`ViewModel`](crate::viewmodel) instead.
+//! Add a [`NoesisDp`] component to the [`NoesisView`](crate::NoesisView) camera
+//! entity. Its `set` map holds the desired value per `(x:Name, property)`; when
+//! the component changes, or the scene is rebuilt, the reconcile system in
+//! [`NoesisSet::Apply`] writes every entry. Its `watch` list names properties to
+//! read each frame; a changed value arrives as a [`NoesisDpChanged`] message.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
 //!     NoesisDp::new()
-//!         .set_f32("VolumeSlider", "Value", 0.8)              // Rust -> UI
-//!         .watch("VolumeSlider", "Value", DpKind::F32),       // subscribe to reads
+//!         .set_f32("VolumeSlider", "Value", 0.8)
+//!         .watch("VolumeSlider", "Value", DpKind::F32),
 //! );
 //!
 //! fn on_change(mut changed: MessageReader<NoesisDpChanged>) {
@@ -36,15 +25,26 @@
 //! }
 //! ```
 //!
-//! Each `x:Name` may be **scope-qualified** with `/` (e.g.
-//! `"Settings/VolumeSlider"`) to reach a property on an element inside a composed
-//! control, whose private namescope a root-level lookup can't see. Plain names
-//! are unchanged.
+//! # Value types
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component, applies writes + polls the
-//! watch list against that view's live scene, and emits messages directly, with
-//! no cross-world queues.
+//! The [`DpValue`] variant must match the property's Noesis type, or the write
+//! fails with a warning and the read returns nothing. Many numeric properties
+//! (`Slider.Value`, `Width`, `Opacity`) are `f32`, not `f64`, so use
+//! [`DpKind::F32`] and [`NoesisDp::set_f32`] for them. `CheckBox.IsChecked` is a
+//! `Nullable<bool>` and can't be reached with [`DpKind::Bool`]; bind it through
+//! a [`ViewModel`](crate::viewmodel) instead.
+//!
+//! # Semantics
+//!
+//! - Writes are one-way: removing an entry from `set` leaves the property at
+//!   its last value.
+//! - Your own writes don't come back as [`NoesisDpChanged`]; only changes made
+//!   by the UI or by XAML (bindings, animations, triggers) do.
+//! - An `x:Name` can be scope-qualified with `/` (`"Settings/VolumeSlider"`) to
+//!   reach an element inside a composed control's private namescope.
+//! - A missing name logs a warning on write; a watch on a missing name stays
+//!   silent until the element appears.
+//! - The bridge acts on view entities only.
 
 use std::collections::HashMap;
 
@@ -53,13 +53,8 @@ use noesis_runtime::view::FrameworkElement;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Value + kind
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A typed dependency-property value crossing the bridge in either direction.
-/// The variant selects the runtime getter/setter, so it must match the
-/// property's actual Noesis type (see the module docs on `f32` vs `f64`).
+/// A typed property value, written or read. The variant must match the
+/// property's Noesis type (see the [module docs](self#value-types)).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DpValue {
     /// A 32-bit float, for Noesis's float-typed properties (`Slider.Value`, `Width`, `Opacity`).
@@ -75,8 +70,8 @@ pub enum DpValue {
 }
 
 impl DpValue {
-    /// Write this value into `element`'s `property` dependency property. Returns
-    /// `false` on unknown property or type mismatch.
+    /// Write this value into `element`'s `property`. `false` on an unknown
+    /// property or a type mismatch.
     #[must_use]
     pub fn write_to(&self, element: &mut FrameworkElement, property: &str) -> bool {
         match self {
@@ -88,10 +83,9 @@ impl DpValue {
         }
     }
 
-    /// Box this value as a `Noesis::BoxedValue<T>` for the code-built style /
-    /// trigger setter path (`Setter.Value`, `Trigger.Value`). The boxed variant
-    /// must match the target property's runtime type, exactly as for
-    /// [`write_to`](Self::write_to) (see the module docs on `f32` vs `f64`).
+    /// Box this value for a style `Setter.Value` or `Trigger.Value`. As with
+    /// [`write_to`](Self::write_to), the variant must match the target property's
+    /// type.
     #[must_use]
     pub fn to_boxed(&self) -> noesis_runtime::binding::Boxed {
         use noesis_runtime::binding::{box_bool, box_f32, box_f64, box_i32, box_string};
@@ -105,7 +99,7 @@ impl DpValue {
     }
 }
 
-/// Which value type to read a watched property as. Picks the runtime getter.
+/// The value type to read a watched property as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DpKind {
     /// Read as a 32-bit float, yielding [`DpValue::F32`].
@@ -121,8 +115,8 @@ pub enum DpKind {
 }
 
 impl DpKind {
-    /// Read `element`'s `property` as this kind. `None` on unknown property or
-    /// type mismatch.
+    /// Read `element`'s `property` as this kind. `None` on an unknown property or
+    /// a type mismatch.
     #[must_use]
     pub fn read_from(self, element: &FrameworkElement, property: &str) -> Option<DpValue> {
         match self {
@@ -135,24 +129,20 @@ impl DpKind {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Watch subscription
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One subscription: an element's `x:Name`, the `property` to read, and the
+/// One watched property: an element's `x:Name`, the `property`, and the
 /// [`DpKind`] to read it as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpWatch {
-    /// `x:Name` of the element to observe.
+    /// `x:Name` of the element; may be scope-qualified (`"Host/Leaf"`).
     pub name: String,
-    /// The dependency property on that element to read.
+    /// The dependency property to read.
     pub property: String,
-    /// The value type to read the property as.
+    /// The value type to read it as.
     pub kind: DpKind,
 }
 
 impl DpWatch {
-    /// Builds a watch on `name`'s `property`, read as `kind`.
+    /// A watch on `name`'s `property`, read as `kind`.
     pub fn new(name: impl Into<String>, property: impl Into<String>, kind: DpKind) -> Self {
         Self {
             name: name.into(),
@@ -162,52 +152,47 @@ impl DpWatch {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view generic DP bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Per-view property bridge. Add it to a [`NoesisView`](crate::NoesisView)
+/// entity; see the [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisDp {
-    /// Desired value per `(x:Name, property)`. Written to the view's elements
-    /// whenever this component changes. Writes to the same key apply last-wins.
+    /// Desired value per `(x:Name, property)`. Every entry is rewritten whenever
+    /// this component changes; removing an entry does not reset the property.
     pub set: HashMap<(String, String), DpValue>,
-    /// `(x:Name, property)` pairs (with read kind) to observe. A change (vs. the
-    /// previous frame) emits a [`NoesisDpChanged`]; the first poll after a watch
-    /// is added always reports, so callers see the current value.
+    /// Properties read every frame. A value that differs from the last read
+    /// sends a [`NoesisDpChanged`]. The first read after a watch is added always
+    /// reports, so you see the starting value, unless your own `set` wrote that
+    /// property.
     pub watch: Vec<DpWatch>,
 }
 
 impl NoesisDp {
-    /// Creates an empty bridge with no writes or watches queued. Chain the
-    /// `set_*` and [`watch`](Self::watch) builders to populate it.
+    /// An empty bridge. Chain the `set_*` and [`watch`](Self::watch) builders.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: queue an `f32` write, the right choice for Noesis's float-typed
-    /// properties (`Slider.Value`, `Width`, `Opacity`, …).
+    /// Builder: write an `f32`, the type of most numeric properties
+    /// (`Slider.Value`, `Width`, `Opacity`).
     #[must_use]
     pub fn set_f32(self, name: impl Into<String>, property: impl Into<String>, value: f32) -> Self {
         self.insert(name, property, DpValue::F32(value))
     }
 
-    /// Builder: queue an `f64` (`Double`) write.
+    /// Builder: write an `f64` (`Double`).
     #[must_use]
     pub fn set_f64(self, name: impl Into<String>, property: impl Into<String>, value: f64) -> Self {
         self.insert(name, property, DpValue::F64(value))
     }
 
-    /// Builder: queue an `i32` write.
+    /// Builder: write an `i32`.
     #[must_use]
     pub fn set_i32(self, name: impl Into<String>, property: impl Into<String>, value: i32) -> Self {
         self.insert(name, property, DpValue::I32(value))
     }
 
-    /// Builder: queue a `bool` write (plain `Boolean` DPs; not
-    /// `CheckBox.IsChecked`).
+    /// Builder: write a plain `Boolean` (not `CheckBox.IsChecked`).
     #[must_use]
     pub fn set_bool(
         self,
@@ -218,7 +203,7 @@ impl NoesisDp {
         self.insert(name, property, DpValue::Bool(value))
     }
 
-    /// Builder: queue a `String` write.
+    /// Builder: write a `String`.
     #[must_use]
     pub fn set_string(
         self,
@@ -229,7 +214,8 @@ impl NoesisDp {
         self.insert(name, property, DpValue::Str(value.into()))
     }
 
-    /// Builder: observe `name`'s `property`, read as `kind`.
+    /// Builder: watch `name`'s `property`, read as `kind`. Duplicates are not
+    /// removed; use [`observe`](Self::observe) to add a watch only once.
     #[must_use]
     pub fn watch(
         mut self,
@@ -241,28 +227,23 @@ impl NoesisDp {
         self
     }
 
-    /// Queue an `f32` write from a system holding `&mut NoesisDp`. The runtime
-    /// counterpart of [`set_f32`](Self::set_f32): the next reconcile applies it
-    /// to the live element.
+    /// In-place form of [`set_f32`](Self::set_f32), for a system holding
+    /// `&mut NoesisDp`. Applied by the next reconcile.
     pub fn write_f32(&mut self, name: impl Into<String>, property: impl Into<String>, value: f32) {
         self.write(name, property, DpValue::F32(value));
     }
 
-    /// Queue an `f64` (`Double`) write from a system holding `&mut NoesisDp`.
-    /// The runtime counterpart of [`set_f64`](Self::set_f64).
+    /// In-place form of [`set_f64`](Self::set_f64).
     pub fn write_f64(&mut self, name: impl Into<String>, property: impl Into<String>, value: f64) {
         self.write(name, property, DpValue::F64(value));
     }
 
-    /// Queue an `i32` write from a system holding `&mut NoesisDp`. The runtime
-    /// counterpart of [`set_i32`](Self::set_i32).
+    /// In-place form of [`set_i32`](Self::set_i32).
     pub fn write_i32(&mut self, name: impl Into<String>, property: impl Into<String>, value: i32) {
         self.write(name, property, DpValue::I32(value));
     }
 
-    /// Queue a `bool` write from a system holding `&mut NoesisDp` (plain
-    /// `Boolean` DPs; not `CheckBox.IsChecked`). The runtime counterpart of
-    /// [`set_bool`](Self::set_bool).
+    /// In-place form of [`set_bool`](Self::set_bool).
     pub fn write_bool(
         &mut self,
         name: impl Into<String>,
@@ -272,8 +253,7 @@ impl NoesisDp {
         self.write(name, property, DpValue::Bool(value));
     }
 
-    /// Queue a `String` write from a system holding `&mut NoesisDp`. The runtime
-    /// counterpart of [`set_string`](Self::set_string).
+    /// In-place form of [`set_string`](Self::set_string).
     pub fn write_string(
         &mut self,
         name: impl Into<String>,
@@ -283,9 +263,8 @@ impl NoesisDp {
         self.write(name, property, DpValue::Str(value.into()));
     }
 
-    /// Observe `name`'s `property`, read as `kind`, from a system holding
-    /// `&mut NoesisDp`. No-op if that exact subscription is already watched. The
-    /// runtime counterpart of [`watch`](Self::watch).
+    /// In-place form of [`watch`](Self::watch). No-op if the same watch already
+    /// exists.
     pub fn observe(&mut self, name: impl Into<String>, property: impl Into<String>, kind: DpKind) {
         let watch = DpWatch::new(name, property, kind);
         if !self.watch.contains(&watch) {
@@ -308,12 +287,8 @@ impl NoesisDp {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back message
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when a watched property differs from the previous frame's snapshot.
-/// Read with `MessageReader<NoesisDpChanged>`.
+/// Sent when a watched property's value differs from the last read. Not sent
+/// for values written through [`NoesisDp::set`].
 #[derive(Message, Debug, Clone)]
 pub struct NoesisDpChanged {
     /// The [`NoesisView`](crate::NoesisView) entity whose property changed.
@@ -326,12 +301,8 @@ pub struct NoesisDpChanged {
     pub value: DpValue,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisDp`]: apply desired writes when the component
-/// changed, then poll its watch list and emit [`NoesisDpChanged`].
+/// Apply each view's [`NoesisDp`] writes when it changed or the scene was
+/// rebuilt, then poll its watches and send [`NoesisDpChanged`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_dp_bridge(
     views: Query<(Entity, Ref<NoesisDp>)>,
@@ -356,12 +327,8 @@ pub(crate) fn sync_dp_bridge(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Wires the per-view generic DP bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the [`NoesisDp`] reconcile system and [`NoesisDpChanged`]. Added
+/// by [`crate::NoesisPlugin`].
 pub struct NoesisDpPlugin;
 
 impl Plugin for NoesisDpPlugin {

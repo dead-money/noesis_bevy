@@ -1,60 +1,48 @@
-//! Per-view `ItemsSource` bridge: populate XAML list controls
-//! (`ComboBox` / `ListBox` / `ItemsControl`) from a Bevy app, with typed items.
+//! Fills XAML list controls (`ComboBox`, `ListBox`, `ItemsControl`) from Bevy.
 //!
-//! Add a [`NoesisItems`] component to the view's camera entity mapping each list
-//! control's `x:Name` to its desired items. The reconcile system keeps a
-//! Rust-owned [`ObservableCollection`]
-//! per `(view, x:Name)`, sets it to the desired list whenever the component
-//! changes, and binds it to the element's `ItemsSource` once the element exists
-//! (re-binding after a scene rebuild).
+//! Add a [`NoesisItems`] component to the [`NoesisView`](crate::NoesisView)
+//! camera entity, mapping each list control's `x:Name` to its items. The
+//! bridge keeps one observable collection per `(view, x:Name)`, updates it
+//! when the component changes, and binds it to the control's `ItemsSource`
+//! once the element exists, again after each scene rebuild. Lists whose
+//! items are unchanged are left alone, so editing one list doesn't reset the
+//! selection or scroll of the others.
 //!
-//! # Typed items
+//! For per-row entities with diffed updates and selection markers, use
+//! [`UiList`](crate::UiList) instead.
 //!
-//! Items are [`ItemValue`]s: strings, `i32`, `f64`, or `bool`. The safe
-//! `ObservableCollection` surface (`unsafe_code = forbid`) boxes each kind with
-//! the matching `push_*`, so a list can be e.g. integers (`<ListBox>` of port
-//! numbers) or strings (`ComboBox` of text options). [`with`](NoesisItems::with)
-//! stays string-compatible (`with("Combo", ["Low", "High"])` still works,
-//! because `&str` is `Into<ItemValue>`) and accepts any homogeneous typed
-//! iterator (`with("Ports", [80, 443])`); use
-//! [`with_items`](NoesisItems::with_items) for an explicit / mixed list.
+//! # Items
 //!
-//! ```ignore
+//! Items are [`ItemValue`]s: strings, `i32`, `f64` or `bool`.
+//! [`with`](NoesisItems::with) takes any iterator of values that convert into
+//! [`ItemValue`]; [`with_items`](NoesisItems::with_items) takes an explicit,
+//! possibly mixed list. For rows a `DataTemplate` binds by property name, use
+//! [`with_objects`](NoesisItems::with_objects).
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use noesis_bevy::NoesisItems;
+//! # fn fill(mut commands: Commands, view: Entity) {
 //! commands.entity(view).insert(
 //!     NoesisItems::new()
-//!         .with("QualityCombo", ["Low", "Medium", "High"]) // strings
-//!         .with("PortList", [80, 443, 8080])               // i32
-//!         .select("PortList", 1),                          // drive selection
+//!         .with("QualityCombo", ["Low", "Medium", "High"])
+//!         .with("PortList", [80, 443, 8080])
+//!         .select("PortList", 1),
 //! );
+//! # }
 //! ```
 //!
-//! # Selection read-back
+//! # Selection and current item
 //!
-//! [`select`](NoesisItems::select) drives a control's `SelectedIndex` (and its
-//! current item). Each frame the bridge emits a [`NoesisItemsCurrent`] message
-//! carrying the control's item `count`, its `selected_index`, the view's
-//! `current_position`, and the *typed* `current` item read back out of Noesis
-//! (via an `ICollectionView`'s `CurrentItem` accessors), proving the typed
-//! value made the round trip through the engine, not just the Rust copy.
+//! [`select`](NoesisItems::select) sets a control's `SelectedIndex`, and
+//! [`navigate`](NoesisItems::navigate) moves the current item of the list's
+//! default `ICollectionView` with a [`CollectionViewOp`]. When a control's item
+//! count, selected index or current item changes, including from user input,
+//! the bridge writes a [`NoesisItemsCurrent`] message with the current item
+//! read back from Noesis as an [`ItemValue`].
 //!
-//! # Collection-view navigation
-//!
-//! Every bound list also has a default `ICollectionView` over its source (the
-//! same shared view a `Selector` synchronizes against). [`navigate`](NoesisItems::navigate)
-//! drives that view's *current item* with a [`CollectionViewOp`]
-//! (`First`/`Last`/`Next`/`Previous`/`To(pos)`), mirroring
-//! `ICollectionView::MoveCurrentTo*`. The op is applied once each time the
-//! component changes; the resulting `current_position` / `current` item surface
-//! via [`NoesisItemsCurrent`]. Sorting, filtering and grouping are a genuine
-//! Noesis SDK limitation (no programmatic `SortDescription`/`Filter` is
-//! exposed), so they are intentionally absent. See
+//! Sorting, filtering and grouping are not available; see
 //! [`noesis_runtime::collection_view`].
-//!
-//! # Lifetime & threading
-//!
-//! Collections are owned in [`NoesisRenderState`](crate::render) (Noesis objects
-//! are thread-affine to the `View`) and released before
-//! `noesis_runtime::shutdown`.
 
 use std::collections::HashMap;
 
@@ -69,22 +57,16 @@ use noesis_runtime::view::FrameworkElement;
 
 use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Typed item value
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One typed list item. The variant selects the runtime boxing
-/// (`push_string` / `push_i32` / `push_f64` / `push_bool`) and the matching
-/// unbox used when reading the current item back.
+/// One list item, boxed in Noesis as the matching primitive type.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemValue {
-    /// A string item (`push_string`).
+    /// A string item.
     Str(String),
-    /// A 32-bit integer item (`push_i32`).
+    /// A 32-bit integer item.
     I32(i32),
-    /// A 64-bit float item (`push_f64`).
+    /// A 64-bit float item.
     F64(f64),
-    /// A boolean item (`push_bool`).
+    /// A boolean item.
     Bool(bool),
 }
 
@@ -125,7 +107,6 @@ impl From<bool> for ItemValue {
 }
 
 impl ItemValue {
-    /// Append this item to `coll` with the boxing matching its variant.
     fn push_into(&self, coll: &mut ObservableCollection) {
         match self {
             Self::Str(v) => {
@@ -143,8 +124,6 @@ impl ItemValue {
         }
     }
 
-    /// The dependency-property [`PropType`] backing this value when it is a
-    /// field of an object item (see [`NoesisItems::with_objects`]).
     fn prop_type(&self) -> PropType {
         match self {
             Self::Str(_) => PropType::String,
@@ -154,7 +133,6 @@ impl ItemValue {
         }
     }
 
-    /// Write this value into `instance`'s dependency property at `index`.
     fn set_on(&self, instance: Instance, index: u32) {
         match self {
             Self::Str(v) => instance.set_string(index, v),
@@ -165,22 +143,20 @@ impl ItemValue {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Object items
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One bindable object item: an ordered list of `(property name, typed value)`
-/// pairs. Each pair becomes a dependency property on a Rust-backed Noesis class
-/// (a [`ClassBase::Freezable`] data object), so a `DataTemplate` can bind
-/// `{Binding <name>}` against it.
+/// One bindable object item as `(property name, value)` pairs. Each pair
+/// becomes a dependency property on a generated Noesis class, so a
+/// `DataTemplate` can bind `{Binding <name>}` against it.
 pub type ObjectRow = Vec<(String, ItemValue)>;
 
-/// A list of bindable object items for one `ItemsControl` / `ListBox`, plus the
-/// Noesis class name to register them under. The schema (property names + types)
-/// is taken from the first row; every row should carry the same fields.
+/// Bindable object items for one list control, plus the Noesis class name to
+/// register them under.
 ///
-/// `class_name` must be globally unique among registered Noesis classes (it is
-/// registered once, on first use, and held for the binding's lifetime).
+/// The class is registered the first time the list gets a non-empty source,
+/// with property names and types taken from that first row. Later fields not
+/// in that schema are ignored, and the class name and schema stay fixed until
+/// the list is removed. `class_name` must not collide with another registered
+/// Noesis class; if registration fails the items aren't applied and a warning
+/// is logged.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectSource {
     /// Noesis class name registered for these item objects.
@@ -189,18 +165,15 @@ pub struct ObjectSource {
     pub rows: Vec<ObjectRow>,
 }
 
-/// No-op [`PropertyChangeHandler`] for item objects: their dependency properties
-/// are written once at construction and never mutated, so changes need no
-/// forwarding.
+/// Item properties are written once at construction, so changes need no forwarding.
 struct NoopChangeHandler;
 
 impl PropertyChangeHandler for NoopChangeHandler {
     fn on_changed(&self, _instance: Instance, _prop_index: u32, _value: PropertyValue<'_>) {}
 }
 
-/// Unbox an `ICollectionView` current item into a typed [`ItemValue`], probing
-/// each boxed primitive type (the boxes are mutually exclusive, so only the
-/// pushed kind matches). `None` if the item is not a boxed primitive.
+/// `None` if the item is not a boxed primitive. The boxed types are mutually
+/// exclusive, so probe order doesn't matter.
 fn current_item_value(item: &CurrentItem) -> Option<ItemValue> {
     if let Some(s) = item.as_string() {
         return Some(ItemValue::Str(s));
@@ -217,16 +190,12 @@ fn current_item_value(item: &CurrentItem) -> Option<ItemValue> {
     None
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Collection-view navigation
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One `ICollectionView` current-item navigation op, mirroring
-/// `ICollectionView::MoveCurrentTo*`. Applied to a bound list's default view.
+/// A move of the current item in a list's default `ICollectionView`
+/// (`ICollectionView::MoveCurrentTo*`).
 ///
-/// `First`/`Last`/`To` are absolute (idempotent); `Next`/`Previous` are relative
-/// and step from the current position each time they are applied. The bridge
-/// applies the op once per [`NoesisItems`] change (see the module docs).
+/// `First`, `Last` and `To` are absolute. `Next` and `Previous` step from the
+/// current position each time they are applied, and [`NoesisItems`] applies
+/// its op on every change to the component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionViewOp {
     /// `MoveCurrentToFirst`.
@@ -242,8 +211,7 @@ pub enum CollectionViewOp {
 }
 
 impl CollectionViewOp {
-    /// Apply this op to `view`, returning the raw `bool` Noesis reports (its
-    /// boundary meaning is an SDK detail; query the resulting position instead).
+    /// Returns the raw Noesis result; query the position for the actual outcome.
     fn apply(self, view: &CollectionView) -> bool {
         match self {
             Self::First => view.move_current_to_first(),
@@ -255,48 +223,41 @@ impl CollectionViewOp {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-view component: desired item list per list-control `x:Name`. Attach to a
-/// [`NoesisView`](crate::NoesisView) entity. Setting a list replaces the
-/// control's items (the collection is observable, so the live control updates
-/// without a view rebuild). [`select`](Self::select) drives a control's
-/// selected index.
+/// Items, selection and navigation for list controls, keyed by `x:Name`.
+///
+/// Add it to a [`NoesisView`](crate::NoesisView) camera entity; it has no
+/// effect on a [`UiPanel`](crate::UiPanel). Changing a list replaces the
+/// control's items without rebuilding the view. Removing a name stops
+/// updating that control, and removing the component detaches every list it
+/// bound. Unknown names and controls that aren't `ItemsControl`s log a warning.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisItems {
-    /// Desired items per `x:Name`.
+    /// Primitive items per `x:Name`.
     pub sources: HashMap<String, Vec<ItemValue>>,
-    /// Desired selected index per `x:Name` (`-1` clears the selection). Applied
-    /// when the component changes; the resulting selection surfaces via
-    /// [`NoesisItemsCurrent`].
+    /// `SelectedIndex` per `x:Name` (`-1` clears the selection). Pushed when the
+    /// value changes, when the list's items are replaced, and after a scene
+    /// rebuild. The user can still change the selection in between.
     pub select: HashMap<String, i32>,
-    /// Desired collection-view navigation op per `x:Name`. Applied to the
-    /// control's default `ICollectionView` once each time the component changes;
-    /// the resulting current item surfaces via [`NoesisItemsCurrent`].
+    /// Current-item move per `x:Name`, applied once on every change to the
+    /// component (so `Next` steps again even when an unrelated field changed).
+    /// When both are set, it runs after [`select`](field@Self::select) and wins.
     pub navigate: HashMap<String, CollectionViewOp>,
-    /// Desired bindable **object** items per `x:Name`, for lists whose
-    /// `ItemTemplate`/`DataTemplate` binds per-item properties (`{Binding Name}`,
-    /// `{Binding Score}`, ...). A control should appear in either [`Self::sources`]
-    /// (primitive items) or here, not both. If a name appears in both, the object
-    /// items take precedence: the primitive [`Self::sources`] entry is ignored and
-    /// a warning is logged.
+    /// Object items per `x:Name`, for lists whose `DataTemplate` binds item
+    /// properties (`{Binding Name}`). A name in both this and [`Self::sources`]
+    /// uses the object items and logs a warning.
     pub objects: HashMap<String, ObjectSource>,
 }
 
 impl NoesisItems {
-    /// An empty component with no sources, selection, navigation, or object
-    /// items. Build it up with [`with`](Self::with), [`select`](Self::select),
-    /// and the other builders.
+    /// An empty component. Build it up with [`with`](Self::with),
+    /// [`select`](Self::select) and the other builders.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: set element `name`'s items from any homogeneous typed iterator.
-    /// `&str` / `String` / `i32` / `f64` / `bool` all convert, so the original
-    /// string usage (`with("Combo", ["a", "b"])`) is unchanged.
+    /// Sets `name`'s items from any iterator of `&str`, `String`, `i32`, `f64`
+    /// or `bool`.
     #[must_use]
     pub fn with(
         mut self,
@@ -308,8 +269,7 @@ impl NoesisItems {
         self
     }
 
-    /// Builder: set element `name`'s items from an explicit (possibly mixed)
-    /// [`ItemValue`] list.
+    /// Sets `name`'s items from an explicit, possibly mixed, [`ItemValue`] list.
     #[must_use]
     pub fn with_items(
         mut self,
@@ -321,25 +281,23 @@ impl NoesisItems {
         self
     }
 
-    /// Builder: drive element `name`'s `SelectedIndex` to `index` (`-1` clears).
+    /// Sets `name`'s `SelectedIndex` (`-1` clears). See the [`select`](field@Self::select) field.
     #[must_use]
     pub fn select(mut self, name: impl Into<String>, index: i32) -> Self {
         self.select.insert(name.into(), index);
         self
     }
 
-    /// Builder: drive element `name`'s default `ICollectionView` current item
-    /// with a [`CollectionViewOp`]. Applied once per component change.
+    /// Moves `name`'s current item. See the [`navigate`](field@Self::navigate) field.
     #[must_use]
     pub fn navigate(mut self, name: impl Into<String>, op: CollectionViewOp) -> Self {
         self.navigate.insert(name.into(), op);
         self
     }
 
-    /// Builder: set element `name`'s items to bindable **objects** registered as
-    /// the Noesis class `class_name`. Each row is the item's `(property, value)`
-    /// fields; the `DataTemplate` binds `{Binding <property>}` against them. The
-    /// schema is taken from the first row.
+    /// Sets `name`'s items to bindable objects of the Noesis class
+    /// `class_name`. Each row is one item's `(property, value)` fields; see
+    /// [`ObjectSource`] for how the class schema is fixed.
     #[must_use]
     pub fn with_objects(
         mut self,
@@ -357,9 +315,8 @@ impl NoesisItems {
         self
     }
 
-    /// Set element `name`'s items from a system holding `&mut NoesisItems`, from
-    /// any homogeneous typed iterator. The runtime counterpart of
-    /// [`with`](Self::with): the next reconcile pushes them to the live control.
+    /// In-place form of [`with`](Self::with), for a system holding
+    /// `&mut NoesisItems`.
     pub fn set(
         &mut self,
         name: impl Into<String>,
@@ -369,8 +326,7 @@ impl NoesisItems {
             .insert(name.into(), items.into_iter().map(Into::into).collect());
     }
 
-    /// Set element `name`'s items from an explicit (possibly mixed) [`ItemValue`]
-    /// list. The runtime counterpart of [`with_items`](Self::with_items).
+    /// In-place form of [`with_items`](Self::with_items).
     pub fn set_items(
         &mut self,
         name: impl Into<String>,
@@ -380,23 +336,17 @@ impl NoesisItems {
             .insert(name.into(), items.into_iter().collect());
     }
 
-    /// Drive element `name`'s `SelectedIndex` to `index` (`-1` clears) from a
-    /// system holding `&mut NoesisItems`. The runtime counterpart of
-    /// [`select`](Self::select).
+    /// In-place form of [`select`](Self::select()).
     pub fn set_selection(&mut self, name: impl Into<String>, index: i32) {
         self.select.insert(name.into(), index);
     }
 
-    /// Drive element `name`'s default `ICollectionView` current item with a
-    /// [`CollectionViewOp`] from a system holding `&mut NoesisItems`. The runtime
-    /// counterpart of [`navigate`](Self::navigate).
+    /// In-place form of [`navigate`](Self::navigate()).
     pub fn set_navigation(&mut self, name: impl Into<String>, op: CollectionViewOp) {
         self.navigate.insert(name.into(), op);
     }
 
-    /// Set element `name`'s items to bindable objects registered as the Noesis
-    /// class `class_name`. The runtime counterpart of
-    /// [`with_objects`](Self::with_objects); see it for the row schema.
+    /// In-place form of [`with_objects`](Self::with_objects).
     pub fn set_objects(
         &mut self,
         name: impl Into<String>,
@@ -413,61 +363,34 @@ impl NoesisItems {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Render-world binding: ItemsBinding
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One element's Rust-owned items list: an [`ObservableCollection`], a
-/// [`CollectionViewSource`] over it (for typed current-item read-back), and the
-/// URI of the scene it's currently bound to. Owned by
-/// [`NoesisRenderState`](crate::render), released before runtime shutdown.
+/// The Noesis collection behind one [`NoesisItems`] list, with a collection
+/// view over it for current-item read-back.
 ///
-/// `pub` so headless tests can exercise the same op → collection translation the
-/// render systems use; apps drive it through [`NoesisItems`], never directly.
+/// Public for tests that drive the collection directly. Apps use
+/// [`NoesisItems`].
 pub struct ItemsBinding {
     coll: ObservableCollection,
-    /// Source of the view over `coll`. Declared after `coll` so it drops first
-    /// (it holds a ref to `coll`).
+    // Declared after `coll` so it drops first; it holds a ref to `coll`.
     cvs: CollectionViewSource,
-    /// Cached `ICollectionView` over `coll`, used to read the current item back
-    /// as a typed value. Held for the binding's lifetime: dropping it would let
-    /// Noesis discard the cached view and rebuild a fresh one (current position
-    /// reset to the first item) on the next `GetView`.
+    // Held for the binding's lifetime: dropping it lets Noesis rebuild the view
+    // on the next `GetView`, resetting the current position.
     view: Option<CollectionView>,
     bound_for_uri: Option<String>,
-    /// Last typed source pushed via [`Self::set_typed`], so an unchanged source
-    /// on a component change is skipped instead of cleared+repushed (a clear
-    /// would reset the control's selection and scroll — "Reset is the enemy").
-    /// Invalidated (`None`) by any other mutation of `coll`.
+    // Skips an unchanged source: a clear resets the control's selection and scroll.
+    // `None` after any other mutation of `coll`.
     applied_typed: Option<Vec<ItemValue>>,
-    /// Last object source pushed via [`Self::set_objects`], skipped when equal for
-    /// the same reason as [`Self::applied_typed`].
     applied_objects: Option<ObjectSource>,
-    /// Desired selected index from [`NoesisItems::select`] (`None` = leave the
-    /// control's selection alone).
     desired_select: Option<i32>,
-    /// Last index actually pushed onto the control / view, so selection is
-    /// driven once per change rather than every frame.
     applied_select: Option<i32>,
-    /// Desired collection-view navigation op from [`NoesisItems::navigate`]
-    /// (`None` = leave the view's current item alone).
     desired_nav: Option<CollectionViewOp>,
-    /// Set when [`Self::set_desired_nav`] records an op on a component change;
-    /// cleared once [`Self::drive_navigation`] applies it. Relative ops
-    /// (`Next`/`Previous`) re-fire on each change rather than only on op change.
+    // Re-armed on every component change so `Next`/`Previous` step again.
     nav_pending: bool,
-    /// Last `(count, selected_index, current_position, current)` reported, to
-    /// emit a message only on change.
     last_readback: Option<(usize, i32, i32, Option<ItemValue>)>,
-    /// Live object-item instances (for object sources). Holds a `+1` ref each;
-    /// declared before `obj_registration` so they release before the class
-    /// unregisters (the C++ refcount rule).
+    // Declared before `obj_registration`: instances must release before the
+    // class unregisters.
     obj_instances: Vec<ClassInstance>,
-    /// Property-name order of the object-item class, for name → DP-index writes.
     obj_schema: Vec<String>,
-    /// Registration of the object-item class (registered once, on first use).
-    /// Declared last so it drops after `coll` (releases its item refs) and
-    /// `obj_instances`.
+    // Declared last so it drops after `coll` and `obj_instances` release their refs.
     obj_registration: Option<ClassRegistration>,
 }
 
@@ -478,7 +401,7 @@ impl Default for ItemsBinding {
 }
 
 impl ItemsBinding {
-    /// A fresh, empty, unbound items collection (with its view over it).
+    /// An empty, unbound collection.
     #[must_use]
     pub fn new() -> Self {
         let coll = ObservableCollection::new();
@@ -503,7 +426,7 @@ impl ItemsBinding {
         }
     }
 
-    /// Replace the whole list with string items (back-compat string API).
+    /// Replaces the whole list with string items.
     pub fn set<I, S>(&mut self, items: I)
     where
         I: IntoIterator<Item = S>,
@@ -518,10 +441,8 @@ impl ItemsBinding {
         self.applied_select = None;
     }
 
-    /// Replace the whole list with typed items. No-op when `items` is unchanged
-    /// since the last call, so mutating one list in a [`NoesisItems`] component
-    /// (which re-applies every name) does not clear this one and reset its
-    /// selection and scroll.
+    /// Replaces the whole list with typed items. Does nothing when `items` equals
+    /// the last call's, so the control keeps its selection and scroll.
     pub fn set_typed(&mut self, items: &[ItemValue]) {
         if self.applied_typed.as_deref() == Some(items) {
             return;
@@ -535,9 +456,8 @@ impl ItemsBinding {
         self.applied_select = None;
     }
 
-    /// Replace the whole list with bindable object items. Registers the item
-    /// class on first use (schema from the first row), then rebuilds the
-    /// instances and the backing collection. No-op (clears) for an empty source.
+    /// Replaces the whole list with object items, registering the class on first
+    /// non-empty use (see [`ObjectSource`]).
     pub(crate) fn set_objects(&mut self, src: &ObjectSource) {
         if self.applied_objects.as_ref() == Some(src) {
             return;
@@ -595,46 +515,42 @@ impl ItemsBinding {
         self.applied_select = None;
     }
 
-    /// Append one string item.
+    /// Appends one string item.
     pub fn push(&mut self, item: &str) {
         self.coll.push_string(item);
         self.invalidate_applied();
     }
 
-    /// Append one typed item.
+    /// Appends one typed item.
     pub fn push_value(&mut self, item: &ItemValue) {
         item.push_into(&mut self.coll);
         self.invalidate_applied();
     }
 
-    /// Remove the item at `index` (ignored if out of range).
+    /// Removes the item at `index`; out of range does nothing.
     pub fn remove_at(&mut self, index: usize) {
         self.coll.remove_at(index);
         self.invalidate_applied();
     }
 
-    /// Empty the list.
+    /// Empties the list.
     pub fn clear(&mut self) {
         self.coll.clear();
         self.invalidate_applied();
     }
 
-    /// Forget the last-applied source snapshots after an imperative edit, so the
-    /// next declarative [`Self::set_typed`] / [`Self::set_objects`] re-pushes even
-    /// if its value matches the pre-edit one.
     fn invalidate_applied(&mut self) {
         self.applied_typed = None;
         self.applied_objects = None;
     }
 
-    /// The backing collection, for handing to
+    /// The backing collection, for
     /// [`FrameworkElement::set_items_source`](noesis_runtime::view::FrameworkElement::set_items_source).
     #[must_use]
     pub fn collection(&self) -> &ObservableCollection {
         &self.coll
     }
 
-    /// Set the desired selected index (`None` = leave selection alone).
     pub(crate) fn set_desired_select(&mut self, index: Option<i32>) {
         if self.desired_select != index {
             self.desired_select = index;
@@ -642,9 +558,6 @@ impl ItemsBinding {
         }
     }
 
-    /// Set the desired collection-view navigation op (`None` = leave the current
-    /// item alone). Called once per component change, so relative ops re-arm on
-    /// each change even when the op value is unchanged.
     pub(crate) fn set_desired_nav(&mut self, op: Option<CollectionViewOp>) {
         self.desired_nav = op;
         if op.is_some() {
@@ -660,16 +573,13 @@ impl ItemsBinding {
         self.bound_for_uri = Some(uri.to_owned());
     }
 
-    /// Detach (logically) so the next bind pass re-binds against the rebuilt
-    /// scene. Called from scene teardown.
+    /// Called from scene teardown so the next pass binds to the rebuilt scene.
     pub(crate) fn reset_bind(&mut self) {
         self.bound_for_uri = None;
-        // The control is new; its selection must be re-driven.
         self.applied_select = None;
     }
 
-    /// The cached `ICollectionView` over the collection (lazily re-fetched if it
-    /// was never produced, e.g. the source was empty at construction).
+    /// Re-fetched lazily if construction produced no view.
     fn view(&mut self) -> Option<&CollectionView> {
         if self.view.is_none() {
             self.view = self.cvs.view();
@@ -677,9 +587,8 @@ impl ItemsBinding {
         self.view.as_ref()
     }
 
-    /// Drive `element`'s selected index (and the view's current item) to the
-    /// desired index, once per change. No-op when no selection is desired or it
-    /// is already applied.
+    /// Pushes the desired index onto the control and the view's current item,
+    /// once per change.
     pub(crate) fn drive_selection(&mut self, element: &mut FrameworkElement) {
         let Some(index) = self.desired_select else {
             return;
@@ -688,7 +597,6 @@ impl ItemsBinding {
             return;
         }
         let ok = element.set_selected_index(index);
-        // Mirror onto the view's current item so the typed read-back reflects it.
         if let Some(view) = self.view() {
             view.move_current_to_position(index);
         }
@@ -697,9 +605,6 @@ impl ItemsBinding {
         }
     }
 
-    /// Apply the pending collection-view navigation op (set via
-    /// [`Self::set_desired_nav`]) to the view's current item, once per change.
-    /// No-op when no op is pending or the view is unavailable.
     pub(crate) fn drive_navigation(&mut self) {
         if !self.nav_pending {
             return;
@@ -714,23 +619,22 @@ impl ItemsBinding {
         }
     }
 
-    /// Apply a collection-view navigation op directly and report whether the
-    /// view accepted the move. Imperative counterpart of the declarative
-    /// [`NoesisItems::navigate`] path; query [`Self::current_position`] /
-    /// [`Self::current_item_value`] for the resulting state.
+    /// Applies `op` to the current item and returns the raw Noesis result, or
+    /// `false` when there is no view. Read [`Self::current_position`] for the
+    /// outcome.
     pub fn navigate(&mut self, op: CollectionViewOp) -> bool {
         self.view().is_some_and(|view| op.apply(view))
     }
 
-    /// The view's current ordinal position (`-1` before first, `count` after
-    /// last), or `-1` when no view exists yet.
+    /// The current item's index: `-1` before the first item or when there is no
+    /// view, `count` after the last.
     #[must_use]
     pub fn current_position(&mut self) -> i32 {
         self.view().map_or(-1, CollectionView::current_position)
     }
 
-    /// The view's current item unboxed to its typed [`ItemValue`], or `None`
-    /// when the cursor is off the ends (or the item is not a boxed primitive).
+    /// The current item as an [`ItemValue`], or `None` when the position is
+    /// off either end or the item is an object.
     #[must_use]
     pub fn current_item_value(&mut self) -> Option<ItemValue> {
         self.view()
@@ -738,11 +642,8 @@ impl ItemsBinding {
             .and_then(|item| current_item_value(&item))
     }
 
-    /// Read `(count, selected_index, current_position, current-typed-value)` for
-    /// `element`, returning it only when it differs from the last report.
-    /// `count` is the control's item count; `selected_index` its `SelectedIndex`;
-    /// `current_position` the view's `CurrentPosition`; `current` the view's
-    /// current item unboxed to its [`ItemValue`].
+    /// `(count, selected_index, current_position, current)`, or `None` when
+    /// unchanged since the last call.
     pub(crate) fn read_changed(
         &mut self,
         element: &FrameworkElement,
@@ -760,12 +661,9 @@ impl ItemsBinding {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Read-back message
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when a bound list control's `(count, selected_index, current item)`
-/// differs from the previous frame. Read with `MessageReader<NoesisItemsCurrent>`.
+/// A [`NoesisItems`] list control's count, selection or current item changed,
+/// whether from the component or from user input. The first message for a
+/// list arrives once its control is found in the scene.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisItemsCurrent {
     /// The [`NoesisView`](crate::NoesisView) entity owning the control.
@@ -779,18 +677,11 @@ pub struct NoesisItemsCurrent {
     /// The default `ICollectionView`'s `CurrentPosition` (`-1` before first,
     /// `count` after last).
     pub current_position: i32,
-    /// The view's current item unboxed to its typed value, or `None` when the
-    /// cursor is off the ends (or the item is not a boxed primitive).
+    /// The current item, or `None` when the position is off either end or the
+    /// item is an object.
     pub current: Option<ItemValue>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Reconcile every view's [`NoesisItems`]: set collections + selection when the
-/// component changed, (re-)bind them to their elements each frame, and emit a
-/// [`NoesisItemsCurrent`] when a control's selection/count changes.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_items_bridge(
     views: Query<(Entity, Ref<NoesisItems>)>,
@@ -828,7 +719,8 @@ impl ReapOnRemove for NoesisItems {
     }
 }
 
-/// Wires the per-view `ItemsSource` bridge. Added transitively by [`crate::NoesisPlugin`].
+/// Runs the [`NoesisItems`] bridge in [`NoesisSet::Apply`] and registers
+/// [`NoesisItemsCurrent`]. [`NoesisPlugin`](crate::NoesisPlugin) adds it.
 pub struct NoesisItemsPlugin;
 
 impl Plugin for NoesisItemsPlugin {

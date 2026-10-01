@@ -1,16 +1,17 @@
-//! Per-view routed-event bridge: surface `BaseButton::Click` and
-//! `UIElement::KeyDown` from named elements of a single [`crate::NoesisView`] as
-//! both Bevy messages **and** Bevy `EntityEvent`s (observers).
+//! Button clicks and key presses from named elements, delivered as Bevy
+//! messages and as observer events.
 //!
-//! Add a [`NoesisClickWatch`] / [`NoesisKeyDownWatch`] component to the view's
-//! camera entity listing the `x:Name`s to observe. The reconcile systems keep
-//! each view's live subscription set in sync. A fired event surfaces two ways:
+//! Add a [`NoesisClickWatch`] or [`NoesisKeyDownWatch`] listing `x:Name`s to a
+//! [`NoesisView`](crate::NoesisView) camera entity or a [`UiPanel`](crate::UiPanel)
+//! entity. The bridge keeps one subscription per listed name, adding and
+//! removing them as the list changes. Each `Click` (from any `BaseButton`) or
+//! `KeyDown` arrives twice:
 //!
-//! * as a [`NoesisClicked`] / [`NoesisKeyDown`] **message** carrying the
-//!   originating `view` entity (the original, pull-based API), and
-//! * as a [`UiClicked`] / [`UiKeyDown`] **`EntityEvent`** targeting the watch
-//!   entry's `target` entity (defaulting to the `view` entity), so an observer
-//!   recovers the clicked entity via `On::event_target`.
+//! * as a [`NoesisClicked`] / [`NoesisKeyDown`] message carrying the view entity,
+//!   and
+//! * as a [`UiClicked`] / [`UiKeyDown`] [`EntityEvent`] targeting the watch
+//!   entry's `target`: the view entity by default, or the panel entity for a
+//!   watch on a panel.
 //!
 //! ```ignore
 //! commands.entity(view).insert((
@@ -18,21 +19,21 @@
 //!     NoesisKeyDownWatch::new([KeyDownWatchEntry::new("CommandInput").swallow(Key::Return)]),
 //! ));
 //!
-//! // Pull-based (messages):
 //! fn on_click(mut clicks: MessageReader<NoesisClicked>) {
-//!     for ev in clicks.read() { /* ev.view: Entity, ev.name: String */ }
+//!     for ev in clicks.read() { /* ev.view, ev.name */ }
 //! }
 //!
-//! // Push-based (observer): the trigger target IS the panel entity.
+//! // On a panel watch, the event target is the panel entity.
 //! fn observe_click(on: On<UiClicked>, panels: Query<&Health>) {
-//!     if let Ok(hp) = panels.get(on.event_target()) { /* … */ }
+//!     if let Ok(hp) = panels.get(on.event_target()) { /* ... */ }
 //! }
 //! ```
 //!
-//! Click/keydown callbacks fire on the main thread (during the view's
-//! `View::update`); they push `(view, target, name[, key])` onto a small queue
-//! that the `PreUpdate` drain turns into messages + triggered events the next
-//! frame. The drain holds no Noesis borrow, so firing observers there is safe.
+//! Noesis raises the events during `PostUpdate`; they are delivered in the next
+//! frame's `PreUpdate`, outside any Noesis borrow, so observers may freely touch
+//! the `World`. Because of that one-frame delay, a global observer can receive
+//! an event whose target was despawned in between: look the target up with
+//! `Query::get` rather than assuming it exists.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,30 +42,26 @@ pub use noesis_runtime::view::Key;
 
 use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Click bridge
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when a watched element raises `BaseButton::Click`.
+/// Sent when an element listed in a [`NoesisClickWatch`] raises `Click`.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisClicked {
-    /// The [`NoesisView`](crate::NoesisView) entity whose element was clicked.
+    /// The [`NoesisView`](crate::NoesisView) entity the click came from (the
+    /// host view, for a watch on a panel).
     pub view: Entity,
     /// `x:Name` of the element that raised the click.
     pub name: String,
 }
 
-/// Observer-facing twin of [`NoesisClicked`]: a click surfaced as an
-/// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
-/// entity by default, or a per-row entity for templated list rows). Read the
-/// target with `On::event_target`.
+/// Observer form of [`NoesisClicked`]. Its target is the watch entry's
+/// `target` entity: the view by default, the panel for a panel watch, or the row
+/// entity for a templated list row. Read it with `On::event_target`.
 ///
-/// Fired via the global self-targeting `commands.trigger`, so a stale/despawned
-/// target is safe: no entity-targeted observer exists for it.
+/// Delivered one frame after the click, so the target may have been despawned
+/// since. Observers on that entity are gone with it, but global observers still
+/// run.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct UiClicked {
-    /// Trigger target: the panel/view entity (named elements) or the row entity
-    /// (templated list rows).
+    /// Event target: the view, panel, or list-row entity.
     pub entity: Entity,
     /// The [`NoesisView`](crate::NoesisView) entity the click originated in.
     pub view: Entity,
@@ -73,19 +70,19 @@ pub struct UiClicked {
     pub name: String,
 }
 
-/// One entry in [`NoesisClickWatch`]: an element `x:Name` plus the entity the
-/// resulting [`UiClicked`] should target. `target` defaults to the view entity
-/// (set it to redirect the observer at a different entity).
+/// One entry in [`NoesisClickWatch`]: an element `x:Name` and the entity its
+/// [`UiClicked`] targets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClickWatchEntry {
-    /// `x:Name` of the element to subscribe a `Click` handler against.
+    /// `x:Name` of a `BaseButton` (`Button`, `CheckBox`, ...). Other element
+    /// types are skipped with a warning.
     pub name: String,
-    /// Entity the fired [`UiClicked`] targets; `None` → the view entity.
+    /// Entity [`UiClicked`] targets. `None` means the entity carrying the watch.
     pub target: Option<Entity>,
 }
 
 impl ClickWatchEntry {
-    /// Watch `Click` on the element named `name`, targeting the view entity.
+    /// Watch `Click` on `name`, targeting the entity carrying the watch.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -93,7 +90,7 @@ impl ClickWatchEntry {
         }
     }
 
-    /// Builder: target the fired [`UiClicked`] at `target` instead of the view.
+    /// Builder: send [`UiClicked`] to `target` instead.
     #[must_use]
     pub fn target(mut self, target: Entity) -> Self {
         self.target = Some(target);
@@ -101,41 +98,39 @@ impl ClickWatchEntry {
     }
 }
 
-/// Per-view component: elements to subscribe a `Click` handler against. Add to a
-/// [`NoesisView`](crate::NoesisView) entity. Entries are diff-synced each frame:
-/// adding installs a subscription, removing tears it down.
+/// The elements whose `Click` to report. Add it to a
+/// [`NoesisView`](crate::NoesisView) or [`UiPanel`](crate::UiPanel) entity; see
+/// the [module docs](self). Synced every frame: adding an entry subscribes,
+/// removing one unsubscribes.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisClickWatch {
-    /// Per-element watch entries (`x:Name` + optional [`UiClicked`] target).
+    /// One entry per watched element.
     pub entries: Vec<ClickWatchEntry>,
 }
 
 impl NoesisClickWatch {
-    /// Builds a watch over the given element `x:Name`s, each [`UiClicked`]
-    /// targeting the view entity.
+    /// Watch the given `x:Name`s with default targets.
     pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             entries: names.into_iter().map(ClickWatchEntry::new).collect(),
         }
     }
 
-    /// Builds a watch from explicit [`ClickWatchEntry`] values (to set per-entry
-    /// [`UiClicked`] targets).
+    /// Watch explicit entries, for per-entry [`UiClicked`] targets.
     pub fn from_entries(entries: impl IntoIterator<Item = ClickWatchEntry>) -> Self {
         Self {
             entries: entries.into_iter().collect(),
         }
     }
 
-    /// Watch one more element by `x:Name`, its [`UiClicked`] targeting the view
-    /// entity. Use [`ClickWatchEntry`] directly when you need a per-entry target.
+    /// Add one `x:Name` with the default target. Push a [`ClickWatchEntry`] onto
+    /// `entries` for a custom target.
     pub fn watch(&mut self, name: impl Into<String>) -> &mut Self {
         self.entries.push(ClickWatchEntry::new(name));
         self
     }
 
-    /// Watch several more elements by `x:Name`, each [`UiClicked`] targeting the
-    /// view entity.
+    /// Add several `x:Name`s with the default target.
     pub fn extend_names(
         &mut self,
         names: impl IntoIterator<Item = impl Into<String>>,
@@ -146,13 +141,12 @@ impl NoesisClickWatch {
     }
 }
 
-/// Queue between the (main-thread) click callbacks and the drain system.
-/// `Clone` is an `Arc` clone. Entries carry `(view, target, name)`.
+/// Clicks waiting for [`drain_click_queue`], as `(view, target, name)`. Clones
+/// share one queue.
 #[derive(Resource, Clone, Default)]
 pub struct SharedClickQueue(pub(crate) Arc<Mutex<Vec<(Entity, Entity, String)>>>);
 
 impl SharedClickQueue {
-    /// Push `(view, target, name)` from a click callback.
     pub(crate) fn push(&self, view: Entity, target: Entity, name: String) {
         self.0
             .lock()
@@ -170,9 +164,9 @@ impl SharedClickQueue {
     }
 }
 
-/// Drain the click queue: write a [`NoesisClicked`] message **and** trigger a
-/// [`UiClicked`] `EntityEvent` (one of each per click). Runs in `PreUpdate` with
-/// no Noesis borrow held, so triggering observers here is safe.
+/// Send a [`NoesisClicked`] and trigger a [`UiClicked`] for each queued click.
+/// Runs in `PreUpdate`, outside any Noesis borrow, so observers may touch the
+/// `World`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_click_queue(
     queue: Res<SharedClickQueue>,
@@ -192,7 +186,7 @@ pub fn drain_click_queue(
     }
 }
 
-/// Reconcile every view's [`NoesisClickWatch`] against its live subscription set.
+/// Sync each entity's `Click` subscriptions to its [`NoesisClickWatch`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_click_subscriptions(
     views: Query<(Entity, &NoesisClickWatch)>,
@@ -207,55 +201,49 @@ pub(crate) fn sync_click_subscriptions(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// KeyDown bridge
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Emitted when a watched element raises `UIElement::KeyDown`.
+/// Sent when an element listed in a [`NoesisKeyDownWatch`] raises `KeyDown`.
 #[derive(Message, Debug, Clone)]
 pub struct NoesisKeyDown {
-    /// The [`NoesisView`](crate::NoesisView) entity whose element received the keydown.
+    /// The [`NoesisView`](crate::NoesisView) entity the key press came from (the
+    /// host view, for a watch on a panel).
     pub view: Entity,
     /// `x:Name` of the element.
     pub name: String,
-    /// Pressed key, mapped to the safe [`Key`] mirror (unmapped ordinals → [`Key::None`]).
+    /// The pressed key; keys with no [`Key`] variant arrive as [`Key::None`].
     pub key: Key,
 }
 
-/// Observer-facing twin of [`NoesisKeyDown`]: a keydown surfaced as an
-/// `EntityEvent` whose target is the watch entry's `target` entity (the `view`
-/// entity by default). Read the target with `On::event_target`.
+/// Observer form of [`NoesisKeyDown`]. Its target is the watch entry's
+/// `target` entity (by default the entity carrying the watch). Like
+/// [`UiClicked`], it arrives a frame late, so the target may be gone.
 #[derive(EntityEvent, Debug, Clone)]
 pub struct UiKeyDown {
-    /// Trigger target: the watch entry's `target` (the view entity by default).
+    /// Event target.
     pub entity: Entity,
     /// The [`NoesisView`](crate::NoesisView) entity the keydown originated in.
     pub view: Entity,
     /// `x:Name` of the element that received the keydown.
     pub name: String,
-    /// Pressed key, mapped to the safe [`Key`] mirror.
+    /// The pressed key.
     pub key: Key,
 }
 
-/// One entry in [`NoesisKeyDownWatch`]: an element `x:Name`, the per-name swallow
-/// set, and the entity the resulting [`UiKeyDown`] should target. Keys in
-/// `swallow` are marked handled by the C++ trampoline, stopping further routing
-/// (e.g. swallow `Return` so a submit doesn't append a newline). Empty by
-/// default: every key propagates, none are swallowed. `target` defaults to the
-/// view entity.
+/// One entry in [`NoesisKeyDownWatch`]: an element `x:Name`, the keys to
+/// swallow, and the entity its [`UiKeyDown`] targets.
 #[derive(Clone, Debug)]
 pub struct KeyDownWatchEntry {
     /// `x:Name` of the element to watch for `UIElement::KeyDown`.
     pub name: String,
-    /// Keys marked handled by the C++ trampoline, stopping further routing.
+    /// Keys marked handled so they stop routing, e.g. `Return` so a submit
+    /// doesn't also insert a newline. Swallowed keys are still reported. Empty
+    /// by default.
     pub swallow: Vec<Key>,
-    /// Entity the fired [`UiKeyDown`] targets; `None` → the view entity.
+    /// Entity [`UiKeyDown`] targets. `None` means the entity carrying the watch.
     pub target: Option<Entity>,
 }
 
 impl KeyDownWatchEntry {
-    /// Builds an entry watching `name`, with an empty swallow set, targeting the
-    /// view entity.
+    /// Watch `name`, swallowing nothing, with the default target.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -264,14 +252,14 @@ impl KeyDownWatchEntry {
         }
     }
 
-    /// Builder: append `key` to the swallow set.
+    /// Builder: also swallow `key`.
     #[must_use]
     pub fn swallow(mut self, key: Key) -> Self {
         self.swallow.push(key);
         self
     }
 
-    /// Builder: append every key in `keys` to the swallow set.
+    /// Builder: also swallow every key in `keys`.
     #[must_use]
     pub fn swallow_all<I>(mut self, keys: I) -> Self
     where
@@ -281,7 +269,7 @@ impl KeyDownWatchEntry {
         self
     }
 
-    /// Builder: target the fired [`UiKeyDown`] at `target` instead of the view.
+    /// Builder: send [`UiKeyDown`] to `target` instead.
     #[must_use]
     pub fn target(mut self, target: Entity) -> Self {
         self.target = Some(target);
@@ -289,16 +277,17 @@ impl KeyDownWatchEntry {
     }
 }
 
-/// Per-view component: `x:Name`s + per-name swallow sets to watch for
-/// `UIElement::KeyDown`. Add to a [`NoesisView`](crate::NoesisView) entity.
+/// The elements whose `KeyDown` to report. Add it to a
+/// [`NoesisView`](crate::NoesisView) or [`UiPanel`](crate::UiPanel) entity; see
+/// the [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisKeyDownWatch {
-    /// Per-element watch entries, each pairing an `x:Name` with its swallow set.
+    /// One entry per watched element.
     pub entries: Vec<KeyDownWatchEntry>,
 }
 
 impl NoesisKeyDownWatch {
-    /// Builds a watch from the given [`KeyDownWatchEntry`] list.
+    /// Watch the given entries.
     pub fn new(entries: impl IntoIterator<Item = KeyDownWatchEntry>) -> Self {
         Self {
             entries: entries.into_iter().collect(),
@@ -306,13 +295,12 @@ impl NoesisKeyDownWatch {
     }
 }
 
-/// Queue between the (main-thread) keydown callbacks and the drain system.
-/// Entries carry `(view, target, name, key)`.
+/// Key presses waiting for [`drain_keydown_queue`], as
+/// `(view, target, name, key)`. Clones share one queue.
 #[derive(Resource, Clone, Default)]
 pub struct SharedKeyDownQueue(pub(crate) Arc<Mutex<Vec<(Entity, Entity, String, Key)>>>);
 
 impl SharedKeyDownQueue {
-    /// Push `(view, target, name, key)` from a keydown callback.
     pub(crate) fn push(&self, view: Entity, target: Entity, name: String, key: Key) {
         self.0
             .lock()
@@ -330,8 +318,8 @@ impl SharedKeyDownQueue {
     }
 }
 
-/// Drain the keydown queue: write a [`NoesisKeyDown`] message **and** trigger a
-/// [`UiKeyDown`] `EntityEvent` (one of each per keydown).
+/// Send a [`NoesisKeyDown`] and trigger a [`UiKeyDown`] for each queued key
+/// press. Runs in `PreUpdate`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_keydown_queue(
     queue: Res<SharedKeyDownQueue>,
@@ -353,7 +341,7 @@ pub fn drain_keydown_queue(
     }
 }
 
-/// Reconcile every view's [`NoesisKeyDownWatch`] against its live subscription set.
+/// Sync each entity's `KeyDown` subscriptions to its [`NoesisKeyDownWatch`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_keydown_subscriptions(
     views: Query<(Entity, &NoesisKeyDownWatch)>,
@@ -368,10 +356,6 @@ pub(crate) fn sync_keydown_subscriptions(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugin
-// ─────────────────────────────────────────────────────────────────────────────
-
 impl ReapOnRemove for NoesisClickWatch {
     fn reap(state: &mut NoesisRenderState, entity: Entity) {
         state.reap_click_watch_for(entity);
@@ -384,8 +368,8 @@ impl ReapOnRemove for NoesisKeyDownWatch {
     }
 }
 
-/// Wires the per-view click + keydown bridges. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers the click and key-down watches, their queues and messages. Added
+/// by [`crate::NoesisPlugin`].
 pub struct NoesisEventsPlugin;
 
 impl Plugin for NoesisEventsPlugin {

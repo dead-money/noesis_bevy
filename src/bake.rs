@@ -1,27 +1,49 @@
-//! Bake an XAML view to an offscreen [`Handle<Image>`].
+//! Render XAML once into a static texture you can map onto your own geometry.
 //!
-//! The live overlay ([`crate::render`]) renders one Noesis view onto a camera
-//! every frame. Some hosts instead want a *static* texture rendered from XAML
-//! (a label, a badge, an in-world panel) that they map onto their own geometry.
-//! [`NoesisLabelBaker`] provides that: call [`NoesisLabelBaker::bake_label`]
-//! with a template URI and the text to drop into its named elements, and get
-//! back a [`Handle<Image>`] whose GPU texture Noesis fills in within ~1 frame.
+//! A [`NoesisView`](crate::NoesisView) redraws a UI onto a camera every frame.
+//! For a label, badge or in-world sign that rarely changes, add
+//! [`NoesisLabelBakerPlugin`] and call [`NoesisLabelBaker::bake_label`] with a
+//! template URI and the text for its named elements. You get a
+//! [`Handle<Image>`] immediately; Noesis fills its texture a frame or so later.
 //!
-//! Results are cached by an opaque `content_key`: identical keys return the
-//! same handle and bake nothing, so repeated content (every `74LS04` label)
-//! shares one texture.
+//! ```ignore
+//! fn spawn_sign(
+//!     baker: Res<NoesisLabelBaker>,
+//!     mut images: ResMut<Assets<Image>>,
+//!     mut materials: ResMut<Assets<StandardMaterial>>,
+//! ) {
+//!     let image = baker.bake_label(
+//!         "sign:exit",
+//!         "ui/sign.xaml",
+//!         UVec2::new(256, 64),
+//!         vec![("Caption".into(), "EXIT".into())],
+//!         &mut images,
+//!     );
+//!     let material = materials.add(StandardMaterial {
+//!         base_color_texture: Some(image),
+//!         alpha_mode: AlphaMode::Premultiplied,
+//!         ..default()
+//!     });
+//!     // ...spawn a mesh with `material`.
+//! }
+//! ```
 //!
-//! # How it renders without a copy or readback
+//! Results are cached by `content_key`: the same key returns the same handle and
+//! bakes nothing, so repeated content shares one texture. The cache holds a
+//! strong handle to every texture it baked for the app's lifetime; nothing is
+//! evicted.
 //!
-//! The image is allocated up front as a Bevy [`Image`] (so Bevy owns its
-//! `GpuImage`), then Noesis renders *straight into* a `Rgba8Unorm` view of that
-//! texture via the device's `set_onscreen_target` contract. No
-//! `copy_texture_to_texture`, no CPU readback.
+//! A bake waits until the template's XAML asset has loaded and the font
+//! fallback chain is installed (which happens once fonts load for the live
+//! views), then retries each frame. [`NoesisLabelBaker::pending_count`] tells
+//! you when the queue has drained.
 //!
-//! The texture is created `Rgba8UnormSrgb` with `Rgba8Unorm` listed in
-//! `view_formats`. Noesis writes sRGB-encoded bytes raw through the `Rgba8Unorm`
-//! render alias; a `StandardMaterial` samples the sRGB texture and decodes them
-//! back. Output is premultiplied alpha, so sample it with
+//! # Texture format
+//!
+//! Noesis renders straight into the image's GPU texture: no copy, no CPU
+//! readback. The texture is `Rgba8UnormSrgb` with an `Rgba8Unorm` view format;
+//! Noesis writes sRGB-encoded bytes through the `Rgba8Unorm` view, and sampling
+//! the sRGB texture decodes them. Output is premultiplied alpha, so use
 //! `AlphaMode::Premultiplied`.
 
 use std::collections::{HashMap, HashSet};
@@ -42,11 +64,10 @@ use bevy_render::{
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Sampling format of a baked label. `StandardMaterial` color maps want sRGB;
-/// Noesis renders through the [`RENDER_FORMAT`] alias below.
+/// Sampling format of a baked label. `StandardMaterial` color maps want sRGB.
 const SAMPLE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
-/// The `view_formats` alias Noesis renders into: its pipeline cache compiles
-/// against `Rgba8Unorm`, and it writes sRGB bytes raw (no linearization).
+/// The `view_formats` alias Noesis renders into. Its pipelines compile against
+/// `Rgba8Unorm`, and it writes sRGB bytes raw (no linearization).
 const RENDER_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 const RENDER_VIEW_FORMATS: &[TextureFormat] = &[RENDER_FORMAT];
 
@@ -63,7 +84,7 @@ struct BakeRequest {
 struct BakerState {
     /// Content key to handle. Identical keys reuse one baked texture.
     cache: HashMap<String, Handle<Image>>,
-    /// Requests awaiting their first bake on the main side.
+    /// Requests not yet baked.
     pending: Vec<BakeRequest>,
     /// Requests pulled out of `pending` for the current [`bake_into`] pass but
     /// not yet resolved (baked or requeued). Counted by [`pending_count`] so a
@@ -73,30 +94,33 @@ struct BakerState {
     /// [`pending_count`]: NoesisLabelBaker::pending_count
     in_flight: usize,
     /// Targets whose GPU texture the render world still has to resolve.
-    /// `bake_label` inserts here; the render-world system drains into `resolved`.
     want: HashSet<AssetId<Image>>,
-    /// Target textures the render world resolved, ready for the main-world bake.
-    /// The texture is the same GPU resource Bevy's `GpuImage` owns (no copy);
-    /// it crosses the world boundary because `Texture` is `Send + Sync`.
+    /// Resolved target textures, ready for the main-world bake. Each is the same
+    /// GPU resource the `GpuImage` owns, not a copy.
     resolved: HashMap<AssetId<Image>, Texture>,
 }
 
-/// Main-world handle to the label baker. Cheap to clone; it wraps a shared
-/// cache + request queue the render world drains. Insert via
-/// [`NoesisLabelBakerPlugin`].
+/// Bakes XAML templates into cached [`Image`] textures. Inserted as a resource
+/// by [`NoesisLabelBakerPlugin`]; cheap to clone (clones share one cache and
+/// queue).
 #[derive(Resource, Clone, Default)]
 pub struct NoesisLabelBaker {
     inner: Arc<Mutex<BakerState>>,
 }
 
 impl NoesisLabelBaker {
-    /// Return a [`Handle<Image>`] for `content_key`, baking it from `xaml_uri`
-    /// if it isn't already cached. `fields` are `(x:Name, text)` pairs written
-    /// to the template's named `TextBlock`/`TextBox` elements before rendering.
+    /// Return a [`Handle<Image>`] for `content_key`, baking it from the XAML at
+    /// `xaml_uri` at `size` pixels if the key isn't cached yet. `fields` are
+    /// `(x:Name, text)` pairs written to the template's `Text` properties before
+    /// rendering; a name the template lacks logs a warning.
     ///
-    /// Identical `content_key`s return the same handle and enqueue no work. A
-    /// freshly-baked texture is transparent until the bake completes (~1 frame);
-    /// for static labels that warm-up frame is invisible.
+    /// A cached key returns its existing handle and ignores the other arguments.
+    /// A new texture is transparent until its bake runs. A zero `size` axis is
+    /// allocated as 1 pixel.
+    ///
+    /// # Panics
+    ///
+    /// If the baker's mutex was poisoned by an earlier panic.
     pub fn bake_label(
         &self,
         content_key: impl Into<String>,
@@ -122,9 +146,9 @@ impl NoesisLabelBaker {
         handle
     }
 
-    /// Number of labels still waiting to bake. Drops to zero once every queued
-    /// label has rendered, so a host can hold a loading state until then. A
-    /// label whose template or fonts never load stays counted.
+    /// Number of labels not yet baked. Reaches zero once every queued label has
+    /// rendered, so a host can hold a loading screen until then. A label whose
+    /// template or fonts never load stays counted forever.
     #[must_use]
     pub fn pending_count(&self) -> usize {
         let guard = self.inner.lock().expect("NoesisLabelBaker poisoned");
@@ -139,8 +163,8 @@ impl ExtractResource for NoesisLabelBaker {
     }
 }
 
-/// Allocate the offscreen target for a label: an uninitialized (no CPU upload)
-/// `Rgba8UnormSrgb` image renderable through an `Rgba8Unorm` alias.
+/// Allocate a label's target: no CPU upload, `Rgba8UnormSrgb` with an
+/// `Rgba8Unorm` render alias.
 fn bake_target(size: UVec2) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
@@ -155,16 +179,13 @@ fn bake_target(size: UVec2) -> Image {
     image.texture_descriptor.usage =
         TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
     image.texture_descriptor.view_formats = RENDER_VIEW_FORMATS;
-    // Crisp scaling when the panel is small on screen.
     image.sampler = ImageSampler::linear();
     image
 }
 
-/// Render-world pass: hand each pending bake target's GPU texture back to the
-/// main world. `GpuImage`s prepare in [`RenderSystems::PrepareAssets`], so by
-/// this `Prepare` system the texture exists; cloning it is just another handle
-/// to the same GPU resource. Noesis itself never runs here, only the texture
-/// crosses worlds.
+/// Render-world pass: hand each wanted target's GPU texture to the main world.
+/// `GpuImage`s prepare in [`RenderSystems::PrepareAssets`], so the texture
+/// exists by this `Prepare` system. Noesis never runs here.
 #[allow(clippy::needless_pass_by_value)]
 fn resolve_bake_textures(baker: Res<NoesisLabelBaker>, gpu_images: Res<RenderAssets<GpuImage>>) {
     let mut guard = baker.inner.lock().expect("NoesisLabelBaker poisoned");
@@ -185,11 +206,9 @@ fn resolve_bake_textures(baker: Res<NoesisLabelBaker>, gpu_images: Res<RenderAss
     }
 }
 
-/// Main-world pass: render Noesis into each target whose texture the render
-/// world resolved. Runs where [`NoesisRenderState`] lives (main thread, `!Send`)
-/// and pulls only the resolved `Texture` across the boundary, so the bake stays
-/// on the single Noesis thread. A request stays queued until its texture is
-/// resolved and Noesis prerequisites (fonts, template) are ready.
+/// Main-world pass: render Noesis into each target whose texture has been
+/// resolved. Runs on the main thread with [`NoesisRenderState`]. A request stays
+/// queued until its texture is resolved and fonts and template are ready.
 #[allow(clippy::needless_pass_by_value)]
 fn bake_pending_labels(
     baker: Option<Res<NoesisLabelBaker>>,
@@ -202,8 +221,7 @@ fn bake_pending_labels(
         return;
     };
 
-    // Pull the bakeable requests (texture resolved) out from under the lock, so
-    // `bake_into` (slow) never stalls the render thread holding the mutex.
+    // Bake outside the lock so the render-world system never waits on `bake_into`.
     let mut work: Vec<(BakeRequest, Texture)> = Vec::new();
     {
         let mut guard = baker.inner.lock().expect("NoesisLabelBaker poisoned");
@@ -218,8 +236,7 @@ fn bake_pending_labels(
             }
         }
         guard.pending = keep;
-        // Keep these counted while they render outside the lock, so
-        // `pending_count` doesn't transiently drop to zero mid-bake.
+        // Keeps `pending_count` from dipping to zero mid-bake.
         guard.in_flight = work.len();
     }
     if work.is_empty() {
@@ -237,7 +254,6 @@ fn bake_pending_labels(
         if state.bake_into(&render_view, &req.xaml_uri, req.size, &req.fields) {
             baked.push(req.target);
         } else {
-            // Fonts/template not ready; retry on a later frame.
             requeue.push(req);
         }
     }
@@ -250,7 +266,8 @@ fn bake_pending_labels(
     guard.in_flight = 0;
 }
 
-/// Wires [`NoesisLabelBaker`] into the app. Add after [`crate::NoesisPlugin`].
+/// Inserts the [`NoesisLabelBaker`] resource and its systems. Not part of
+/// [`crate::NoesisPlugin`]; add it after that plugin.
 pub struct NoesisLabelBakerPlugin;
 
 impl Plugin for NoesisLabelBakerPlugin {
@@ -258,13 +275,8 @@ impl Plugin for NoesisLabelBakerPlugin {
         app.init_resource::<NoesisLabelBaker>()
             .add_plugins(ExtractResourcePlugin::<NoesisLabelBaker>::default());
 
-        // Runs in `NoesisSet::Apply`, after the scene is ensured and before the
-        // frame is driven. Tolerant of running before `NoesisRenderState` exists,
-        // a target texture is resolved, or fonts load: such requests just retry.
         app.add_systems(PostUpdate, bake_pending_labels.in_set(NoesisSet::Apply));
 
-        // Render-world half: resolve each queued target's GPU texture and hand it
-        // back through the shared state for the main-world bake above.
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(Render, resolve_bake_textures.in_set(RenderSystems::Prepare));
         }

@@ -1,19 +1,16 @@
-//! Component-removal reap regression (audit P0.9): removing a bridge component
-//! from a *live* view must reap that view's render-side state, symmetrically with
-//! the entity-despawn teardown — not leak it for the life of the process.
+//! Component-removal reap regression: removing a bridge component from a live
+//! view must reap that view's `NoesisRenderState` entries, the same as entity-despawn
+//! teardown, instead of leaking them for the life of the process.
 //!
-//! Before the per-bridge `RemovedComponents<C>` reap systems, reconcile only
-//! visited entities that still *had* the component, so dropping (say) a `UiList`
-//! (which now lives on its own list entity, its binding still keyed by the view it
-//! renders into) left its `ListBinding` — collection, realized row instances, and
-//! row-class registration — bound and rendering forever.
+//! Reconcile systems only visit entities that still have the component, so the
+//! reap runs off `RemovedComponents<C>`. A `UiList` lives on its own entity while
+//! its `ListBinding` (collection, realized rows, row-class registration) is keyed
+//! by the `(view, name)` it renders into, so the reap must map back to that key.
 //!
-//! This drives a view with a `ListBox` + a `UiList` entity + entity-rows until the
+//! Drives a view with a `ListBox`, a `UiList` entity and entity rows until the
 //! binding is live (`live_lists == 1`), then `remove::<UiList>()` off the list
-//! entity while keeping the view (and its scene) alive, and asserts the binding
-//! drains to 0 with the scene still live — i.e. the reap ran off component removal,
-//! resolved the list entity back to its `(view, name)` binding, and did *not* tear
-//! the scene down.
+//! entity while keeping the view alive, and asserts the binding drains to 0 with
+//! the scene still live.
 //!
 //! Font-free XAML so the scene builds without a font folder.
 
@@ -116,8 +113,6 @@ fn removing_uilist_from_a_live_view_reaps_its_binding() {
         },
     );
 
-    // Exit once the post-removal snapshot shows the list binding reaped while the
-    // scene stayed live.
     let pred_post = Arc::clone(&post);
     let reaped = run_until(
         &mut app,
@@ -145,8 +140,8 @@ fn removing_uilist_from_a_live_view_reaps_its_binding() {
     assert_eq!(pre_lists, 1, "list binding should be live before removal");
     assert_eq!(pre_scenes, 1, "view scene should be live before removal");
 
-    // After removal: the binding is reaped, but the view's scene stays live —
-    // this is the component-removal path, not the despawn path.
+    // After removal: the binding is reaped but the scene stays live (removal path,
+    // not despawn).
     assert_eq!(
         post_lists, 0,
         "removing UiList must reap the view's list binding; {post_lists} still tracked",

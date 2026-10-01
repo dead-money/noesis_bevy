@@ -1,9 +1,7 @@
-//! Integration test for XAML hot-reload through the real `NoesisPlugin` pipeline.
+//! Integration test for XAML hot-reload on the headless harness.
 //!
-//! Asserts two things: VERSION ONE is observed before the reload (view built against
-//! the original bytes), and VERSION TWO is the last observed value after reload. A
-//! no-op reload would keep reporting VERSION ONE, failing the second assertion; a view
-//! that never built against the original bytes would fail the first.
+//! Re-inserting the scene's URI in [`XamlRegistry`] with new bytes must rebuild the
+//! view: "VERSION ONE" is observed first, and "VERSION TWO" is the last value.
 //!
 //! Only reads the `Text` dependency property (no glyph rendering), so no font setup is needed.
 
@@ -65,7 +63,7 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
               mut changes: MessageReader<NoesisTextChanged>| {
             *frame += 1;
 
-            // Same URI, new bytes: simulates what update_xaml_registry does on an asset Modified event.
+            // Same URI, new bytes: what `update_xaml_registry` does on an asset change.
             if *frame == RELOAD_AT_FRAME {
                 reg.insert(URI.to_string(), Arc::new(xaml("VERSION TWO").into_bytes()));
             }
@@ -79,9 +77,6 @@ fn xaml_hot_reload_rebuilds_view_with_new_markup() {
         },
     );
 
-    // Event-driven exit: the reload is frame-gated (frame 25), so once the latest
-    // observed Label text is "VERSION TWO" the rebuild against the new bytes has
-    // landed (the original "VERSION ONE" was necessarily observed before it).
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let reloaded = run_until(&mut app, 240, move |_app| {

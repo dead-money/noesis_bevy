@@ -1,16 +1,16 @@
-//! Tests SHADOW (50) and BLUR (51) effect shaders in `WgpuRenderDevice`.
+//! The `SHADOW` (50) and `BLUR` (51) effect shaders in `WgpuRenderDevice`.
 //!
 //! Both shaders co-bind a `shadow` texture with `image` (group(3) bindings 2/3)
 //! plus `cbuffer1_ps` (group(1) binding(1)).
 //!
-//! Shader formulas (used to derive the expected pixel values):
+//! Shader formulas the expected pixels are derived from:
 //!   SHADOW: (img + (1-img.a) * (shadowColor * alpha)) * (opacity * paint.a),
 //!           alpha = mix(image(uv-offset).a, shadow(uv-offset).a, cb1[6]).
 //!   BLUR:   mix(image(uv1), shadow(uv1), cb1[0]) * (opacity * paint.a).
 //!
-//! Drives `WgpuRenderDevice` directly without Noesis, using `test_set_forced_image`
-//! and `test_set_forced_shadow` to point the two group(3) slots at solid 1x1
-//! textures; constants chosen so the algebra collapses to assertable values.
+//! Drives `WgpuRenderDevice` directly, using `test_set_forced_image` and
+//! `test_set_forced_shadow` to point the two group(3) slots at solid 1x1
+//! textures. The constants are chosen so the formulas collapse to known colors.
 
 use std::ffi::c_void;
 
@@ -131,11 +131,9 @@ async fn run_test() {
     let blur = read_pixel(&device, &queue, &rd, rt.resolve_texture.handle, 2, 2).await;
     assert_close(blur, [64, 191, 0, 255], 2, "blur mix(image, shadow, 0.75)");
 
-    // SHADOW: transparent layer over an opaque-alpha shadow
-    // Make `image` fully transparent (img.a = 0) so the formula reduces to
-    //   shadowColor * alpha, with alpha = mix(image.a=0, shadow.a=1, cb1[6]=1)
-    //   = 1. shadowColor = (0, 0, 1, 1) (blue). offset = 0, rect = whole. So
-    // output = shadowColor = blue, scaled by opacity*paint.a = 1.
+    // SHADOW: a transparent layer (img.a = 0) over an opaque shadow reduces to
+    // shadowColor * alpha, with alpha = mix(image.a = 0, shadow.a = 1, cb1[6] = 1) = 1.
+    // shadowColor is blue, offset 0, rect the whole quad, opacity * paint.a = 1.
     let clear_px: [u8; 4] = [0, 0, 0, 0]; // transparent image
     let opaque_px: [u8; 4] = [255, 255, 255, 255]; // shadow alpha = 1
     let clear_levels = [&clear_px[..]];
@@ -259,8 +257,7 @@ fn effect_batch(shader: Shader, cb1: &[f32; 8]) -> Batch {
         num_vertices: 6,
         start_index: 0,
         num_indices: 6,
-        // Non-null so draw_batch's null-checks pass; resolution goes through
-        // the test-only forced image/shadow hooks.
+        // Never dereferenced: the forced image/shadow hooks replace these.
         pattern: std::ptr::null_mut(),
         ramps: std::ptr::null_mut(),
         image: std::ptr::dangling_mut(),

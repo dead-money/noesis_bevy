@@ -2,7 +2,7 @@
 //! click surfaces as a [`UiClicked`] `EntityEvent` that a global observer
 //! receives, recovering the panel/view entity via `On::event_target()`.
 //!
-//! Drives a real headless [`NoesisPlugin`] app: injects a left mouse
+//! Drives a headless app with the real bridge plugins: injects a left mouse
 //! down-then-up over a full-bleed `Button` watched by [`NoesisClickWatch`], and
 //! asserts the observer saw a `UiClicked` whose target IS the view entity (the
 //! default target for a named element).
@@ -92,7 +92,6 @@ fn named_button_click_triggers_uiclicked_targeting_the_view() {
         },
     );
 
-    // Exit as soon as the observer sees the "Go" button's click targeting the view.
     let pred_obs = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let fired = run_until(&mut app, 120, move |_app| {

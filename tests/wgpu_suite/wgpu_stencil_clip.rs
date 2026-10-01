@@ -1,10 +1,10 @@
-//! Render-device stencil-clip regression test.
+//! Stencil clipping in the render device.
 //!
 //! A `MASK` batch (`color_enable=0`, `StencilMode::EqualIncr`) raises stencil
-//! to 1 over the left half; a `PATH_SOLID` batch (`StencilMode::EqualKeep`,
-//! `stencil_ref=1`) then paints red only where stencil equals 1. The right
-//! half must keep its pre-clear blue. Without the stencil attachment,
-//! `EqualKeep` gates nothing and red fills the whole target.
+//! to 1 over the left half; a full-screen `PATH_SOLID` batch
+//! (`StencilMode::EqualKeep`, `stencil_ref=1`) then paints red only where
+//! stencil equals 1. The right half must keep its pre-clear blue. Without a
+//! stencil attachment, `EqualKeep` gates nothing and red fills the target.
 
 use std::ffi::c_void;
 
@@ -74,7 +74,6 @@ async fn run_test() {
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Pre-clear to blue so unclipped pixels are distinguishable from red fill.
     {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("pre-clear"),

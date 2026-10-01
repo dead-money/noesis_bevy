@@ -1,11 +1,8 @@
 //! Tests the `ItemsSource` bridge: populate a `ComboBox` from Rust and mutate live.
 //!
-//! Drives Noesis directly (no GPU). Asserts item counts after `set`, `push`,
-//! `remove_at`, and `clear`. These assertions are only meaningful if the collection
-//! is observable and actually bound.
-//! Main/render queue plumbing is covered by unit tests in `src/items.rs`.
-//!
-//!   `cargo test -p noesis_bevy --test headless_items_source -- --nocapture`
+//! Drives Noesis directly (no GPU, no Bevy app). Asserts item counts after `set`,
+//! `push`, `remove_at`, and `clear`, which only change if the collection is
+//! observable and actually bound.
 
 use std::collections::HashMap;
 
@@ -37,7 +34,7 @@ fn items_source_populates_and_mutates_combobox() {
     noesis_runtime::init();
 
     {
-        // Calls the same ItemsBinding methods the render-side apply pass uses.
+        // Same ItemsBinding methods the items bridge's apply pass uses.
         let mut binding = ItemsBinding::new();
         binding.set(["Low", "Medium", "High"]);
 

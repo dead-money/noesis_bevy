@@ -1,11 +1,71 @@
-//! Bevy plugin for the Noesis GUI SDK.
+//! Bevy plugin for the [Noesis GUI](https://www.noesisengine.com/) SDK.
 //!
-//! Drives `libNoesis.so` through the [`noesis_runtime`] FFI crate and implements
-//! `Noesis::RenderDevice` on top of Bevy's wgpu device. UIs render into an
-//! offscreen wgpu texture and composite into the Bevy frame.
+//! Noesis parses your XAML and owns the live controls, layout, styles and
+//! animations. This crate drives it through the [`noesis_runtime`] FFI crate,
+//! renders it on Bevy's wgpu device, and composites each UI onto a camera.
+//! Building requires a licensed Noesis Native SDK at `NOESIS_SDK_DIR`.
 //!
-//! Add [`NoesisPlugin`] to initialize the runtime, then host XAML through a
-//! [`NoesisView`] camera.
+//! # Getting started
+//!
+//! Add [`NoesisPlugin`], register XAML in the [`XamlRegistry`] (or load `.xaml`
+//! files through the asset server), and put a [`NoesisView`] on a camera:
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use bevy::prelude::*;
+//! use noesis_bevy::{NoesisPlugin, NoesisView, XamlRegistry};
+//!
+//! const MENU: &str = r#"<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+//!   <TextBlock Text="Hello, Noesis!" Foreground="White"
+//!              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+//! </Grid>"#;
+//!
+//! fn setup(mut commands: Commands, mut xaml: ResMut<XamlRegistry>) {
+//!     xaml.insert("menu.xaml", Arc::new(MENU.as_bytes().to_vec()));
+//!     commands.spawn((
+//!         Camera2d,
+//!         NoesisView {
+//!             xaml_uri: "menu.xaml".to_string(),
+//!             size: UVec2::new(1920, 1080),
+//!             ..default()
+//!         },
+//!     ));
+//! }
+//!
+//! App::new()
+//!     .add_plugins((DefaultPlugins, NoesisPlugin::default()))
+//!     .add_systems(Startup, setup)
+//!     .run();
+//! ```
+//!
+//! # Bridges
+//!
+//! Controls are not entities. You reach them through bridge components on the
+//! [`NoesisView`] entity that name elements by `x:Name`: [`NoesisText`],
+//! [`NoesisDp`] (any dependency property), [`NoesisVm`] and
+//! [`NoesisViewModel`] (view models), [`NoesisCommands`], [`NoesisItems`],
+//! [`NoesisVisibility`], [`NoesisLayout`] and more. Their systems run in
+//! [`NoesisSet::Apply`] in `PostUpdate`, and read-backs arrive as messages
+//! carrying the `view` entity.
+//!
+//! Most bridge maps are write-through: removing an entry stops further writes
+//! but leaves the element at its last value. The order of bridges within
+//! [`NoesisSet::Apply`] is unspecified.
+//!
+//! For entity-shaped UI, [`UiPanel`] mounts a XAML fragment bound to an
+//! entity's components, and [`UiList`] turns entities into list rows.
+//!
+//! # Input
+//!
+//! Mouse, keyboard, touch and window focus are forwarded to the primary view
+//! automatically (see [`input`]). Read [`NoesisPointerOverUi`] to keep UI
+//! clicks out of the game world.
+//!
+//! # Threading
+//!
+//! Noesis is thread-affine. All Noesis calls run on the main thread in the
+//! main world, in [`NoesisSet`] in `PostUpdate`; the render world only receives
+//! each view's painted texture to composite.
 #![warn(missing_docs)]
 
 use bevy::prelude::*;
@@ -160,18 +220,18 @@ pub use visual_state::{NoesisVisualState, NoesisVisualStatePlugin, StateRequest}
 pub use window_compat::{NoesisWindowCompatPlugin, WINDOW_CLASS};
 pub use xaml::{BevyXamlProvider, XamlAsset, XamlAssetLoader, XamlAssetPlugin, XamlRegistry};
 
-/// Per-developer Indie license credentials.
+/// Noesis license credentials. See [`NoesisPlugin::license`].
 #[derive(Clone, Debug)]
 pub struct NoesisLicense {
-    /// Licensee name, as issued with the Indie license.
+    /// Licensee name, as issued with the license.
     pub name: String,
     /// License key paired with [`name`](Self::name).
     pub key: String,
 }
 
 impl NoesisLicense {
-    /// Read `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` from the environment.
-    /// Returns `None` if either is unset.
+    /// Reads `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` from the
+    /// environment. Returns `None` if either is unset or not valid Unicode.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let name = std::env::var("NOESIS_LICENSE_NAME").ok()?;
@@ -180,24 +240,26 @@ impl NoesisLicense {
     }
 }
 
-/// Bevy plugin that initializes Noesis at app startup and shuts it down when
-/// the [`App`] is dropped.
+/// Initializes Noesis and adds the standard plugin set: asset loaders, input,
+/// host integration, all bridges, and the render pipeline. Noesis shuts down
+/// when the [`App`] is dropped.
 ///
-/// Falls back to `NoesisLicense::from_env()` when [`license`](Self::license)
-/// is `None`. Without a license, Noesis runs in trial mode (visible watermark).
+/// Add it once. The individual `Noesis*Plugin`s it includes must not be added
+/// again; Bevy panics on a duplicate plugin. Opt-in plugins such as
+/// [`NoesisWindowCompatPlugin`], [`NoesisDefaultThemePlugin`] and
+/// [`NoesisLabelBakerPlugin`] are not included.
 #[derive(Default)]
 pub struct NoesisPlugin {
-    /// License to activate. Leave `None` to fall back to
-    /// [`NoesisLicense::from_env`], or to run in trial mode if the environment
-    /// has no credentials either.
+    /// License to activate. `None` falls back to [`NoesisLicense::from_env`].
+    /// Without a license, Noesis runs in trial mode and eventually blanks the
+    /// view with a "Trial expired" message.
     pub license: Option<NoesisLicense>,
 }
 
 impl NoesisPlugin {
-    /// Activate the license (explicit, else `NOESIS_LICENSE_*` env) and start the
-    /// process-global Noesis runtime. Both the real plugin and the headless test
-    /// harness ([`NoesisHeadlessPlugin`]) call this once at `build` time, before
-    /// any `NoesisRenderState` registers a device/provider with the runtime.
+    /// Activates the license and starts the process-global runtime. Shared with
+    /// [`NoesisHeadlessPlugin`]; must run before any device or provider is
+    /// registered.
     pub(crate) fn init_runtime(&self) {
         if let Some(lic) = self.license.clone().or_else(NoesisLicense::from_env) {
             noesis_runtime::set_license(&lic.name, &lic.key);
@@ -207,16 +269,13 @@ impl NoesisPlugin {
         info!("Noesis runtime version {}", noesis_runtime::version());
     }
 
-    /// Add every asset loader, input, integration, and per-element/data bridge
-    /// plugin, but **not** the render pipeline plugin. This is the bridge set
-    /// both the real [`NoesisPlugin`] (which pairs it with
-    /// [`render::NoesisRenderPlugin`]) and the headless test harness (which pairs
-    /// it with [`NoesisHeadlessPlugin`]) drive, so both exercise identical bridges.
+    /// Adds the asset loader, input, integration and bridge plugins, without
+    /// runtime init, hot reload or [`NoesisRenderPlugin`].
     ///
-    /// Exposed so a custom harness can run the bridges against its own render
-    /// wiring (or none); app code should add [`NoesisPlugin`] instead.
+    /// For a custom harness with its own render wiring, as
+    /// [`NoesisHeadlessPlugin`] does. Apps add [`NoesisPlugin`] instead.
     pub fn add_bridge_plugins(app: &mut App) {
-        // Tuples are split to stay under Bevy's 15-element `Plugins` impl limit.
+        // Split into tuples: Bevy's `Plugins` impl stops at 15 elements.
         app.add_plugins((
             xaml::XamlAssetPlugin,
             font::FontAssetPlugin,
@@ -224,7 +283,6 @@ impl NoesisPlugin {
             input::NoesisInputPlugin,
             integration::NoesisIntegrationPlugin,
         ));
-        // Group A: foundational per-element bridges.
         app.add_plugins((
             events::NoesisEventsPlugin,
             routed_events::NoesisRoutedEventsPlugin,
@@ -237,7 +295,6 @@ impl NoesisPlugin {
             geometry::NoesisGeometryPlugin,
             clip::NoesisClipPlugin,
         ));
-        // Group B: interaction + data bridges. New bridges append here.
         app.add_plugins((
             focus::NoesisFocusPlugin,
             visual_state::NoesisVisualStatePlugin,
@@ -258,7 +315,6 @@ impl NoesisPlugin {
             svg::NoesisSvgPlugin,
             diagnostics::NoesisDiagnosticsPlugin::default(),
         ));
-        // Group C: past group B's 15-element `Plugins` limit.
         app.add_plugins((
             styles::NoesisStylesPlugin,
             shapes::NoesisShapesPlugin,
@@ -273,21 +329,15 @@ impl Plugin for NoesisPlugin {
     fn build(&self, app: &mut App) {
         self.init_runtime();
 
-        // Global `shutdown()` is owned by `NoesisRenderState::drop`: it releases every
-        // live Noesis handle then shuts the engine down, last, on the main thread.
-        // A separate guard can't guarantee it runs after the state (Bevy gives no
-        // drop order between two main-world resources).
+        // `NoesisRenderState::drop` calls `shutdown()` after releasing every handle;
+        // a separate guard resource couldn't be ordered after it.
 
         Self::add_bridge_plugins(app);
 
-        // Opt-in live XAML editing. Kept out of `add_bridge_plugins` (the set
-        // the headless test harness shares) so tests never spin a filesystem
-        // watcher thread; only real apps building with `hot_reload` get it.
+        // Not in `add_bridge_plugins`, so headless tests don't start a file watcher.
         #[cfg(feature = "hot_reload")]
         app.add_plugins(hot_reload::NoesisHotReloadPlugin);
 
-        // NoesisRenderPlugin no-ops its render-sub-app half if RenderApp is
-        // absent (headless), but its main-world driving pipeline still runs.
         app.add_plugins(render::NoesisRenderPlugin);
     }
 }

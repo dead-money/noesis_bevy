@@ -1,22 +1,16 @@
-//! Regression test for P1.2 + P1.3.
-//!
-//! P1.3: the default theme (`NoesisView::application_resources` URI chain) and
-//! the [`NoesisResources`] code-built bridge feed one merged application-resources
+//! The default theme (`NoesisView::application_resources` URI chain) and the
+//! [`NoesisResources`] code-built bridge feed one merged application-resources
 //! dictionary instead of clobbering each other.
 //!
-//! P1.2: the view is spawned after the first batch (frame 3), so it also proves
-//! the theme patch is keyed on `Added<NoesisView>` (not a one-shot `Local`) — a
-//! late-spawned view is still themed.
-//!
-//! Before the fix, the per-view chain installed in `Ensure` after the bridge's
-//! `Sync` install, so opting into the theme silently dropped every `.solid()` /
-//! `.value()` entry — after [`NoesisResourcesInstalled`] had reported them
-//! present. Here the theme is enabled AND a code-built `PanelWidth` value is
-//! declared; `Themed.ActualWidth == 40` proves the code entry survived, while
+//! The theme is enabled and a code-built `PanelWidth` value is declared.
+//! `Themed.ActualWidth == 40` proves the code entry survived the theme chain;
 //! `FromTheme.ActualWidth == 17` (`{StaticResource Size.ScrollBar}`, a scalar
-//! from the theme's own nested `NoesisTheme.Styles.xaml`) proves the theme chain
-//! is genuinely installed in the *same* merged dictionary. The read-back still
-//! confirms the code keys.
+//! from the theme's nested `NoesisTheme.Styles.xaml`) proves the theme chain is
+//! installed in the same merged dictionary. [`NoesisResourcesInstalled`] still
+//! reports the code keys.
+//!
+//! The view is spawned late (frame 3), so this also checks that the theme patch
+//! is keyed on `Added<NoesisView>` and themes a late-spawned view.
 
 use std::sync::{Arc, Mutex};
 
@@ -52,8 +46,7 @@ fn theme_chain_and_code_resources_coexist() {
     // The theme populates `application_resources` with its URI chain.
     app.add_plugins(NoesisDefaultThemePlugin::default());
 
-    // Code-built resources declared alongside the theme: these used to be
-    // clobbered by the chain in `Ensure`.
+    // Code-built resources declared alongside the theme.
     app.insert_resource(
         NoesisResources::new()
             .solid("AccentBrush", [1.0, 0.0, 0.0, 1.0])
@@ -64,9 +57,7 @@ fn theme_chain_and_code_resources_coexist() {
         reg.insert("res.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
     });
 
-    // Spawn the view *after* the first batch (frame 3), so it also exercises
-    // P1.2: the theme patch is keyed on `Added<NoesisView>`, not a one-shot
-    // `Local`, so a late-spawned view is still themed rather than magenta.
+    // Spawned at frame 3, after the first update.
     let view_spawn = Arc::clone(&view_entity);
     app.add_systems(
         Update,
@@ -120,7 +111,6 @@ fn theme_chain_and_code_resources_coexist() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // Exit once both widths have converged and an install has been reported.
     let pred_observed = Arc::clone(&observed);
     let pred_installed = Arc::clone(&installed);
     let pred_view = Arc::clone(&view_entity);
@@ -171,8 +161,7 @@ fn theme_chain_and_code_resources_coexist() {
         "theme scalar Size.ScrollBar must resolve, proving the theme chain merged in",
     );
 
-    // The read-back still confirms the code-built keys — and now it reflects the
-    // merged reality rather than a to-be-clobbered install.
+    // The install report lists the code-built keys.
     let present = installs.last().expect("a NoesisResourcesInstalled message");
     assert!(
         present.contains(&"AccentBrush".to_string()) && present.contains(&"PanelWidth".to_string()),

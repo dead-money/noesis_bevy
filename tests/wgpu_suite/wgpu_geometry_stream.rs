@@ -1,14 +1,14 @@
-//! Regression: two map/unmap geometry cycles in one phase, each draw reading
-//! the segment its own unmap wrote. Before the geometry-stream fix, every
-//! `unmap_*` wrote to buffer offset 0, so all per-phase uploads landed before
-//! the single encoder ran and every recorded draw read the LAST segment's
-//! bytes. The per-phase byte cursor + segment base give each draw its own
-//! geometry.
+//! Two map/unmap geometry cycles in one render phase: each draw must read the
+//! segment its own `unmap` wrote.
 //!
-//! 256x256 target; left half drawn red, right half green — but unlike the
-//! uniform-ring test, the two quads come from two separate map/unmap cycles.
-//! If the streams are clobbered, both draws render the last (right) quad and
-//! the left half stays at the clear color.
+//! All of a phase's `queue.write_buffer` uploads run before its single encoder
+//! is submitted, so if every `unmap_*` wrote at offset 0, every recorded draw
+//! would read the last segment. The device appends each segment at a per-phase
+//! cursor instead.
+//!
+//! 256x256 target; the left half is drawn red and the right half green, each
+//! quad from its own map/unmap cycle. If the streams are clobbered, both draws
+//! render the right quad and the left half stays at the clear color.
 
 use std::ffi::c_void;
 
@@ -109,9 +109,8 @@ async fn run_test() {
     let mut rd = WgpuRenderDevice::new(device.clone(), queue.clone());
     rd.set_onscreen_target(device_view, TARGET_W, TARGET_H);
 
-    // Vertex format `Pos`: 8 bytes per vertex (two f32). Each quad is uploaded
-    // in its OWN map/unmap cycle, so every batch references offset 0 of its own
-    // segment.
+    // `Pos` vertices: 8 bytes each (two f32). Each batch uses offset 0 of its
+    // own segment.
     let left_vb = quad_bytes([-1.0, 0.0]);
     let right_vb = quad_bytes([0.0, 1.0]);
     let ib = index_bytes();
@@ -127,7 +126,6 @@ async fn run_test() {
 
     rd.begin_onscreen_render();
 
-    // Segment 0: left quad + its draw.
     rd.map_vertices(left_vb.len() as u32)
         .copy_from_slice(&left_vb);
     rd.unmap_vertices();
@@ -135,8 +133,7 @@ async fn run_test() {
     rd.unmap_indices();
     rd.draw_batch(&make_rgba_batch(0, 0, &identity_mat, &red));
 
-    // Segment 1: right quad + its draw. With the bug, this overwrites offset 0
-    // and the left draw above ends up reading these vertices too.
+    // A clobbering stream would overwrite the left quad's bytes here.
     rd.map_vertices(right_vb.len() as u32)
         .copy_from_slice(&right_vb);
     rd.unmap_vertices();

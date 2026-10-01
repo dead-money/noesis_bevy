@@ -10,9 +10,9 @@
 //! A second Image with an unregistered URI (negative control) must stay at `0`, proving the
 //! size came from the staged bytes, not the container or a Stretch default.
 //!
-//! Staging happens at spawn time because Noesis resolves a `BitmapImage` source once at
-//! scene build and does not retry. The bridge stages before the registry→provider sync so a
-//! same-frame spawn lands in time.
+//! The component is attached at spawn because Noesis resolves a `BitmapImage` source once
+//! at scene build and never retries. The bridge stages bitmaps before the registry sync, so
+//! a same-frame spawn is in time.
 //!
 //! Font-free XAML: only sizes are asserted, no font gate needed.
 
@@ -68,8 +68,6 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
                         size: UVec2::new(64, 64),
                         ..default()
                     },
-                    // At spawn: Noesis resolves BitmapImage source once at scene build, no retry.
-                    // Bridge stages before provider sync so this lands in time.
                     NoesisImaging::new().set(
                         "Pic",
                         BMP_URI,
@@ -77,7 +75,6 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
                         BMP_H,
                         Arc::new(vec![255u8; (BMP_W * BMP_H * 4) as usize]),
                     ),
-                    // Independent observation of the same effect.
                     NoesisDp::new()
                         .watch("Pic", "ActualWidth", DpKind::F32)
                         .watch("Empty", "ActualWidth", DpKind::F32),
@@ -110,7 +107,6 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
         },
     );
 
-    // Latest read-backs, keyed by the spawned view; read by the exit predicate.
     let latest_img = |img: &[(Entity, String, ImageReadback)],
                       view: Entity,
                       name: &str|
@@ -129,8 +125,7 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // Event-driven exit: stop once the staged bitmap has sized Pic on both channels
-    // and the negative control has reported its default 0.
+    // Exit once both channels report Pic's size and the negative control reports 0.
     let pred_dp = Arc::clone(&dp_observed);
     let pred_img = Arc::clone(&img_observed);
     let pred_view = Arc::clone(&view_entity);
@@ -177,7 +172,6 @@ fn imaging_bridge_drives_image_from_rust_bitmap() {
         pic.actual_size,
     );
 
-    // Independent corroboration via the generic DP bridge.
     assert_eq!(
         latest_dp(&dp, view, "Pic", "ActualWidth"),
         Some(DpValue::F32(BMP_W as f32)),

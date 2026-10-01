@@ -1,13 +1,10 @@
 //! Regression test for the label-baker cross-world panic.
 //!
 //! `bake_pending_labels` runs in the main world (it drives the `!Send`
-//! `NoesisRenderState`), but it used to take `Res<RenderAssets<GpuImage>>`, which
-//! only exists in the render world. The instant the system ran, system-param
-//! validation failed with "Resource does not exist" and the app panicked.
-//!
-//! The fix splits the work: a render-world system resolves each target's GPU
-//! texture and hands it back through the baker's shared state; the main-world
-//! system pulls the resolved texture and bakes. This test queues one label, runs
+//! `NoesisRenderState`), but `RenderAssets<GpuImage>` exists only in the render
+//! world. A render-world system resolves each target's GPU texture and hands it
+//! back through the baker's shared state; the main-world system pulls the
+//! resolved texture and bakes. This test queues one label, runs
 //! on the real render graph ([`render_app`], so both worlds are live), and
 //! asserts the bake completes ([`NoesisLabelBaker::pending_count`] drops to zero)
 //! without panic.
@@ -109,8 +106,6 @@ fn bake_label_completes_without_cross_world_panic() {
         },
     );
 
-    // Drive until the bake drains. The predicate is the real success condition
-    // (no cross-world panic occurred and pending fell to zero), not a frame count.
     let completed = run_until(&mut app, CAP, |app| {
         app.world().resource::<NoesisLabelBaker>().pending_count() == 0
     });

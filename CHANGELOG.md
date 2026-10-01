@@ -230,9 +230,13 @@ in a one-UI app, and a `NoesisView` auto-attaches the bridges so a value set bef
 the scene exists lands once it builds. The version starts at 0.10.0 to move in step
 with `noesis_runtime`.
 
-[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/dead-money/noesis_bevy/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/dead-money/noesis_bevy/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/dead-money/noesis_bevy/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/dead-money/noesis_bevy/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/dead-money/noesis_bevy/compare/v0.12.1...v0.13.0
+[0.12.0]: https://github.com/dead-money/noesis_bevy/compare/v0.11.2...v0.12.0
 [0.11.2]: https://github.com/dead-money/noesis_bevy/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/dead-money/noesis_bevy/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/dead-money/noesis_bevy/compare/v0.10.0...v0.11.0

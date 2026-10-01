@@ -1,5 +1,7 @@
-//! Maps a [`Shader`] variant to the WGSL preprocessor defines that select the
-//! matching shader in `noesis.wgsl`.
+//! The WGSL define set for each Noesis [`Shader`], which selects that shader's
+//! variant of `noesis.wgsl` through [`preprocess`].
+//!
+//! [`preprocess`]: crate::render_device::shader_preproc::preprocess
 
 use std::collections::HashSet;
 
@@ -9,8 +11,9 @@ use noesis_runtime::render_device::types::Shader;
 ///
 /// # Panics
 ///
-/// Panics if `shader` has no `noesis.wgsl` variant yet; the message names the
-/// missing one.
+/// Panics if `shader` has no `noesis.wgsl` variant: the `SDF_*` gradient and
+/// pattern paints, every `SDF_LCD_*` except `SDF_LCD_SOLID`, and
+/// `CUSTOM_EFFECT`.
 #[must_use]
 #[allow(clippy::too_many_lines)] // one arm per shader variant, no abstraction buys clarity here
 pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
@@ -39,9 +42,8 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // PAINT_PATTERN_PLAIN gates the no-wrap branch in noesis.wgsl; each
-        // CLAMP / REPEAT / MIRROR_{U,V} / MIRROR variant below gates its own
-        // block instead.
+        // PAINT_PATTERN_PLAIN gates the no-wrap branch; the wrap variants
+        // below gate their own blocks instead.
         n if n == Shader::PATH_PATTERN.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_PAINT_TEXTURE");
@@ -59,12 +61,8 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // ─── Pattern wrap variants ─────────────────────────────────────────
-        // Vertex format differences (all mirror the SDK's FORMAT_FOR_VERTEX):
-        //   CLAMP         → PosTex0Rect     (pos + uv0 + rect)
-        //   REPEAT+MIRROR → PosTex0RectTile (pos + uv0 + rect + tile)
-        // The AA twins add coverage. `HAS_RECT` / `HAS_TILE` gate the
-        // matching VsIn attribute declarations.
+        // HAS_RECT / HAS_TILE must match the SDK's FORMAT_FOR_VERTEX: CLAMP is
+        // PosTex0Rect, REPEAT and MIRROR* are PosTex0RectTile, AA adds coverage.
         n if n == Shader::PATH_PATTERN_CLAMP.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_RECT");
@@ -159,7 +157,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // PAINT_LINEAR samples the `ramps` gradient texture.
         n if n == Shader::PATH_LINEAR.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_PAINT_TEXTURE");
@@ -175,7 +172,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // PAINT_RADIAL samples `ramps` at a computed radius.
         n if n == Shader::PATH_RADIAL.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_PAINT_TEXTURE");
@@ -191,9 +187,7 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_PATH_AA");
         }
 
-        // SDF text. Vertex format PosColorTex1: pos (loc 0), color (loc 1), uv1 (loc 3).
-        // The "paint texture" at group(2) carries the glyph atlas rather than
-        // a pattern/ramp; the Rust side picks the right batch slot to bind.
+        // group(2) carries the glyph atlas here, not a pattern or ramp.
         n if n == Shader::SDF_SOLID.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_UV1");
@@ -203,12 +197,8 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SDF");
         }
 
-        // Subpixel text. Same vertex format as SDF_SOLID (PosColorTex1) and the same glyph
-        // atlas at group(2); the difference is a dual-source fragment output
-        // (`@blend_src(0)` / `@blend_src(1)`) carrying per-channel subpixel
-        // coverage, composited with the `SrcOver_Dual` blend mode. Requires
-        // the device's `DUAL_SOURCE_BLENDING` feature; Noesis only emits these
-        // when `DeviceCaps::subpixel_rendering` is set (see `caps()` notes).
+        // Needs wgpu's DUAL_SOURCE_BLENDING; Noesis only emits it when
+        // `DeviceCaps::subpixel_rendering` is set, which the device leaves off.
         n if n == Shader::SDF_LCD_SOLID.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_UV1");
@@ -218,17 +208,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SDF_LCD");
         }
 
-        // GL ref Shader.140.frag EFFECT_OPACITY block:
-        //   fragColor = texture(image, uv1) * (opacity_ * paint.a)
-        // `image` is the offscreen-rendered pass of the layer being
-        // composited; the paint side controls the per-pixel opacity
-        // multiplier via its alpha (and the global `opacity` scalar via
-        // its uniform). HAS_IMAGE_TEXTURE pulls in the second
-        // texture+sampler pair the WGSL declares at group(3); HAS_UV1
-        // carries the sample coords for that texture (location 3).
-        //
-        // Noesis emits these when a layer composites back through an Opacity
-        // animation, an opacity mask, or a focus-visual fade.
         n if n == Shader::OPACITY_SOLID.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_UV1");
@@ -310,12 +289,8 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_OPACITY");
         }
 
-        // GL ref FSHADER(DOWNSAMPLE) / FSHADER(UPSAMPLE), no PAINT. These
-        // form the separable-blur resolve chain Noesis runs in the offscreen
-        // phase. DOWNSAMPLE box-filters four taps of `pattern` (group 2) at
-        // VS-computed UVs (vertex shader sets the DOWNSAMPLE flag to spread
-        // uv0 ± uv1 into uv0..uv3). UPSAMPLE blends the lower-res `image`
-        // (group 3) with the same-res `pattern` (group 2) by `color.a`.
+        // No PAINT. The DOWNSAMPLE define (distinct from EFFECT_DOWNSAMPLE)
+        // makes the vertex shader spread uv0 +/- uv1 into four tap coords.
         n if n == Shader::DOWNSAMPLE.0 => {
             d.insert("HAS_UV0");
             d.insert("HAS_UV1");
@@ -332,11 +307,8 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_UPSAMPLE");
         }
 
-        // Drop shadow. GL ref FSHADER2(SHADOW, SOLID). Vertex format PosColorTex1Rect:
-        // pos, color, uv1 (layer sample coords), rect (clamp bounds). Reads
-        // both the layer `image` (group 3 binding 0/1) and the blurred
-        // `shadow` (group 3 binding 2/3), plus cbuffer1_ps (group 1 binding 1)
-        // for shadow color / offset / blend factor.
+        // Reads `image` and `shadow` at group(3) plus cbuffer1_ps for the shadow
+        // color, offset, and blend factor.
         n if n == Shader::SHADOW.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_UV1");
@@ -348,9 +320,6 @@ pub fn defines_for_shader(shader: Shader) -> HashSet<&'static str> {
             d.insert("EFFECT_SHADOW");
         }
 
-        // Gaussian blur resolve. GL ref FSHADER2(BLUR, SOLID). Vertex format PosColorTex1:
-        // pos, color, uv1. Crossfades the layer `image` with the blurred
-        // `shadow` by cbuffer1_ps[0].
         n if n == Shader::BLUR.0 => {
             d.insert("HAS_COLOR");
             d.insert("HAS_UV1");

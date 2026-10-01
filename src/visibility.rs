@@ -1,27 +1,29 @@
-//! Per-view visibility bridge: show or hide named XAML elements on a single
-//! [`NoesisView`](crate::NoesisView).
+//! Show or hide named XAML elements on a [`NoesisView`](crate::NoesisView).
 //!
-//! Use this to flip a panel that already exists in the scene (a plain
-//! `<Border>`, `<UserControl>`, or `<aor:GamePanel>`) from gameplay code.
-//! Registering a Rust class purely to drive an `IsOpen` bool DP and a Style
-//! trigger would be heavier than the primitive itself.
+//! Use this to toggle a panel that already exists in the scene (a `<Border>`,
+//! `<UserControl>`, or custom control) from gameplay code, without a view model.
+//! Add a [`NoesisVisibility`] to the view's camera entity. Its
+//! [`set`](NoesisVisibility::set) map holds the desired visibility per
+//! `x:Name`: `true` is `Visible`, `false` is `Collapsed`.
 //!
-//! Add a [`NoesisVisibility`] component to the view's camera entity. Its `set`
-//! map is the desired visibility per `x:Name` (`true` = `Visible`,
-//! `false` = `Collapsed`), applied to the view's elements whenever the
-//! component changes (Bevy change detection).
+//! ```no_run
+//! use bevy::prelude::*;
+//! use noesis_bevy::visibility::NoesisVisibility;
 //!
-//! ```ignore
-//! commands.entity(view).insert(
-//!     NoesisVisibility::new()
-//!         .show("QuitConfirmOverlay")
-//!         .hide("LoadingSpinner"),
-//! );
+//! fn show_quit_overlay(commands: &mut Commands, view: Entity) {
+//!     commands.entity(view).insert(
+//!         NoesisVisibility::new()
+//!             .show("QuitConfirmOverlay")
+//!             .hide("LoadingSpinner"),
+//!     );
+//! }
 //! ```
 //!
-//! Everything runs on the main thread (Noesis is thread-affine): the reconcile
-//! system reads each view's component and applies the writes against that view's
-//! live scene, with no cross-world queues.
+//! The whole map is written to the scene in [`NoesisSet::Apply`] whenever the
+//! component changes and after the scene is rebuilt. The map is write-through:
+//! removing an entry leaves the element as it was. Names that aren't found log a
+//! warning. This bridge can't express `Hidden`; bind `Visibility` to a view-model
+//! string with [`HIDDEN`] for that.
 
 use std::collections::HashMap;
 
@@ -31,18 +33,17 @@ use crate::render::{NoesisRenderState, NoesisSet};
 
 /// `Visibility="Visible"`: show an element.
 ///
-/// These three consts back the **binding** show/hide pattern, the idiomatic way
-/// to show or hide an element from a panel's `DataContext` (as opposed to the
-/// [`NoesisVisibility`] name-bridge below): give a `#[derive(NoesisViewModel)]`
-/// component a `String` field, bind it in XAML with `Visibility="{Binding MyVis}"`,
-/// and set the field to one of these. Noesis's built-in enum converter parses the
-/// string, so no `bool`-to-`Visibility` converter is needed.
+/// These three strings are for showing and hiding through a binding instead of
+/// [`NoesisVisibility`]: give a [`NoesisViewModel`](crate::plain_vm::NoesisViewModel)
+/// component a `String` field, bind it with `Visibility="{Binding panel_vis}"`,
+/// and set the field to one of these. Noesis converts the string to the enum, so
+/// no `bool`-to-`Visibility` converter is needed.
 ///
 /// ```ignore
 /// #[derive(Component, NoesisViewModel)]
-/// struct Hud { panel_vis: String }            // bound: Visibility="{Binding panel_vis}"
-/// // ...
-/// hud.panel_vis = noesis_bevy::visibility::COLLAPSED.to_string();   // hide
+/// struct Hud { panel_vis: String } // Visibility="{Binding panel_vis}"
+///
+/// hud.panel_vis = noesis_bevy::visibility::COLLAPSED.to_string();
 /// ```
 pub const VISIBLE: &str = "Visible";
 /// `Visibility="Collapsed"`: hide an element and remove it from layout. See [`VISIBLE`].
@@ -50,69 +51,62 @@ pub const COLLAPSED: &str = "Collapsed";
 /// `Visibility="Hidden"`: hide an element but keep its layout space. See [`VISIBLE`].
 pub const HIDDEN: &str = "Hidden";
 
-/// Per-view visibility bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Desired visibility of named elements in one view. Add it to a
+/// [`NoesisView`](crate::NoesisView) camera entity. See the
+/// [module docs](crate::visibility) for when it applies.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisVisibility {
-    /// Desired visibility per element `x:Name` (`true` = `Visible`,
-    /// `false` = `Collapsed`). Written to the view's elements whenever this
-    /// component changes.
+    /// Desired visibility per `x:Name` (`true` = `Visible`, `false` =
+    /// `Collapsed`). Names may be scope-qualified (`"Host/Leaf"`).
     pub set: HashMap<String, bool>,
 }
 
 impl NoesisVisibility {
-    /// Starts an empty visibility set. Chain [`show`](Self::show),
-    /// [`hide`](Self::hide), or [`set`](Self::set) to fill it, then insert the
-    /// result on the [`NoesisView`](crate::NoesisView) camera.
+    /// Starts an empty map. Chain [`show`](Self::show), [`hide`](Self::hide) or
+    /// [`set`](Self::set), then insert the result on the view camera.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: set element `name` to `Visible`.
+    /// Builder: makes element `name` `Visible`.
     #[must_use]
     pub fn show(self, name: impl Into<String>) -> Self {
         self.set(name, true)
     }
 
-    /// Builder: set element `name` to `Collapsed`.
+    /// Builder: makes element `name` `Collapsed`.
     #[must_use]
     pub fn hide(self, name: impl Into<String>) -> Self {
         self.set(name, false)
     }
 
-    /// Builder: set element `name`'s visibility. `visible = true` → `Visible`;
-    /// `false` → `Collapsed`.
+    /// Builder: makes element `name` `Visible` (`true`) or `Collapsed` (`false`).
     #[must_use]
     pub fn set(mut self, name: impl Into<String>, visible: bool) -> Self {
         self.set.insert(name.into(), visible);
         self
     }
 
-    /// Reveal element `name` from a system holding `&mut NoesisVisibility`. The
-    /// runtime counterpart of [`show`](Self::show): the next reconcile sets it
-    /// to `Visible` on the live element.
+    /// Makes element `name` `Visible` on the next apply. The in-place form of
+    /// [`show`](Self::show), for systems holding `&mut NoesisVisibility`.
     pub fn reveal(&mut self, name: impl Into<String>) {
         self.set.insert(name.into(), true);
     }
 
-    /// Collapse element `name` from a system holding `&mut NoesisVisibility`. The
-    /// runtime counterpart of [`hide`](Self::hide): the next reconcile sets it
-    /// to `Collapsed` on the live element.
+    /// Makes element `name` `Collapsed` on the next apply. The in-place form of
+    /// [`hide`](Self::hide).
     pub fn collapse(&mut self, name: impl Into<String>) {
         self.set.insert(name.into(), false);
     }
 
-    /// Set element `name`'s visibility from a system holding
-    /// `&mut NoesisVisibility`. `visible = true` → `Visible`; `false` →
-    /// `Collapsed`. The runtime counterpart of [`set`](Self::set).
+    /// Makes element `name` `Visible` (`true`) or `Collapsed` (`false`) on the
+    /// next apply. The in-place form of [`set`](Self::set).
     pub fn write(&mut self, name: impl Into<String>, visible: bool) {
         self.set.insert(name.into(), visible);
     }
 }
 
-/// Reconcile every view's [`NoesisVisibility`]: apply desired visibility writes
-/// when the component changed.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_visibility_bridge(
     views: Query<(Entity, Ref<NoesisVisibility>)>,
@@ -128,8 +122,7 @@ pub(crate) fn sync_visibility_bridge(
     }
 }
 
-/// Wires the per-view visibility bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Wires the [`NoesisVisibility`] bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisVisibilityPlugin;
 
 impl Plugin for NoesisVisibilityPlugin {

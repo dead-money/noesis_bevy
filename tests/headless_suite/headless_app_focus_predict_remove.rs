@@ -1,17 +1,14 @@
-//! Integration test for two [`NoesisFocusControl`] features run headless through
-//! the real `NoesisPlugin` pipeline.
+//! Integration test for two [`NoesisFocusControl`] features on the headless harness.
 //!
-//! 1. `predict_focus_name`: verifies that [`FocusPredict`] reports the actual
-//!    `x:Name` of the predicted element, not just a yes/no against `expect`.
-//!    Three watches cover: the positive path (Right from "Left" names "Right",
-//!    `matches_expected=true`); the None path (tab-order direction unsupported, no
-//!    candidate); and the mismatch path (Right from "Right" wraps to "Left",
-//!    `predicted_name` is the actual target, not the caller's expect).
+//! 1. Prediction names: a [`FocusPredict`] reports the predicted element's actual
+//!    `x:Name`, not only a match against `expect`. Three watches cover the
+//!    positive path (Right from "Left" names "Right", `matches_expected=true`),
+//!    the unsupported tab-order direction (no candidate), and the mismatch path
+//!    (Right from "Right" wraps to "Left"; `predicted_name` is "Left").
 //!
-//! 2. `KeyBinding::remove_from`: verifies that dropping a [`KeyBindingSpec`]
-//!    detaches only that binding. F1 fires before removal and is silent after;
-//!    F2 fires in both phases. Fire frames are checked against the removal frame
-//!    to distinguish before/after.
+//! 2. Binding removal: dropping one [`KeyBindingSpec`] detaches only that
+//!    binding. F1 fires before removal and is silent after; F2 fires in both
+//!    phases.
 //!
 //! Theme-free / font-free XAML (bare `TextBox`es), so the scene builds without
 //! a font gate or theme dictionary.
@@ -30,11 +27,11 @@ use crate::common::{headless_app, run_until};
 const VIEW_W: u32 = 80;
 const VIEW_H: u32 = 32;
 
-/// Build the scene + focus the root + install both bindings & predict watches.
+/// Focus `Left`, install both key bindings and the predict watches.
 const SETUP_AT_FRAME: usize = 12;
 /// First chord press, with both F1 and F2 still installed.
 const PRESS1_AT_FRAME: usize = 20;
-/// Drop the F1 binding spec (keep F2). Reconciled this frame.
+/// Drop the F1 binding spec, keep F2.
 const REMOVE_AT_FRAME: usize = 28;
 /// Second chord press, after the F1 binding was detached.
 const PRESS2_AT_FRAME: usize = 36;
@@ -84,7 +81,7 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
                         size: UVec2::new(VIEW_W, VIEW_H),
                         ..default()
                     },
-                    // filled in at SETUP_AT_FRAME after the scene exists
+                    // Filled at SETUP_AT_FRAME, after the scene exists.
                     NoesisFocus::new(),
                     NoesisFocusControl::new(),
                 ))
@@ -161,11 +158,8 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
         },
     );
 
-    // Event-driven exit: the whole gesture sequence (setup, press-1, remove,
-    // press-2) is frame-gated in the Update system. Once the retained F2 chord has
-    // fired in the post-removal window the sequence is complete, and any F1 fire
-    // that was going to happen would have arrived on the same frame, so the
-    // negative "F1 detached" check below is meaningful.
+    // Exit once F2 fires after PRESS2. An F1 fire from the same press would arrive
+    // on the same frame, so the "F1 detached" check below is meaningful.
     let pred_fires = Arc::clone(&fires);
     let ran = run_until(&mut app, 240, move |_app| {
         pred_fires
@@ -233,8 +227,7 @@ fn predict_names_target_and_remove_detaches_only_dropped_binding() {
         "F2 should fire before removal; fires={fires:?}",
     );
 
-    // Post-removal: F1 detached, F2 retained. No upper frame bound now that the
-    // run ends event-driven; any fire at or after PRESS2 counts.
+    // Post-removal: F1 detached, F2 retained.
     assert!(
         !in_window(Key::F1, PRESS2_AT_FRAME, usize::MAX),
         "after remove_from, the F1 chord must NOT fire; fires={fires:?}",

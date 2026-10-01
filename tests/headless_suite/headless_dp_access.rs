@@ -1,7 +1,5 @@
 //! Headless test for the dp bridge: writes and reads back `f32`, `bool`, and
 //! `i32` dependency properties by `(x:Name, property)` with no binding or GPU.
-//!
-//!   `cargo test -p noesis_bevy --test headless_dp_access -- --nocapture`
 
 use std::collections::HashMap;
 

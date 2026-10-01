@@ -1,8 +1,7 @@
-//! Integration test for the `NoesisAnimation` bridge through the Noesis driving
-//! pipeline (headless, no render graph).
+//! Integration test for the `NoesisAnimation` bridge on the headless harness.
 //!
-//! No read-back message on this bridge; we observe via `NoesisDp` watches on the DPs the
-//! animations drive. Three elements cover the sub-features:
+//! The bridge has no read-back message, so `NoesisDp` watches observe the DPs the
+//! animations drive. Three elements:
 //!
 //! - **Box**: `animate_from` (From=20, base=10, To=50) then re-begun (To=25). Exercises
 //!   interpolation, From honored (gap 10..20 stays empty), held end, and re-begin.
@@ -10,14 +9,13 @@
 //!   map-iteration bugs (only-first / only-last).
 //! - **Other**: untargeted. Negative control; must stay at ActualWidth=10.
 //!
-//! Storyboards advance on wall-clock (`clock_origin`), so the tight `run_until` update loop
-//! still progresses animation time and samples each ~0.1 s animation many times, enabling the
-//! intermediate-value assertion. The two phases are sequenced on observed state rather than a
-//! frame count: phase B re-begins only once phase A has actually reached its To=50, so the
-//! instant frame cadence can't collapse the phases into each other.
+//! The UI clock is wall time, so the tight `run_until` loop still advances each 0.1 s
+//! animation and samples it many times, which the intermediate-value assertion needs.
+//! Phase B re-begins only after phase A is observed at To=50, so instant frames can't
+//! collapse the two phases.
 //!
-//! `NoesisAnimation` starts empty and is filled after the scene exists: the begin is one-shot
-//! and would be lost if the component were mutated before the view is live.
+//! `NoesisAnimation` starts empty and is filled once the scene is live: the begin is
+//! one-shot and would be lost before the view exists.
 //!
 //! Font-free XAML; only DP values are asserted.
 
@@ -79,8 +77,7 @@ fn animation_bridge_drives_named_property() {
                         size: UVec2::new(64, 64),
                         ..default()
                     },
-                    // Write-only component starts empty (no-op); filled in after
-                    // the scene exists so its one-shot begin isn't lost.
+                    // Filled once the scene is live; see the module docs.
                     NoesisAnimation::new(),
                     watcher(),
                 ))
@@ -117,8 +114,8 @@ fn animation_bridge_drives_named_property() {
                 scene_live = !observed_sys.lock().unwrap().is_empty();
             }
 
-            // Phase A: two distinct (name, property) entries (map-iteration test).
-            // Applied once the scene is live (a watch has reported a value).
+            // Phase A, once a watch has reported (scene live): two distinct
+            // (name, property) entries.
             if *phase == 0 && scene_live {
                 for mut anim in &mut q {
                     *anim = NoesisAnimation::new()
@@ -128,9 +125,7 @@ fn animation_bridge_drives_named_property() {
                 *phase = 1;
             }
 
-            // Phase B: re-assigning re-begins; replaces the held 50. Gated on
-            // phase A actually reaching its To=50 so the phases stay ordered even
-            // though frames are instant now.
+            // Phase B: re-assigning re-begins and replaces the held 50.
             if *phase == 1 && *saw_50 {
                 for mut anim in &mut q {
                     *anim = NoesisAnimation::new().animate_from("Box", "Width", 50.0, 25.0, 0.1);

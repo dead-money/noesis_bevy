@@ -1,10 +1,9 @@
-//! Pipeline cache keyed on `(Shader, RenderState, VertexFormat)` plus the
-//! lazy build path. Pipelines are constructed on first `draw_batch` for a
-//! key and reused thereafter.
+//! Lazily built render pipelines, one per [`PipelineKey`].
 //!
-//! `RenderState` and `VertexFormat` are part of the key so the same `Shader`
-//! can produce multiple pipelines when batches differ in blend mode, stencil
-//! mode, color-write mask, wireframe flag, or vertex stride.
+//! [`PipelineCache`] compiles a pipeline the first time a draw needs its key
+//! and reuses it afterwards. One Noesis shader can map to several pipelines
+//! because blend mode, stencil mode, color writes, and stencil-attachment
+//! presence are all part of the key.
 
 use std::collections::HashMap;
 
@@ -19,36 +18,31 @@ use crate::render_device::vertex_layout::{attributes_for_format, stride_for_form
 
 const NOESIS_WGSL: &str = include_str!("shaders/noesis.wgsl");
 
-/// Identifies a unique pipeline state combination. Each unique key produces
-/// one cached `wgpu::RenderPipeline`.
-///
-/// `vertex_format` is derived from `shader` via the SDK lookup tables but is
-/// stored explicitly so it participates in the hash (the key must roundtrip
-/// through `HashMap`'s `Hash` cleanly).
+/// One pipeline state combination. Each distinct key gets one cached
+/// `wgpu::RenderPipeline`. Build it from a batch with [`PipelineKey::from_batch`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PipelineKey {
     /// Raw `Shader::Enum` value selecting which WGSL variant to compile.
     pub shader: u8,
-    /// Raw `RenderState` bits driving blend mode, stencil mode, color-write
-    /// mask, and wireframe flag.
+    /// Raw `RenderState` bits: blend mode, stencil mode, color-write enable,
+    /// and the wireframe flag (which the pipeline ignores).
     pub render_state: u8,
     /// Raw `VertexFormat::Enum` value selecting the vertex stride and
-    /// attribute layout. Derived from `shader` but stored so it hashes.
+    /// attribute layout. Always the format the SDK tables assign to `shader`.
     pub vertex_format: u8,
-    /// Whether the render pass this pipeline draws into has a stencil
-    /// attachment. wgpu requires the pipeline's `depth_stencil` presence to
-    /// match the pass's `depth_stencil_attachment`, and the same
-    /// `(shader, render_state, vertex_format)` can be drawn both into a
-    /// stenciled offscreen RT (and the onscreen intermediate) and into a
-    /// stencil-less RT, so it has to be part of the key.
+    /// Whether the destination pass has a stencil attachment. wgpu requires
+    /// the pipeline's `depth_stencil` to match the pass, and the same batch
+    /// state can draw into both stenciled and stencil-less targets.
     pub has_stencil: bool,
 }
 
 impl PipelineKey {
-    /// Derive the key for a draw `batch`, looking the vertex format up from
-    /// the batch's shader. `has_stencil` records whether the destination
-    /// render pass carries a stencil attachment so stenciled and stencil-less
-    /// passes get distinct pipelines.
+    /// Key for drawing `batch` into a pass that does (`has_stencil`) or
+    /// doesn't have a stencil attachment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `batch.shader` is out of range for the SDK lookup tables.
     #[must_use]
     pub fn from_batch(batch: &Batch, has_stencil: bool) -> Self {
         let vshader = VERTEX_FOR_SHADER[batch.shader.0 as usize];
@@ -62,10 +56,9 @@ impl PipelineKey {
     }
 }
 
-/// Stencil attachment format used by render targets and the onscreen stencil.
-/// `Stencil8` is the tightest format that covers Noesis's clip/mask stencil
-/// ops; we don't allocate depth because the device exposes no depth-buffered
-/// caps (the `*_ZTest` stencil modes degrade to their non-depth twins).
+/// Stencil format for render targets and the onscreen stencil. There is no
+/// depth aspect, so the `*_ZTest` stencil modes behave like their non-depth
+/// twins.
 pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 
 /// Build the `wgpu::DepthStencilState` for a `RenderState`'s stencil mode.
@@ -113,10 +106,7 @@ fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
             StencilOperation::Zero,
             StencilOperation::Replace,
         ),
-        // Stencil mode is an SDK-controlled raw; a value added later warns and
-        // degrades to the disabled mode (always pass, no write) rather than
-        // panicking on the pipeline-build path — a benign default keeps the
-        // device rendering. Matches the raw-conversion policy in `wgpu_device`.
+        // Unknown SDK raw: degrade rather than panic inside the FFI callback.
         other => {
             warn_once!("unknown StencilMode raw value {other}; disabling stencil test");
             (
@@ -146,15 +136,13 @@ fn depth_stencil_for(render_state: RenderState) -> wgpu::DepthStencilState {
     }
 }
 
-/// Lazy pipeline cache. Holds the bits needed to build a new pipeline when a
-/// fresh `PipelineKey` arrives at `draw_batch`: the wgpu device, the layout,
-/// and the target color format.
+/// Pipelines built on demand from `noesis.wgsl`, keyed by [`PipelineKey`].
 ///
-/// The pipeline layout binds four groups: `group(0)` vs uniforms, `group(1)`
-/// ps uniforms (`cbuffer0_ps` + `cbuffer1_ps`), `group(2)` pattern texture +
-/// sampler, `group(3)` image + shadow textures + samplers. Shaders that don't
-/// use a group's bindings still share this layout; the Rust side binds a dummy
-/// bind group there since wgpu requires every declared group to be set.
+/// Every pipeline shares one layout of four bind groups: `group(0)` vertex
+/// uniforms, `group(1)` pixel uniforms (`cbuffer0_ps` and `cbuffer1_ps`),
+/// `group(2)` the paint texture and sampler, and `group(3)` the image and
+/// shadow textures and samplers. A shader that ignores a group still has to
+/// have something bound there.
 pub struct PipelineCache {
     device: wgpu::Device,
     pipeline_layout: wgpu::PipelineLayout,
@@ -163,9 +151,9 @@ pub struct PipelineCache {
 }
 
 impl PipelineCache {
-    /// Create an empty cache. `device` and `pipeline_layout` build pipelines
-    /// on demand, and `target_format` is the color format every pipeline
-    /// writes into (the onscreen intermediate or an offscreen render target).
+    /// Creates an empty cache. `pipeline_layout` must have the four-group
+    /// layout described on [`PipelineCache`], and `target_format` is the color
+    /// format of every target the pipelines will draw into.
     #[must_use]
     pub fn new(
         device: wgpu::Device,
@@ -180,25 +168,22 @@ impl PipelineCache {
         }
     }
 
-    /// Ensure a pipeline exists for `key`, building it if necessary.
-    ///
-    /// Returns nothing; pair with [`Self::get`] to fetch the pipeline. The
-    /// split lets `draw_batch` borrow other fields of
-    /// `WgpuRenderDevice` (the encoder) between the two calls without
-    /// tripping the borrow checker.
+    /// Builds the pipeline for `key` if it isn't cached yet. Fetch it with
+    /// [`Self::get`]; the split lets the caller hold other borrows between the
+    /// two calls.
     ///
     /// # Panics
     ///
-    /// Panics if the WGSL build path fails (unported `Shader` variant, or
-    /// `naga` rejecting the preprocessed source). Both are bugs in
-    /// `shader_defines` / `noesis.wgsl`, not user input.
+    /// Panics if `key.shader` has no WGSL variant (see [`defines_for_shader`]).
+    /// A variant that fails WGSL validation is reported through the wgpu
+    /// device's error handler.
     pub fn ensure(&mut self, key: PipelineKey) {
         self.cache.entry(key).or_insert_with(|| {
             build_pipeline(&self.device, &self.pipeline_layout, self.target_format, key)
         });
     }
 
-    /// Look up a previously-ensured pipeline.
+    /// Returns the pipeline built by [`Self::ensure`] for `key`.
     ///
     /// # Panics
     ///
@@ -211,15 +196,8 @@ impl PipelineCache {
     }
 }
 
-/// Map a Noesis `BlendMode::Enum` raw value to a wgpu `BlendState`.
-///
-/// `None` means "no blending" (the wgpu default): the source value overwrites
-/// the destination. That's `BlendMode::Src`. Every other variant returns `Some`
-/// with the appropriate factor / op pair.
-///
-/// `SrcOverDual` uses dual-source blending (a second `@location(0)
-/// @blend_src(1)` fragment output) for SDF LCD subpixel rendering; the second
-/// output carries per-channel coverage that drives the `OneMinusSrc1` factor.
+/// wgpu blend state for a raw `BlendMode::Enum`. `None` is `BlendMode::Src`
+/// (overwrite). All modes assume premultiplied alpha.
 fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
     let comp = |src, dst| wgpu::BlendComponent {
         src_factor: src,
@@ -251,17 +229,12 @@ fn blend_state_for(blend_mode_raw: u8) -> Option<wgpu::BlendState> {
             alpha: src_over_alpha,
         }),
         5 => Some(wgpu::BlendState {
-            // BlendMode::SrcOverDual: cs + cd*(1 - src1) per channel, used by
-            // the SDF LCD subpixel shader. The fragment's second output
-            // (`@blend_src(1)`) carries the per-channel coverage; `Src1` /
-            // `OneMinusSrc1` pull it into the blend. Requires the device's
-            // `DUAL_SOURCE_BLENDING` feature (only reached when the SDF_LCD_*
-            // shaders are emitted, which needs `DeviceCaps::subpixel_rendering`).
+            // BlendMode::SrcOverDual: cs + cd*(1 - src1) per channel. src1 is
+            // the LCD shader's `@blend_src(1)` coverage; needs DUAL_SOURCE_BLENDING.
             color: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc1),
             alpha: comp(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc1Alpha),
         }),
-        // Unknown SDK blend raw: warn and fall back to premultiplied SrcOver,
-        // the common case, rather than panic on the pipeline-build path.
+        // Unknown SDK raw: degrade rather than panic inside the FFI callback.
         other => {
             warn_once!("unknown BlendMode raw value {other}; using SrcOver");
             Some(wgpu::BlendState {
@@ -293,12 +266,8 @@ fn build_pipeline(
         attributes: &attrs,
     };
 
-    // BlendMode comes from RenderState bits 1-3. ColorEnable gates color
-    // writes: Noesis emits stencil-only MASK draws with `color_enable=0` that
-    // write `vec4(1.0)` from the fragment shader. Without honoring the flag,
-    // those white pixels land in the color attachment and obscure subsequent
-    // draws (seen as a white panel over hommlet's dev console log on the
-    // second open).
+    // Stencil-only MASK draws output vec4(1.0) with color_enable off; honoring
+    // the flag keeps those white pixels out of the color target.
     let render_state = RenderState(key.render_state);
     let blend = blend_state_for(render_state.blend_mode_raw());
     let write_mask = if render_state.color_enable() {
@@ -306,9 +275,6 @@ fn build_pipeline(
     } else {
         wgpu::ColorWrites::empty()
     };
-    // The pipeline must declare a depth_stencil state iff the render pass it's
-    // used in has a stencil attachment (see `PipelineKey::has_stencil`). The
-    // stencil op/compare comes from the render state's stencil mode.
     let depth_stencil = key.has_stencil.then(|| depth_stencil_for(render_state));
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

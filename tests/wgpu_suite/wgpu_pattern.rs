@@ -1,9 +1,12 @@
-//! Tests `PATH_PATTERN` sampling from a registered `wgpu::Texture` via the group(2)
-//! bind group. Setup: 4×4 RT, 2×2 pattern texture (red/green/blue/yellow), full-screen
-//! quad, nearest sampler. Expected readback (clip `y=+1` maps to row 0):
-//! ```
-//!   row 0 | red   green
-//!   row 3 | blue  yellow
+//! `PATH_PATTERN` sampling a registered texture through the group(2) bind group.
+//!
+//! A full-screen quad samples a 2×2 red/green/blue/yellow pattern with a nearest
+//! sampler into a 4×4 RT. Each 2×2 quadrant of the readback is one texel (clip
+//! `y = +1` is row 0):
+//!
+//! ```text
+//!   rows 0-1 | red   green
+//!   rows 2-3 | blue  yellow
 //! ```
 
 use std::ffi::c_void;
@@ -80,7 +83,7 @@ async fn run_test() {
         needs_stencil: false,
     });
 
-    // Noesis would issue Shader::CLEAR; the test harness doesn't drive Noesis.
+    // No Noesis frame here to issue a CLEAR batch, so pre-clear directly.
     {
         let resolve = rd.texture(rt.resolve_texture.handle).expect("resolve");
         let view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
@@ -145,9 +148,7 @@ async fn run_test() {
         MipFilter::Disabled,
     );
 
-    // Can't produce a Noesis-owned Texture* in standalone wgpu tests; pattern
-    // resolution goes through test_set_forced_pattern. The non-null pointer
-    // satisfies shader_uses_pattern assertions but is never dereferenced.
+    // Standalone wgpu tests can't produce a Noesis-owned `Texture*`.
     rd.test_set_forced_pattern(Some((pattern_binding.handle, sampler_state)));
 
     rd.begin_offscreen_render();
@@ -280,8 +281,7 @@ fn make_pattern_batch(
         num_vertices: 6,
         start_index: 0,
         num_indices: 6,
-        // Non-null so shader_uses_pattern assertions pass; never dereferenced
-        // (test_set_forced_pattern handles actual resolution).
+        // Never dereferenced: `test_set_forced_pattern` replaces it.
         pattern: std::ptr::dangling_mut(),
         ramps: std::ptr::null_mut(),
         image: std::ptr::null_mut(),

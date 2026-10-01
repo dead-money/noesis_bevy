@@ -1,8 +1,6 @@
-//! End-to-end test: register a `WgpuRenderDevice`, load a `<Grid Background="Red"/>`,
-//! drive one frame, and assert every sampled pixel is solid red.
-//! Verifies that the `XamlProvider` / `IView` / `IRenderer` FFI surface is correctly wired.
-//!
-//! Requires `NOESIS_SDK_DIR` to be set.
+//! End to end through Noesis: register a `WgpuRenderDevice`, load
+//! `<Grid Background="Red"/>`, render one frame, and assert the sampled pixels
+//! are solid red. Covers the `XamlProvider`, `View` and `Renderer` FFI wiring.
 
 use std::collections::HashMap;
 
@@ -14,7 +12,7 @@ const BYTES_PER_ROW: u32 = 512; // 128 * 4, wgpu COPY_BYTES_PER_ROW_ALIGNMENT-al
 
 const RED: [u8; 4] = [255, 0, 0, 255];
 
-// Owned bytes keep the returned slice valid per the "must outlive parsing" contract on load_xaml.
+// Owned bytes: the slice `load_xaml` returns must outlive parsing.
 struct InMemoryXamlProvider {
     bytes: HashMap<String, Vec<u8>>,
 }
@@ -40,7 +38,7 @@ fn noesis_drives_wgpu_render_device_to_solid_red() {
     }
     noesis_runtime::init();
 
-    // Scope so every Noesis-owned object drops before shutdown().
+    // Every Noesis object lives inside run_test, so all drop before shutdown().
     pollster::block_on(run_test());
 
     noesis_runtime::shutdown();
@@ -107,7 +105,7 @@ async fn run_test() {
     // Don't call SetProjectionMatrix: Noesis derives the right matrix from
     // DeviceCaps (clip_space_y_inverted, depth_range_zero_to_one). Supplying
     // an OpenGL-style ortho here makes Noesis's render-tree visibility pass
-    // cull child elements; see tests/headless_xaml_nested.rs.
+    // cull child elements; see headless_xaml_nested.rs.
 
     {
         let mut renderer = view.renderer();

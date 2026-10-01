@@ -1,10 +1,9 @@
-//! Integration test for [`NoesisResources`]: registers app-level resources through
-//! `NoesisPlugin` (headless) and verifies `{StaticResource}` references resolve.
+//! Integration test for [`NoesisResources`] on the headless harness: code-built
+//! application resources resolve `{StaticResource}` references.
 //!
-//! Asserts `Themed.ActualWidth == 40` (set by `{StaticResource PanelWidth}`; unset
-//! would Grid-stretch to 64 or auto), `Plain.ActualWidth == 20` (negative control,
-//! no resource reference), and that [`NoesisResourcesInstalled`] confirms both keys
-//! present in the live application resources.
+//! Asserts `Themed.ActualWidth == 40` (from `{StaticResource PanelWidth}`),
+//! `Plain.ActualWidth == 20` (negative control, no resource reference), and that
+//! [`NoesisResourcesInstalled`] lists both keys.
 
 use std::sync::{Arc, Mutex};
 
@@ -43,8 +42,7 @@ fn app_resources_resolve_static_resource() {
 
     let mut app = headless_app();
 
-    // Registered before the scene builds: bridge installs in Sync, scene builds in Ensure,
-    // so {StaticResource} references resolve at parse time.
+    // Installed in NoesisSet::Sync, before the scene parses in NoesisSet::Ensure.
     app.insert_resource(
         NoesisResources::new()
             .solid("AccentBrush", [1.0, 0.0, 0.0, 1.0])
@@ -92,8 +90,6 @@ fn app_resources_resolve_static_resource() {
         },
     );
 
-    // Stop as soon as both resource keys are confirmed installed and both watched
-    // widths have converged, rather than padding a fixed frame count.
     let pred_view = Arc::clone(&view_entity);
     let pred_observed = Arc::clone(&observed);
     let pred_installed = Arc::clone(&installed);
@@ -138,8 +134,7 @@ fn app_resources_resolve_static_resource() {
             .map(|(_, _, _, v)| v.clone())
     };
 
-    // AccentBrush has no scalar DP to read back; NoesisResourcesInstalled is the
-    // only proof it registered.
+    // AccentBrush has no scalar DP to watch; only NoesisResourcesInstalled shows it.
     let present = installs.last().expect("a NoesisResourcesInstalled message");
     assert!(
         present.contains(&"AccentBrush".to_string()),
@@ -150,13 +145,11 @@ fn app_resources_resolve_static_resource() {
         "the value resource should be installed + confirmed; got {present:?}",
     );
 
-    // Unset would Grid-stretch to 64 or auto; 40 proves the resource resolved.
     assert_eq!(
         latest("Themed", "ActualWidth"),
         Some(DpValue::F32(40.0)),
         "resources: Width={{StaticResource PanelWidth}} (40) should give ActualWidth 40",
     );
-    // Negative control: no StaticResource, so authored width unchanged.
     assert_eq!(
         latest("Plain", "ActualWidth"),
         Some(DpValue::F32(20.0)),

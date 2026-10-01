@@ -1,13 +1,10 @@
-// Stage the Noesis runtime library so binaries linked from this crate (examples,
-// integration tests) find it without manual setup. noesis_runtime's build.rs
-// links Noesis and publishes the resolved Bin/<platform> path as
-// DEP_NOESIS_LIB_DIR (via `cargo:lib_dir=` + `links = "Noesis"`); we reuse it.
+// Stages the Noesis runtime library so this crate's examples and tests run
+// without manual setup. noesis_runtime's build script publishes the resolved
+// Bin/<platform> path as DEP_NOESIS_LIB_DIR (`links = "Noesis"`).
 //
-// Linux bakes that path into the binary's rpath so libNoesis.so loads without
-// LD_LIBRARY_PATH. Windows has no rpath: copy Noesis.dll next to the binaries so
-// the loader finds it, the parity of the rpath. (noesis_runtime stages the same
-// DLL into the dependency's build; doing it here too covers this crate's own
-// incremental rebuilds.)
+// Linux bakes that path into the rpath. Windows has no rpath, so Noesis.dll is
+// copied next to the binaries instead. noesis_runtime stages the same DLL for
+// its own build; repeating it here covers this crate's incremental rebuilds.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -15,9 +12,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-env-changed=DEP_NOESIS_LIB_DIR");
 
-    // docs.rs (and the `doc` CI job) build with no Noesis SDK. noesis_runtime's
-    // build.rs short-circuits on DOCS_RS before it emits DEP_NOESIS_LIB_DIR, so
-    // there's nothing to stage. Skip.
+    // No SDK under DOCS_RS: noesis_runtime returns before emitting DEP_NOESIS_LIB_DIR.
     if env::var_os("DOCS_RS").is_some() {
         return;
     }
@@ -32,19 +27,15 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
         }
         Ok("windows") => {
-            // The loader finds Noesis.dll next to the .exe or on PATH. Copy it
-            // beside this crate's test and example binaries so they run straight
-            // from `cargo test` / `cargo run`. OUT_DIR is
-            // <target>/<profile>/build/<pkg>-<hash>/out; the profile dir three
-            // levels up holds the binaries and their deps/ and examples/.
+            // OUT_DIR is <target>/<profile>/build/<pkg>-<hash>/out; three levels
+            // up is the profile dir holding the binaries, deps/ and examples/.
             let dll = Path::new(&lib_dir).join("Noesis.dll");
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
             if let Some(profile_dir) = out_dir.ancestors().nth(3) {
                 for sub in ["", "deps", "examples"] {
                     let dest = profile_dir.join(sub);
                     if dest.is_dir() {
-                        // Best effort: a stale copy or a missing dir is not fatal,
-                        // PATH still works as a fallback.
+                        // Best effort: PATH remains a fallback.
                         let _ = std::fs::copy(&dll, dest.join("Noesis.dll"));
                     }
                 }

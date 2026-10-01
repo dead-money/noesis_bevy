@@ -1,8 +1,9 @@
-//! Tests dual-source blending for `SDF_LCD_SOLID` at coverage limit cases (0, 1).
-//! No SDK GL/VK reference exists for the LCD path, so limit cases are used
-//! instead of pinning subpixel constants. Broken `@blend_src` wiring or a
-//! failed pipeline compile causes the blend factors to disagree and the pixel
-//! assertions fail. Skips without `DUAL_SOURCE_BLENDING`.
+//! Dual-source blending for `SDF_LCD_SOLID` at the coverage limits 0 and 1.
+//!
+//! The SDK has no GL/VK reference for the LCD path to pin subpixel constants
+//! against, so the test checks the limits: full coverage yields the text color,
+//! zero coverage keeps the background. Broken `@blend_src` wiring fails one of
+//! them. Skips when the adapter lacks `DUAL_SOURCE_BLENDING`.
 
 use std::ffi::c_void;
 
@@ -23,8 +24,9 @@ const IDENTITY: [f32; 16] = [
     0.0, 0.0, 1.0, 0.0, //
     0.0, 0.0, 0.0, 1.0,
 ];
-// uv1 spans 0..1 so `st1 = uv1 * glyph_size` gives ~1 texel/px gradient,
-// keeping the SDF AA window narrow enough that limit-case distances saturate.
+// With uv1 spanning 0..1 over the 4 px RT, `st1 = uv1 * glyph_size` moves ~1
+// texel per pixel, which keeps the SDF AA window narrow enough for the limit
+// cases to saturate.
 const GLYPH_SIZE: [f32; 2] = [4.0, 4.0];
 const GREEN_BG: wgpu::Color = wgpu::Color {
     r: 0.0,
@@ -143,7 +145,7 @@ async fn run_lcd_draw(
         needs_stencil: false,
     });
 
-    // draw_batch loads the color attachment, so pre-fill with the green background.
+    // draw_batch loads the color attachment, so this clear is the background.
     clear_rt(device, queue, rd, rt.resolve_texture.handle, GREEN_BG);
 
     let vb = lcd_quad(color);
@@ -217,8 +219,7 @@ fn quad_indices() -> Vec<u8> {
     ib
 }
 
-// uv1 tracks pos (0..1) so `st1 = uv1 * glyph_size` gives the nonzero gradient
-// the SDF AA window requires.
+// uv1 must vary across the quad: the SDF AA window needs a nonzero gradient.
 fn lcd_quad(color: [u8; 4]) -> Vec<u8> {
     let verts = [
         ([-1.0f32, -1.0], [0.0f32, 0.0]),

@@ -1,36 +1,32 @@
-//! Per-view `VisualStateManager::GoToState` writes against named XAML controls:
-//! the code-driven counterpart to a `ControlTemplate`'s trigger-driven visual
-//! states (e.g. a control's `CommonStates`: `Normal` / `MouseOver` / `Pressed`
-//! / `Disabled`, or app-authored groups).
+//! Move named templated controls between visual states from code.
 //!
-//! Noesis declares visual states inside a control's `ControlTemplate` as
-//! `VisualStateGroup`s. `VisualStateManager::GoToState` is the SDK's one
-//! entry point for transitioning a templated control between those states from
-//! code; the runtime surfaces it as `FrameworkElement::go_to_state`. This bridge
-//! drives it per element `x:Name`, so gameplay code can flip a HUD widget to
-//! "Alert" or a button to "Pressed" without routing a fake input event.
+//! A control's `ControlTemplate` declares `VisualStateGroup`s (for example
+//! `CommonStates` with `Normal`, `MouseOver`, `Pressed` and `Disabled`, or groups
+//! you author). This bridge calls `VisualStateManager::GoToState` on elements by
+//! `x:Name`, so gameplay code can switch a HUD widget to `"Alert"` or a button to
+//! `"Pressed"` without faking input.
 //!
-//! Add a [`NoesisVisualState`] component to the view's camera entity. Its
-//! `states` map is the desired `(state name, use_transitions)` per `x:Name`,
-//! applied to the view's controls whenever the component changes (Bevy change
-//! detection). `use_transitions = true` runs the state's `VisualTransition`
-//! (animated change); `false` snaps straight to the target state. This is a
-//! write-only bridge: there is no read-back message.
+//! Add a [`NoesisVisualState`] to the [`NoesisView`](crate::NoesisView) camera
+//! entity. Its [`states`](NoesisVisualState::states) map holds the target state
+//! per `x:Name`.
 //!
-//! ```ignore
-//! commands.entity(view).insert(
-//!     NoesisVisualState::new().state("AlarmPanel", "Alert", true),
-//! );
+//! ```no_run
+//! use bevy::prelude::*;
+//! use noesis_bevy::visual_state::NoesisVisualState;
+//!
+//! fn raise_alarm(commands: &mut Commands, view: Entity) {
+//!     commands
+//!         .entity(view)
+//!         .insert(NoesisVisualState::new().state("AlarmPanel", "Alert", true));
+//! }
 //! ```
 //!
-//! `GoToState` only does useful work for a *templated control*: it walks the
-//! element's `ControlTemplate` for the `VisualStateGroup` owning the named
-//! state. Targeting a bare element with no template (or naming a state no group
-//! knows) is a no-op and logs a warning once per apply.
-//!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the state
-//! transitions against that view's live scene, with no cross-world queues.
+//! Every entry in the map is applied in [`NoesisSet::Apply`] whenever the
+//! component changes and after the scene is rebuilt, so changing one entry
+//! re-runs the transition for all of them. Removing an entry leaves the control
+//! in its current state. `GoToState` only works on a templated control whose
+//! template defines the named state; a missing name, an untemplated element or
+//! an unknown state logs a warning on each apply. There is no read-back.
 
 use std::collections::HashMap;
 
@@ -38,31 +34,30 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// A requested visual-state transition: the target state's name and whether to
-/// run its `VisualTransition` (`true`, animated) or snap to it (`false`).
+/// Target state name, and whether to run its `VisualTransition` (`true`) or
+/// snap straight to it (`false`).
 pub type StateRequest = (String, bool);
 
-/// Per-view visual-state bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Target visual states of named controls in one view. Add it to a
+/// [`NoesisView`](crate::NoesisView) camera entity. See the
+/// [module docs](crate::visual_state) for when it applies.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisVisualState {
-    /// Desired `(state, use_transitions)` per control `x:Name`. Driven into the
-    /// view's controls via `VisualStateManager::GoToState` whenever this
-    /// component changes.
+    /// Target `(state, use_transitions)` per control `x:Name`. Names may be
+    /// scope-qualified (`"Host/Leaf"`).
     pub states: HashMap<String, StateRequest>,
 }
 
 impl NoesisVisualState {
-    /// An empty bridge with no requested transitions. Chain [`state`](Self::state)
-    /// to fill in the per-`x:Name` targets.
+    /// Starts an empty map. Chain [`state`](Self::state) to fill it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: transition control `name` to visual state `state`. Pass
-    /// `use_transitions = true` to run the state's `VisualTransition` (animated),
-    /// or `false` to snap straight to it.
+    /// Builder: moves control `name` to visual state `state`. With
+    /// `use_transitions` it runs the state's `VisualTransition`; without, it
+    /// snaps straight to the state.
     #[must_use]
     pub fn state(
         mut self,
@@ -75,11 +70,9 @@ impl NoesisVisualState {
         self
     }
 
-    /// Transition control `name` to visual state `state` from a system holding
-    /// `&mut NoesisVisualState`. The runtime counterpart of [`state`](Self::state):
-    /// the next reconcile drives it into the live control. Pass
-    /// `use_transitions = true` to run the state's `VisualTransition` (animated),
-    /// or `false` to snap straight to it.
+    /// Moves control `name` to visual state `state` on the next apply. The
+    /// in-place form of [`state`](Self::state), for systems holding
+    /// `&mut NoesisVisualState`.
     pub fn go_to(
         &mut self,
         name: impl Into<String>,
@@ -91,8 +84,6 @@ impl NoesisVisualState {
     }
 }
 
-/// Reconcile every view's [`NoesisVisualState`]: apply desired state transitions
-/// when the component changed. Write-only, with no read-back message.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_visual_state_bridge(
     views: Query<(Entity, Ref<NoesisVisualState>)>,
@@ -108,8 +99,7 @@ pub(crate) fn sync_visual_state_bridge(
     }
 }
 
-/// Wires the per-view visual-state bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Wires the [`NoesisVisualState`] bridge. Added by [`crate::NoesisPlugin`].
 pub struct NoesisVisualStatePlugin;
 
 impl Plugin for NoesisVisualStatePlugin {

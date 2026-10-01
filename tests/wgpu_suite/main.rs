@@ -1,9 +1,9 @@
-//! wgpu device suite (audit R2): direct-wgpu render tests + the Noesis-on-wgpu render-device tests.
+//! wgpu suite: tests that drive `WgpuRenderDevice` directly, and tests that run
+//! Noesis views on it without a Bevy app.
 //!
-//! Each source file in this directory is one `#[test]` module. The suite
-//! links Bevy + Noesis once for all of them instead of once per file, and
-//! runs under cargo-nextest so every test still gets its own process (Noesis
-//! state is process-global and thread-affine). See tests/README.md.
+//! Each source file in this directory is one `#[test]` module, linked into one
+//! binary. Run it under cargo-nextest so every test gets its own process; Noesis
+//! state is process-global and thread-affine. See `tests/README.md`.
 
 #[path = "../common/mod.rs"]
 mod common;

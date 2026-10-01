@@ -1,15 +1,10 @@
-//! XAML asset plumbing: feeds Bevy-loaded XAML bytes to Noesis's parser.
+//! XAML assets and the provider Noesis loads them through.
 //!
-//! Noesis fetches XAML bytes by URI through a
-//! [`noesis_runtime::xaml_provider::XamlProvider`]; Bevy's asset system is the
-//! natural source. [`update_xaml_registry`] mirrors loaded [`XamlAsset`] bytes
-//! into the [`XamlRegistry`] resource; the [`crate::render`] driving pipeline
-//! syncs those into the [`SharedXamlMap`] backing a [`BevyXamlProvider`], which
-//! answers Noesis's `load_xaml` callback while a scene builds. Registry, sync,
-//! and callback all run in the main world, on the one thread Noesis is pinned
-//! to, so no lock ever crosses a world boundary.
-//!
-//! Data flow:
+//! `.xaml` files load as [`XamlAsset`]s through Bevy's asset server.
+//! [`update_xaml_registry`] mirrors them into [`XamlRegistry`], keyed by asset
+//! path. Each frame the plugin copies the registry into the [`SharedXamlMap`]
+//! behind [`BevyXamlProvider`], which answers Noesis's requests for XAML by URI
+//! while a scene builds. Everything runs on the main thread, where Noesis lives.
 //!
 //! ```text
 //!   AssetEvent<XamlAsset> ─▶ update_xaml_registry ─▶ XamlRegistry
@@ -17,6 +12,9 @@
 //!                                                        ▼
 //!                                  SharedXamlMap ─▶ BevyXamlProvider::load_xaml
 //! ```
+//!
+//! To serve XAML from outside the asset system (a file outside `assets/`, or
+//! generated markup), call [`XamlRegistry::insert`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,21 +24,15 @@ use bevy::prelude::*;
 
 use noesis_runtime::xaml_provider::XamlProvider;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// XamlAsset + loader
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Raw XAML bytes loaded from the asset system. Noesis parses the bytes
-/// directly; we never interpret them on the Rust side.
+/// Raw XAML bytes from the asset server. Noesis parses them; Rust never does.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct XamlAsset {
-    /// UTF-8 XAML markup. Wrapped in an `Arc` so [`XamlRegistry`] can share
-    /// handles across the world boundary without bulk-copying every frame.
+    /// UTF-8 XAML markup. `Arc` so the per-frame registry sync copies handles,
+    /// not bytes.
     pub bytes: Arc<Vec<u8>>,
 }
 
-/// Loader for the `.xaml` extension. Reads the whole file into memory:
-/// XAML files are small (kilobytes) and Noesis wants a contiguous slice.
+/// Asset loader for `.xaml` files. Reads the whole file into one buffer.
 #[derive(Default, TypePath)]
 pub struct XamlAssetLoader;
 
@@ -67,23 +59,17 @@ impl AssetLoader for XamlAssetLoader {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// XamlRegistry: URI → bytes map
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Maps the URIs Noesis asks for (typically the asset path used with
-/// `AssetServer::load`) to the currently-loaded XAML bytes. Populated from
-/// [`AssetEvent<XamlAsset>`] by [`update_xaml_registry`] and synced into the
-/// provider's [`SharedXamlMap`] each frame. Values are `Arc<Vec<u8>>` so the
-/// sync is a cheap handle copy regardless of XAML size.
+/// URI → XAML bytes for every XAML file Noesis can load. Keys are the asset
+/// paths passed to `AssetServer::load` (the same URIs a view and `Source="…"`
+/// references use). Filled by [`update_xaml_registry`] and by
+/// [`insert`](Self::insert); synced to the provider each frame.
 #[derive(Resource, Default, Clone)]
 pub struct XamlRegistry {
     pub(crate) entries: HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl XamlRegistry {
-    /// Look up bytes for `uri`. Shared between main-side tests and the
-    /// render-side provider.
+    /// Bytes registered for `uri`, if any.
     #[must_use]
     pub fn get(&self, uri: &str) -> Option<&Arc<Vec<u8>>> {
         self.entries.get(uri)
@@ -106,32 +92,24 @@ impl XamlRegistry {
         self.entries.keys().map(String::as_str)
     }
 
-    /// Register XAML bytes for a URI directly, bypassing the
-    /// `AssetServer`-driven path. Useful when loading scenes from
-    /// arbitrary filesystem locations (the `xaml_viewer` example uses
-    /// this to point at `$NOESIS_SDK_DIR/Data/` or a standalone file).
+    /// Registers XAML bytes for `uri` without the asset server, for scenes
+    /// outside `assets/` (the `xaml_viewer` example uses it). Replaces any
+    /// existing entry. An asset event for the same path overwrites it later.
     pub fn insert(&mut self, uri: impl Into<String>, bytes: Arc<Vec<u8>>) {
         self.entries.insert(uri.into(), bytes);
     }
 }
 
-/// Main-app system that keeps [`XamlRegistry`] in sync with the asset
-/// system. Reads `AssetEvent<XamlAsset>` and updates the map whenever a
-/// XAML asset loads, changes, or unloads.
-///
-/// Uses `AssetServer::get_path` to recover the canonical URI. Assets loaded
-/// without a path (e.g. `add_asset` directly) are skipped: Noesis needs a
-/// URI to look them up.
+/// Keeps [`XamlRegistry`] in step with loaded, modified and unloaded
+/// [`XamlAsset`]s. Runs in `Update`. Assets without a path (added directly to
+/// `Assets<XamlAsset>`) are skipped, since Noesis looks XAML up by URI.
 #[allow(clippy::needless_pass_by_value)] // Bevy systems take Res<T> by value
 pub fn update_xaml_registry(
     mut events: MessageReader<AssetEvent<XamlAsset>>,
     assets: Res<Assets<XamlAsset>>,
     asset_server: Res<AssetServer>,
     mut registry: ResMut<XamlRegistry>,
-    // `AssetId` → registry key, so removal arms can find the entry after the
-    // asset (and its path) are already gone: `get_path` returns `None` for a
-    // dropped asset, so keying off the live path here would leave stale
-    // entries and leaked byte buffers behind.
+    // `get_path` is `None` once the asset is dropped, so removals look the key up here.
     mut keys: Local<HashMap<AssetId<XamlAsset>, String>>,
 ) {
     for event in events.read() {
@@ -163,61 +141,47 @@ pub fn update_xaml_registry(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BevyXamlProvider: the XamlProvider impl
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Shared URI → bytes map. Once a provider is handed to Noesis via
-/// [`noesis_runtime::xaml_provider::set_xaml_provider`], the [`Registered`] guard
-/// owns the boxed provider opaquely; we can't mutate its state through the
-/// guard. The provider holds a clone of this `Arc`; a separate clone lives in
-/// `NoesisRenderState` so the sync system can update the map each frame from
-/// the [`XamlRegistry`].
-///
-/// The `Mutex` is **only** touched from the main thread (the sync system and
-/// the provider callback fired while a scene builds), which run sequentially,
-/// so contention is always zero and no lock crosses a world boundary.
+/// URI → bytes map shared between a [`BevyXamlProvider`] and the code that
+/// updates it. Once the provider is handed to
+/// [`noesis_runtime::xaml_provider::set_xaml_provider`], the returned
+/// [`Registered`] guard owns it opaquely, so updates go through a clone of this
+/// handle instead. The lock is only taken on the main thread and never
+/// contended.
 ///
 /// [`Registered`]: noesis_runtime::xaml_provider::Registered
 #[derive(Clone, Default)]
 pub struct SharedXamlMap(pub(crate) Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>);
 
 impl SharedXamlMap {
-    /// Replace the map contents from the [`XamlRegistry`].
+    /// Replaces the map's contents with the registry's.
     ///
     /// # Panics
     ///
-    /// Panics if the internal mutex is poisoned, only possible if another
-    /// holder panicked mid-modification, which in our architecture means
-    /// programmer error (schedule violation) rather than recoverable
-    /// runtime state.
+    /// Panics if the mutex is poisoned (another holder panicked).
     pub fn sync_from(&self, registry: &XamlRegistry) {
         let mut guard = self.0.lock().expect("SharedXamlMap mutex poisoned");
         guard.clone_from(&registry.entries);
     }
 }
 
-/// Records every XAML URI (and the exact bytes served) that Noesis fetched
-/// through [`BevyXamlProvider`] during a scene build — the view's root plus its
-/// transitive `Source="…"` dependencies (merged `ResourceDictionary`s, nested
-/// dictionaries, and so on), since Noesis pulls all of them through the provider
-/// while parsing.
+/// Log of every URI (with the exact bytes served) that [`BevyXamlProvider`]
+/// returned during a scene build: the root plus its transitive `Source="…"`
+/// dependencies such as merged `ResourceDictionary`s.
 ///
-/// `NoesisRenderState` clones the handle and, around a build, calls
-/// [`begin`](Self::begin) then [`take`](Self::take) to capture the dependency
-/// set. It later rebuilds the scene whenever any captured dependency's `Arc`
-/// changes — the same pointer-identity trick that drives root hot-reload, so an
-/// edit to a shared dictionary reloads every view that pulled it.
-///
-/// Like [`SharedXamlMap`], the mutex is only ever touched on the main thread
-/// (the provider callback during a build, and `ensure_scene` around it), so it
-/// is never contended.
+/// The plugin calls [`begin`](Self::begin) before a build and
+/// [`take`](Self::take) after it, then rebuilds the view when any logged
+/// dependency's bytes change (compared by `Arc` identity). That is how an edit
+/// to a shared dictionary hot-reloads every view that uses it. Main thread only.
 #[derive(Clone, Default)]
 pub struct SharedFetchLog(pub(crate) Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>);
 
 impl SharedFetchLog {
-    /// Clear the log at the start of a build so [`take`](Self::take) returns
-    /// only what this build fetched.
+    /// Clears the log so [`take`](Self::take) returns only what the next build
+    /// fetches.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned.
     pub fn begin(&self) {
         self.0
             .lock()
@@ -225,23 +189,26 @@ impl SharedFetchLog {
             .clear();
     }
 
-    /// Drain the URIs fetched since [`begin`](Self::begin), as `uri → served
+    /// Drains the URIs fetched since [`begin`](Self::begin), as `uri → served
     /// bytes`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned.
     #[must_use]
     pub fn take(&self) -> HashMap<String, Arc<Vec<u8>>> {
         std::mem::take(&mut *self.0.lock().expect("SharedFetchLog mutex poisoned"))
     }
 }
 
-/// Implements [`noesis_runtime::xaml_provider::XamlProvider`] against a
-/// [`SharedXamlMap`] that the plugin updates each frame from the
-/// [`XamlRegistry`].
+/// [`XamlProvider`] that serves XAML from a [`SharedXamlMap`], and logs each
+/// fetch to a [`SharedFetchLog`]. [`NoesisPlugin`](crate::NoesisPlugin)
+/// installs one; you only build your own to drive Noesis without the plugin
+/// (tests, custom setups).
 ///
-/// `load_xaml` clones the `Arc<Vec<u8>>` for the requested URI out of the
-/// shared map into `self.current`, releases the lock, and returns a borrow
-/// into `self.current`. The borrow stays valid until the *next* call
-/// rotates `self.current`, which covers Noesis's synchronous-parse
-/// contract and keeps the lock untouched during the parse itself.
+/// A missing URI returns `None`, which Noesis reports as a load failure. The
+/// returned slice stays valid until the next `load_xaml` call, which covers
+/// Noesis's synchronous parse; the map lock is not held during the parse.
 pub struct BevyXamlProvider {
     shared: SharedXamlMap,
     log: SharedFetchLog,
@@ -249,28 +216,24 @@ pub struct BevyXamlProvider {
 }
 
 impl BevyXamlProvider {
-    /// Build a provider + a cloneable handle to its shared map. Give the
-    /// provider to [`noesis_runtime::xaml_provider::set_xaml_provider`]; keep
-    /// the `SharedXamlMap` handle so the plugin can sync it from
-    /// [`XamlRegistry`].
+    /// Creates a provider and a handle to its map. Give the provider to
+    /// [`noesis_runtime::xaml_provider::set_xaml_provider`] and update the map
+    /// through the handle, e.g. with [`SharedXamlMap::sync_from`].
     #[must_use]
     pub fn new_shared() -> (Self, SharedXamlMap) {
         let shared = SharedXamlMap::default();
         (Self::from_shared(shared.clone()), shared)
     }
 
-    /// Build a provider that shares `map` with an existing handle, discarding
-    /// the dependency fetch-log. Convenience for tests and callers that don't
-    /// track dependencies; app wiring uses [`from_parts`](Self::from_parts).
+    /// Creates a provider over an existing map, with a fetch log nobody reads.
+    /// Use [`from_parts`](Self::from_parts) to track dependencies.
     #[must_use]
     pub fn from_shared(map: SharedXamlMap) -> Self {
         Self::from_parts(map, SharedFetchLog::default())
     }
 
-    /// Build a provider that shares both a [`SharedXamlMap`] and a
-    /// [`SharedFetchLog`] with existing handles. Used by the Bevy plugin so
-    /// `NoesisRenderState` keeps its own clones — the map for the sync system,
-    /// the log so `ensure_scene` can read back a build's XAML dependencies.
+    /// Creates a provider over an existing map and fetch log, keeping clones of
+    /// both so you can update the map and read back each build's dependencies.
     #[must_use]
     pub fn from_parts(map: SharedXamlMap, log: SharedFetchLog) -> Self {
         Self {
@@ -291,8 +254,6 @@ impl XamlProvider for BevyXamlProvider {
             let guard = self.shared.0.lock().expect("SharedXamlMap mutex poisoned");
             guard.get(uri).cloned()?
         };
-        // Record what this build pulled (root + transitive `Source=` deps) so
-        // `ensure_scene` can rebuild the view when any of them later changes.
         self.log
             .0
             .lock()
@@ -303,15 +264,9 @@ impl XamlProvider for BevyXamlProvider {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// XamlAssetPlugin: wires the asset loader + registry
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Plugin that registers [`XamlAsset`] + [`XamlAssetLoader`], initializes
-/// [`XamlRegistry`], and keeps it current from asset events.
-///
-/// Does *not* touch Noesis; the provider registration happens in
-/// `NoesisRenderPlugin`.
+/// Registers [`XamlAsset`] and its loader, and keeps [`XamlRegistry`] current.
+/// Added by [`NoesisPlugin`](crate::NoesisPlugin). It doesn't touch Noesis; the
+/// provider is installed by [`NoesisRenderPlugin`](crate::NoesisRenderPlugin).
 pub struct XamlAssetPlugin;
 
 impl Plugin for XamlAssetPlugin {
@@ -322,10 +277,6 @@ impl Plugin for XamlAssetPlugin {
             .add_systems(Update, update_xaml_registry);
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -366,8 +317,6 @@ mod tests {
         shared.sync_from(&registry);
         assert_eq!(provider.load_xaml("a.xaml"), Some(b"v1".as_slice()));
 
-        // Registry updates in place (hot-reload on the main side); a fresh
-        // sync propagates.
         registry
             .entries
             .insert("a.xaml".into(), Arc::new(b"v2".to_vec()));

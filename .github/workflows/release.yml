@@ -1,14 +1,9 @@
 name: Release
 
-# Publishes to crates.io when a version tag (vX.Y.Z) is pushed. cargo-release
-# creates and pushes that tag (see RELEASING.md). Runs on the self-hosted runner
-# that has the Noesis SDK, so the publish does a real verification build and the
-# full test suite gates the release.
-#
-# Two crates ship from this repo and publish in order: noesis_bevy_derive first
-# (noesis_bevy depends on it), then noesis_bevy. Both need crates.io Trusted
-# Publishing configured for this workflow. noesis_runtime must already be on
-# crates.io at the version this release requires.
+# Publishes noesis_bevy_derive, then noesis_bevy, when cargo-release pushes a
+# vX.Y.Z tag (see RELEASING.md). Runs on the SDK runner so the full test suite
+# gates the release. Both crates use crates.io Trusted Publishing, and the
+# required noesis_runtime must already be on crates.io.
 
 on:
   push:
@@ -26,9 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # The integration suites must run process-per-test (Noesis state is
-      # process-global and thread-affine); plain `cargo test` refuses by design.
-      # Mirrors ci.yml. See tests/README.md.
+      # The suites need process-per-test isolation; see tests/README.md.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -37,9 +30,7 @@ jobs:
       - name: cargo nextest run
         run: cargo nextest run --profile ci --all-targets --all-features
 
-      # Publish the derive crate first; noesis_bevy depends on it. Skip if this
-      # version is already on crates.io (the first release is published manually,
-      # and a re-run stays idempotent).
+      # Skip a version already on crates.io so a re-run is idempotent.
       - name: Check noesis_bevy_derive published
         id: derive
         run: |

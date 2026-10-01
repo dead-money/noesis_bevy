@@ -1,23 +1,17 @@
-//! Regression test for the "write set before the scene builds" footgun.
+//! A bridge write made before the view's scene exists must still land.
 //!
-//! Per-view bridges apply their writes through Bevy change detection: the
-//! reconcile system calls `apply_*_for` when the component `is_changed()`. If the
-//! component is set before the view's scene exists (XAML still loading, fonts not
-//! staged), that apply no-ops against the missing scene and `is_changed` never
-//! refires, so the write is silently dropped.
-//!
-//! The fix gives [`NoesisRenderState::scene_rebuilt_this_frame`] to the bridges:
-//! a freshly built scene re-applies the component's current state even when it
-//! did not change that frame. This test seeds a [`NoesisText`] write at startup,
-//! registers the XAML several frames LATE so the scene cannot build until then,
-//! and reads the value back through a [`NoesisDp`] watch once it does.
+//! Per-view bridges apply writes when the component `is_changed()`. A write made
+//! before the scene exists (XAML still loading, fonts not staged) no-ops against
+//! the missing scene and `is_changed` does not refire, so the bridges also
+//! re-apply on `NoesisRenderState::scene_rebuilt_this_frame`. This test seeds a
+//! [`NoesisText`] write at startup, registers the XAML several frames late so the
+//! scene cannot build until then, and reads the value back through a
+//! [`NoesisDp`] watch once it does.
 //!
 //! The read-back uses `NoesisDp` rather than `NoesisText`'s own watch on purpose:
 //! the text bridge eagerly snapshots its own writes (to suppress phantom echoes),
 //! which would also hide the applied value. The DP bridge keeps an independent
 //! snapshot, so it reports the element's real `Text` after the write lands.
-//!
-//!   `cargo test -p noesis_bevy --test headless_write_before_scene -- --nocapture`
 
 use std::sync::{Arc, Mutex};
 
@@ -83,7 +77,6 @@ fn write_set_before_scene_builds_still_lands() {
         },
     );
 
-    // Exit once the written value has been read back through the DP watch.
     let pred_observed = Arc::clone(&observed);
     let applied = run_until(&mut app, 240, move |_app| {
         pred_observed

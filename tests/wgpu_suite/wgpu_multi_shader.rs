@@ -1,11 +1,11 @@
-//! Renders three shader variants (`Path_Solid`, `Path_AA_Solid`, `RGBA`) into
+//! Renders three shader variants (`PATH_SOLID`, `PATH_AA_SOLID`, `RGBA`) into
 //! one frame and reads back the target.
 //!
 //! Each batch uses a different vertex format (`PosColor`, `PosColorCoverage`,
-//! `Pos`), exercising the `vertex_layout` dispatch. `RGBA` exercises the
-//! `ps_uniforms0` bind-group path. All vertex/index data is packed into one
-//! `map_vertices`/`map_indices` pair; per-batch `vertex_offset`/`start_index`
-//! slice the correct region.
+//! `Pos`), covering the `vertex_layout` dispatch; `RGBA` also covers the
+//! `ps_uniforms0` bind group. All geometry is packed into one
+//! `map_vertices`/`map_indices` pair, and each batch's `vertex_offset` and
+//! `start_index` select its region.
 
 use std::ffi::c_void;
 

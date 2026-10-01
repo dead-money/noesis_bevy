@@ -1,23 +1,16 @@
-//! Control-side selection → ECS, the half `headless_list_query` cannot cover.
+//! Control-side selection to ECS, the half `headless_list_query` does not cover.
 //!
-//! The "currency is selection" contract says: when the user selects a row in the
-//! live `ListBox`, the bridge marks that row's entity [`Selected`] and emits a
-//! [`NoesisListSelection`]. We drive the closest faithful headless proxy for a row
-//! click, setting the `ListBox`'s `SelectedIndex` through the [`NoesisDp`] bridge
-//! (a real DP write on the actual control), and assert the bridge observes it.
+//! When the user selects a row in the live `ListBox`, the bridge marks that row's
+//! entity [`Selected`] and emits a [`NoesisListSelection`]. The headless proxy for
+//! a row click is a `SelectedIndex` write on the control through the [`NoesisDp`]
+//! bridge; the test asserts the bridge observes it.
 //!
-//! It does NOT cover the literal mouse-down hit-test (a `ListBoxItem` consuming a
-//! pointer event); that path is `row_click_subs → UiClicked`, tested elsewhere.
+//! The bridge must read selection off the bound `ListBox` itself. A code-built
+//! `CollectionViewSource`'s `GetView()` returns a fresh `CollectionView`, not the
+//! control's default view, so observing that view never sees control-side
+//! selection.
 //!
-//! ## Regression guard for the control→bridge selection path
-//! The bridge reads selection straight off the bound `ListBox` (`selected_item` /
-//! `set_selected_index`): the control's own selection is the single source of
-//! truth, so a control-side `SelectedIndex` write reaches `poll_selection` and
-//! marks the row `Selected`. An earlier build instead observed a *fabricated*
-//! `CollectionView` (the runtime's `GetView()` returns `new CollectionView(list)`
-//! for an unhosted, code-built `CollectionViewSource`), which is **not** the live
-//! `ListBox`'s default view, so control selection never arrived; this test guards
-//! against regressing to that.
+//! The mouse hit-test path (`row_click_subs` to `UiClicked`) is tested elsewhere.
 
 use std::sync::{Arc, Mutex};
 
@@ -47,8 +40,6 @@ struct Row {
     weight: i32,
 }
 
-// The control SelectedIndex write fires at this frame; capture/exit are the
-// asserted terminal condition below, not a fixed frame.
 const SELECT_AT: usize = 16;
 
 #[test]
@@ -128,12 +119,10 @@ fn control_selection_marks_selected_and_emits_message() {
                 sel_msgs_sys.lock().unwrap().push(ev.selected);
             }
 
-            // Latest bridge-marked selection, always current for the exit predicate.
             *selected_after_sys.lock().unwrap() = selected_q.iter().next();
 
-            // Drive the live ListBox's SelectedIndex to row 2 (C), the faithful
-            // headless proxy for a user picking that row. The DP bridge targets the
-            // list's view (where the scene lives), not the list entity.
+            // Select row 2 (C). The DP bridge targets the list's view (where the
+            // scene lives), not the list entity.
             if *frame == SELECT_AT {
                 if let Ok(list) = lists.single() {
                     commands.entity(list.view).insert(
@@ -148,8 +137,6 @@ fn control_selection_marks_selected_and_emits_message() {
         },
     );
 
-    // Exit once the control-side selection reached the bridge: row C is marked
-    // Selected AND a NoesisListSelection for C was emitted.
     let pred_entities = Arc::clone(&entities);
     let pred_selected = Arc::clone(&selected_after);
     let pred_msgs = Arc::clone(&sel_msgs);

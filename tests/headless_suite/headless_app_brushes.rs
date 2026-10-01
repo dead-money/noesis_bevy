@@ -1,12 +1,10 @@
-//! Integration test for the brush bridge ([`NoesisBrushes`]) through the real
-//! `NoesisPlugin` pipeline (headless, pipelined rendering on).
+//! Integration test for the brush bridge ([`NoesisBrushes`]) on the headless
+//! harness.
 //!
-//! Brush assignment changes no scalar DP on the painted element, so there is no
-//! `NoesisDp` watch to use (the approach the visibility and focus tests take).
-//! The bridge reads the assigned brush back from the element's live DP and emits
-//! [`NoesisBrushChanged`]. A null DP (failed assign, wrong-entity routing, or
-//! inverted change-detection) emits nothing, so those failures stay silent and
-//! fail the assert.
+//! A brush has no scalar DP a `NoesisDp` watch could read, so the test relies on
+//! [`NoesisBrushChanged`], which the bridge emits after reading the brush back from
+//! the element's live DP. A failed assign or wrong-entity routing leaves the DP
+//! null, emits nothing, and fails the assert.
 //!
 //! Colors are distinct per-channel to catch swapped or zeroed channels and
 //! cross-key contamination across elements. Gradient landing is confirmed as
@@ -71,8 +69,7 @@ fn brushes_bridge_paints_and_reads_back() {
                         size: UVec2::new(128, 64),
                         ..default()
                     },
-                    // Starts empty (no-op); filled in after the scene exists so
-                    // its one-shot apply isn't lost.
+                    // Filled at SET_AT_FRAME, after the scene exists.
                     NoesisBrushes::new(),
                 ))
                 .id();
@@ -122,7 +119,6 @@ fn brushes_bridge_paints_and_reads_back() {
         },
     );
 
-    // The latest readback for a (view, name, target) triple.
     let last_for =
         |got: &Observed, view: Entity, name: &str, target: BrushTarget| -> Option<BrushReadback> {
             got.iter()
@@ -130,8 +126,7 @@ fn brushes_bridge_paints_and_reads_back() {
                 .map(|(_, _, _, r)| *r)
         };
 
-    // Event-driven exit: stop once every painted target has read back (the five
-    // solids plus the gradient), not after a padded frame count.
+    // Exit once all five solids and the gradient have read back.
     let pred_observed = Arc::clone(&observed);
     let pred_view = Arc::clone(&view_entity);
     let painted = run_until(&mut app, 240, move |_app| {
@@ -206,7 +201,7 @@ fn brushes_bridge_paints_and_reads_back() {
          per-DP gradient-stop read-back to this unsafe-free crate)",
     );
 
-    // Negative control: an un-targeted Border must not emit a message; a "paint everything" regression would light up Other.
+    // Negative control: a "paint everything" regression would emit for Other.
     assert!(
         !got.iter().any(|(_, n, _, _)| n == "Other"),
         "an un-targeted element must not emit a brush read-back",

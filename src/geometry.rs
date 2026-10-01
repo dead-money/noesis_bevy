@@ -1,13 +1,10 @@
-//! Per-view geometry bridge: imperative vector polyline writes against named
-//! XAML `Path` elements on a single [`NoesisView`](crate::NoesisView). The
-//! geometry counterpart of [`crate::text`].
+//! Draws Rust-supplied polylines into named XAML `Path` elements.
 //!
-//! Add a [`NoesisGeometry`] component to the view's camera entity. Its `paths`
-//! map is the desired geometry per `x:Name`, applied to the view's `Path`
-//! elements whenever the component changes (Bevy change detection). Each set of
-//! points becomes a Noesis `StreamGeometry` assigned as the `Path`'s `Data`, so
-//! a live oscilloscope (or any Rust-driven graph) draws a genuine line instead
-//! of rasterising to a text canvas.
+//! Add a [`NoesisGeometry`] to the [`NoesisView`](crate::NoesisView) camera
+//! entity (or a [`UiPanel`](crate::panel::UiPanel) entity). Each entry in
+//! [`paths`](NoesisGeometry::paths) becomes a Noesis `StreamGeometry` assigned
+//! to that `Path`'s `Data`, so a live graph or oscilloscope trace draws as real
+//! vector lines.
 //!
 //! ```ignore
 //! commands.entity(view).insert(
@@ -16,9 +13,9 @@
 //! );
 //! ```
 //!
-//! Everything runs on the main thread (Noesis is thread-affine and lives there):
-//! the reconcile system reads each view's component and applies the writes
-//! against that view's live scene. No cross-world queues.
+//! The geometry is written when the component changes and again after a scene
+//! rebuild or panel mount, in [`NoesisSet::Apply`] on the main thread. Removing
+//! an entry from the map leaves the element's last geometry in place.
 
 use std::collections::HashMap;
 
@@ -26,45 +23,38 @@ use bevy::prelude::*;
 
 use crate::render::{NoesisRenderState, NoesisSet};
 
-/// Per-view geometry bridge. Attach to a [`NoesisView`](crate::NoesisView)
-/// entity.
+/// Polyline geometry for named `Path` elements. See the [module docs](self).
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisGeometry {
-    /// Desired geometry per element `x:Name`. Written to the view's `Path`
-    /// elements whenever this component changes. Each value is an open polyline
-    /// through `[x, y]` pairs in the Path's local coordinate space. Each target
-    /// must be a `Path`; a type mismatch (or fewer than two points) is skipped
-    /// with a warning on apply.
+    /// Open polyline per `Path` `x:Name`, as `[x, y]` points in the `Path`'s
+    /// local coordinates. A target that isn't a `Path`, or fewer than two
+    /// points, is skipped with a warning.
     pub paths: HashMap<String, Vec<[f32; 2]>>,
 }
 
 impl NoesisGeometry {
-    /// Creates an empty bridge with no paths. Chain [`path`](Self::path) to add
-    /// geometry before inserting it on the [`NoesisView`](crate::NoesisView) camera.
+    /// An empty bridge. Chain [`path`](Self::path) to add geometry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder: set element `name`'s `Path` geometry to an open polyline through
-    /// `points`.
+    /// Sets `name`'s geometry to an open polyline through `points`.
     #[must_use]
     pub fn path(mut self, name: impl Into<String>, points: Vec<[f32; 2]>) -> Self {
         self.paths.insert(name.into(), points);
         self
     }
 
-    /// Set element `name`'s `Path` geometry from a system holding
-    /// `&mut NoesisGeometry`. The runtime counterpart of [`path`](Self::path):
-    /// the next reconcile draws the new polyline through `points` on the live
-    /// element.
+    /// In-place form of [`path`](Self::path), for systems holding
+    /// `&mut NoesisGeometry`.
     pub fn draw(&mut self, name: impl Into<String>, points: Vec<[f32; 2]>) {
         self.paths.insert(name.into(), points);
     }
 }
 
-/// Reconcile every view's [`NoesisGeometry`]: apply the desired geometry writes
-/// when the component changed.
+/// Writes each changed [`NoesisGeometry`], and every one whose scene was
+/// rebuilt or panel mounted this frame.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_geometry_bridge(
     views: Query<(Entity, Ref<NoesisGeometry>)>,
@@ -83,15 +73,13 @@ pub(crate) fn sync_geometry_bridge(
     }
 }
 
-/// Wires the per-view geometry bridge. Added transitively by
-/// [`crate::NoesisPlugin`].
+/// Registers [`NoesisGeometry`]'s system. Added by
+/// [`NoesisPlugin`](crate::NoesisPlugin).
 pub struct NoesisGeometryPlugin;
 
 impl Plugin for NoesisGeometryPlugin {
     fn build(&self, app: &mut App) {
-        // After `sync_panels` so a panel's `NoesisGeometry` re-applies the same
-        // frame its fragment mounts (the bridge reads `panel_mounted_this_frame`,
-        // set by `sync_panels`); mirrors the focus bridge's ordering.
+        // After `sync_panels`, which sets `panel_mounted_this_frame`.
         app.add_systems(
             PostUpdate,
             sync_geometry_bridge

@@ -1,17 +1,13 @@
-//! Regression test: *adding* a new image to [`ImageRegistry`] must NOT rebuild
+//! Regression test: adding a new image URI to [`ImageRegistry`] does not rebuild
 //! live views.
 //!
-//! A newly-added image URI cannot affect any already-built scene — nothing
-//! referenced it at build time — so it must not bump the image epoch or trigger
-//! a rebuild. The bug this guards against made every `ImageRegistry` insertion
-//! rebuild every scene each frame, so an app that trickles procedural images in
-//! (e.g. palette-preview thumbnails, one per frame at startup) rebuilt its whole
-//! UI continuously.
+//! No built scene can reference a URI that didn't exist when it was built, so only
+//! replacing an existing URI's bytes triggers a rebuild. Otherwise an app that
+//! stages one procedural image per frame would rebuild its whole UI every frame.
 //!
-//! Detection: a rebuild tears down and re-builds the scene, which re-emits the
-//! watched `ActualWidth` DP. We stage a fresh unrelated image every frame and
-//! assert the view emits `ActualWidth` only for its initial build — not once per
-//! frame. Mirrors `headless_app_hot_reload_image`'s harness.
+//! A rebuild re-emits the watched `ActualWidth`. The test stages a new unrelated
+//! image every frame and asserts `ActualWidth` is emitted only around the initial
+//! build.
 
 use std::sync::{Arc, Mutex};
 
@@ -78,9 +74,6 @@ fn adding_unrelated_image_does_not_rebuild_view() {
               mut images: ResMut<ImageRegistry>,
               mut changes: MessageReader<NoesisDpChanged>| {
             *frame += 1;
-            // Every frame from the fifth on, stage a *new* unrelated image URI —
-            // exactly the "procedural image trickling in" pattern. Under the bug
-            // each of these rebuilt the view; under the fix none does.
             if *frame >= 5 {
                 let uri = format!("dm-bitmap://extra-{}", *frame);
                 images.insert(uri, 4, 4, rgba(4, 4));
@@ -94,8 +87,7 @@ fn adding_unrelated_image_does_not_rebuild_view() {
         },
     );
 
-    // Run a fixed span; there's no convergence event — we're asserting the
-    // *absence* of repeated rebuilds while unrelated images stream in.
+    // Fixed span: the test asserts an absence, so there is no event to stop on.
     run_until(&mut app, 120, |_app| false);
 
     let view = view_entity.lock().unwrap().expect("view spawned");
@@ -106,8 +98,7 @@ fn adding_unrelated_image_does_not_rebuild_view() {
         .filter(|(e, n)| *e == view && n == "ActualWidth")
         .count();
 
-    // The initial build emits ActualWidth (allow a small margin for build/attach
-    // settling). A per-add rebuild would emit it ~1×/frame over ~115 frames.
+    // Small margin for build settling; a per-add rebuild would emit ~115 times.
     assert!(
         width_emits <= 3,
         "adding unrelated images rebuilt the view: ActualWidth emitted {width_emits} times \

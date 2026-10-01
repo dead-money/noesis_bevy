@@ -1,14 +1,13 @@
-//! Regression test for the stale-intermediate "frozen UI ghost" (audit P0.8).
+//! Regression test for the stale-intermediate "frozen UI ghost".
 //!
 //! When a view's scene is torn down but the entity survives (here: `xaml_uri`
-//! cleared to `""`), nothing used to remove the last-published
-//! `NoesisIntermediate` component. The render world kept extracting and blitting
-//! the final painted frame forever — a frozen ghost. This test drives a view
-//! until it publishes an intermediate, clears its `xaml_uri` (tearing the scene
-//! down while the entity lives on), and asserts the component is gone.
+//! cleared to `""`), the last-published `NoesisIntermediate` component must be
+//! removed. Otherwise the render world keeps extracting and blitting the final
+//! painted frame forever. This test drives a view until it publishes an
+//! intermediate, clears its `xaml_uri`, and asserts the component is gone.
 //!
-//! Runs on the real render graph ([`render_app`]) because the ghost is a
-//! render-world extraction bug.
+//! Runs on the real render graph ([`render_app`]) because the ghost shows up in
+//! render-world extraction.
 //!
 //! Font-free XAML so the scene builds without a font folder.
 
