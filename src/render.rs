@@ -66,12 +66,12 @@ use crate::font::{BevyFontProvider, FontRegistry, SharedFontMap};
 use crate::image::{BevyTextureProvider, ImageRegistry, SharedImageMap};
 use crate::items::{CollectionViewOp, ItemValue, ItemsBinding, ObjectSource};
 use crate::plain_vm::{PlainType, PlainValue, PlainVmEntry, SetSink, unbox};
-use crate::render_device::WgpuRenderDevice;
 use crate::routed_events::{RoutedEventSnapshot, SharedRoutedEventQueue};
 use crate::viewmodel::{AttachTarget, SharedVmChangedQueue, ViewModelDef, VmEntry, VmValue};
 use crate::xaml::{BevyXamlProvider, SharedFetchLog, SharedXamlMap, XamlRegistry};
 use noesis_runtime::element_tree::panel_children;
 use noesis_runtime::plain_vm::{PlainInstance, PlainValueRef, PlainVmBuilder, PlainVmClass};
+use noesis_wgpu::WgpuRenderDevice;
 
 thread_local! {
     /// Cumulative count of FFI "hops" (calls that cross into the Noesis C++
@@ -114,8 +114,8 @@ pub(crate) struct NoesisApplyTimer {
     pub(crate) last: std::time::Duration,
 }
 
-/// Color format of the per-view intermediate Noesis paints into. Must match
-/// the private `RT_COLOR_FORMAT` in `render_device::wgpu_device`.
+/// Color format of the per-view intermediate Noesis paints into. Must be the
+/// `Rgba8Unorm` that `noesis_wgpu` compiles its pipelines against.
 const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn flags_from(config: &NoesisView) -> u32 {
