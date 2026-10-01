@@ -16,6 +16,11 @@ pre-1.0, any `0.x` release may contain breaking changes.
   uses `noesis_wgpu` 0.1, the wgpu 29 line.
 - Requires `noesis_runtime` 0.13.
 
+### Fixed
+
+- Mapping more geometry than the render device's staging buffer held, with a
+  length that isn't a multiple of 4, no longer panics (fixed in `noesis_wgpu`).
+
 ## [0.15.1] - 2026-07-11
 
 ### Fixed
