@@ -1,15 +1,6 @@
-# cargo-release configuration.
-#
-# `cargo release <level|version>` bumps the version in Cargo.toml, stamps the
-# CHANGELOG, commits, tags `vX.Y.Z`, and pushes. Publishing to crates.io is NOT
-# done from this machine: the pushed tag triggers .github/workflows/release.yml,
-# which publishes via crates.io Trusted Publishing. Hence `publish = false` here.
-#
-# This bumps noesis_bevy only. Bump derive/Cargo.toml to the same version by hand
-# in the same commit (it releases in lockstep); see RELEASING.md.
-#
-# The release gate is a local `cargo test` against the Noesis SDK before you run
-# this; the hosted CI cannot build the crate (the SDK is closed-source).
+# cargo-release: bumps noesis_bevy, stamps CHANGELOG.md, commits, tags vX.Y.Z,
+# and pushes. Bump derive/ first (see RELEASING.md). The tag triggers
+# release.yml, which publishes; nothing publishes from here.
 
 publish = false
 tag = true
