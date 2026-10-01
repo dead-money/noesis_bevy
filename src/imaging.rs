@@ -54,7 +54,7 @@
 //! the reconcile system stages each view's bytes into the registry, polls the
 //! element read-back, and emits messages directly. No cross-world queues.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -149,19 +149,30 @@ pub struct NoesisImageChanged {
     pub readback: ImageReadback,
 }
 
+/// Per-entity record of the registry URIs each [`NoesisImaging`] currently
+/// stages, maintained by [`stage_imaging_bitmaps`]. [`reap_removed_imaging`]
+/// reads it to reclaim exactly the bitmaps a removed component owned — minus any
+/// a surviving imaging component still stages under the same URI. Without it a
+/// removed component's full-size RGBA buffers stay in the [`ImageRegistry`] for
+/// the life of the process.
+#[derive(Resource, Default)]
+pub(crate) struct StagedImagingUris(HashMap<Entity, HashSet<String>>);
+
 /// Stage every changed [`NoesisImaging`]'s bitmaps into the [`ImageRegistry`].
 /// Runs before the registry→provider sync (and thus before scene build) so a
 /// same-frame spawn lands the bytes ahead of Noesis's one-shot source
 /// resolution. Independent of [`NoesisRenderState`]: a plain resource write.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn stage_imaging_bitmaps(
-    views: Query<Ref<NoesisImaging>>,
+    views: Query<(Entity, Ref<NoesisImaging>)>,
     mut registry: ResMut<ImageRegistry>,
+    mut staged: ResMut<StagedImagingUris>,
 ) {
-    for imaging in &views {
+    for (entity, imaging) in &views {
         if !imaging.is_changed() {
             continue;
         }
+        let mut uris = HashSet::with_capacity(imaging.images.len());
         for bitmap in imaging.images.values() {
             registry.insert(
                 bitmap.uri.clone(),
@@ -169,6 +180,33 @@ pub(crate) fn stage_imaging_bitmaps(
                 bitmap.height,
                 Arc::clone(&bitmap.bytes),
             );
+            uris.insert(bitmap.uri.clone());
+        }
+        staged.0.insert(entity, uris);
+    }
+}
+
+/// Reap a removed [`NoesisImaging`]: drop the registry bitmaps it staged (those
+/// no surviving imaging component still references) and its read-back snapshots.
+/// Runs before [`NoesisSet::Sync`] (and after [`stage_imaging_bitmaps`]) so a
+/// buffer removed this frame is gone before the registry→provider sync copies it.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn reap_removed_imaging(
+    mut removed: RemovedComponents<NoesisImaging>,
+    mut staged: ResMut<StagedImagingUris>,
+    mut registry: ResMut<ImageRegistry>,
+    mut state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    for entity in removed.read() {
+        if let Some(uris) = staged.0.remove(&entity) {
+            for uri in uris {
+                if !staged.0.values().any(|s| s.contains(&uri)) {
+                    registry.remove(&uri);
+                }
+            }
+        }
+        if let Some(state) = state.as_deref_mut() {
+            state.reap_imaging_snapshots_for(entity);
         }
     }
 }
@@ -201,13 +239,18 @@ pub struct NoesisImagingPlugin;
 
 impl Plugin for NoesisImagingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NoesisImageChanged>().add_systems(
-            PostUpdate,
-            (
-                stage_imaging_bitmaps.before(NoesisSet::Sync),
-                poll_imaging_reads.in_set(NoesisSet::Apply),
-            ),
-        );
+        app.add_message::<NoesisImageChanged>()
+            .init_resource::<StagedImagingUris>()
+            .add_systems(
+                PostUpdate,
+                (
+                    stage_imaging_bitmaps.before(NoesisSet::Sync),
+                    reap_removed_imaging
+                        .after(stage_imaging_bitmaps)
+                        .before(NoesisSet::Sync),
+                    poll_imaging_reads.in_set(NoesisSet::Apply),
+                ),
+            );
     }
 }
 

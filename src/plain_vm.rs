@@ -62,7 +62,7 @@ pub use noesis_runtime::plain_vm::{
     PlainVmClass,
 };
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, add_reap_system};
 use crate::viewmodel::AttachTarget;
 
 /// The UI→Rust writeback sink shared between the (main-thread) `on_set` hook and
@@ -122,6 +122,11 @@ pub trait NoesisViewModel: Send + Sync + 'static {
 pub(crate) struct PlainVmEntry {
     instance: PlainInstance,
     _class: PlainVmClass,
+    /// Friendly Noesis type name (the `T` identifier), for
+    /// `DataContext`-collision diagnostics. Not the registered reflection name,
+    /// which is made per-entity unique so multiple views of the same `T` don't
+    /// collide in the process-global type registry (see [`Self::build`]).
+    type_name: String,
     /// Property names in index order, for `set_and_notify`.
     prop_names: Vec<String>,
     target: AttachTarget,
@@ -135,9 +140,18 @@ pub(crate) struct PlainVmEntry {
 impl PlainVmEntry {
     /// Register the reflected type, wire the `on_set` writeback to this entry's
     /// own sink, and instantiate. Main-thread only. `None` if registration is
-    /// rejected (e.g. a duplicate type name).
+    /// rejected.
+    ///
+    /// The reflection type is registered under a per-`entity` unique name
+    /// (`"{type_name}#{bits}"`) rather than the bare `type_name`: Noesis's type
+    /// registry is process-global, so two views carrying the same `T` would
+    /// otherwise fight over one name — the second `register` fails, is retried
+    /// every frame, and warns. Binding resolves properties by name on the
+    /// instance's actual type, so the mangled registration name is invisible to
+    /// XAML `{Binding …}`; only the friendly `type_name` is kept, for diagnostics.
     pub(crate) fn build(
         type_name: &str,
+        entity: Entity,
         props: &[(&'static str, PlainType)],
         target: AttachTarget,
     ) -> Option<Self> {
@@ -145,7 +159,8 @@ impl PlainVmEntry {
         let kinds: Vec<PlainType> = props.iter().map(|(_, k)| *k).collect();
         let set_sink: SetSink = Arc::new(Mutex::new(Vec::new()));
 
-        let mut builder = PlainVmBuilder::new(type_name);
+        let registered_name = format!("{type_name}#{}", entity.to_bits());
+        let mut builder = PlainVmBuilder::new(&registered_name);
         for (name, kind) in props {
             builder.add_property(name, *kind);
         }
@@ -166,6 +181,7 @@ impl PlainVmEntry {
         Some(Self {
             instance,
             _class: class,
+            type_name: type_name.to_owned(),
             prop_names,
             target,
             attached_for_uri: None,
@@ -202,6 +218,11 @@ impl PlainVmEntry {
     /// Borrow the attach target for the render-side bind pass.
     pub(crate) fn target(&self) -> &AttachTarget {
         &self.target
+    }
+
+    /// The registered Noesis type name, for `DataContext`-collision diagnostics.
+    pub(crate) fn type_name(&self) -> &str {
+        &self.type_name
     }
 
     pub(crate) fn needs_attach(&self, uri: &str) -> bool {
@@ -266,6 +287,26 @@ fn sync_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
     }
 }
 
+/// Reap view `entity`'s `T` plain view model when the `T` component is removed
+/// while its view stays live. Without it the entry's `set_sink` keeps
+/// accumulating UI writebacks that nobody drains (unbounded growth as the user
+/// interacts) and the instance stays attached as `DataContext`. Plain VMs are
+/// keyed `(entity, TypeId)`, so this cannot ride the [`crate::render::ReapOnRemove`]
+/// trait (one impl per component, but here the component *is* the generic `T`);
+/// it wires through [`add_reap_system`] like the trait-driven bridges do.
+#[allow(clippy::needless_pass_by_value)]
+fn reap_plain_vm_system<T: NoesisViewModel + Component<Mutability = Mutable>>(
+    mut removed: RemovedComponents<T>,
+    state: Option<NonSendMut<NoesisRenderState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    for entity in removed.read() {
+        state.reap_plain_vm_for(entity, std::any::TypeId::of::<T>());
+    }
+}
+
 /// `App` methods to register a plain-struct view model type. Add
 /// [`crate::NoesisPlugin`] first, then register the type; attach the `T`
 /// component to a [`NoesisView`](crate::NoesisView) entity to bind it.
@@ -310,5 +351,6 @@ fn register_plain_vm<T: NoesisViewModel + Component<Mutability = Mutable>>(
         PostUpdate,
         sync_plain_vm_system::<T>.in_set(NoesisSet::Apply),
     );
+    add_reap_system(app, reap_plain_vm_system::<T>);
     app
 }

@@ -65,6 +65,13 @@ struct BakerState {
     cache: HashMap<String, Handle<Image>>,
     /// Requests awaiting their first bake on the main side.
     pending: Vec<BakeRequest>,
+    /// Requests pulled out of `pending` for the current [`bake_into`] pass but
+    /// not yet resolved (baked or requeued). Counted by [`pending_count`] so a
+    /// loading state doesn't flash ready while a bake is mid-flight.
+    ///
+    /// [`bake_into`]: NoesisRenderState::bake_into
+    /// [`pending_count`]: NoesisLabelBaker::pending_count
+    in_flight: usize,
     /// Targets whose GPU texture the render world still has to resolve.
     /// `bake_label` inserts here; the render-world system drains into `resolved`.
     want: HashSet<AssetId<Image>>,
@@ -120,11 +127,8 @@ impl NoesisLabelBaker {
     /// label whose template or fonts never load stays counted.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("NoesisLabelBaker poisoned")
-            .pending
-            .len()
+        let guard = self.inner.lock().expect("NoesisLabelBaker poisoned");
+        guard.pending.len() + guard.in_flight
     }
 }
 
@@ -214,6 +218,9 @@ fn bake_pending_labels(
             }
         }
         guard.pending = keep;
+        // Keep these counted while they render outside the lock, so
+        // `pending_count` doesn't transiently drop to zero mid-bake.
+        guard.in_flight = work.len();
     }
     if work.is_empty() {
         return;
@@ -240,6 +247,7 @@ fn bake_pending_labels(
         guard.resolved.remove(&id);
     }
     guard.pending.append(&mut requeue);
+    guard.in_flight = 0;
 }
 
 /// Wires [`NoesisLabelBaker`] into the app. Add after [`crate::NoesisPlugin`].

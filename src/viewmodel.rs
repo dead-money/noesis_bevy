@@ -43,7 +43,7 @@ use noesis_runtime::classes::{
 };
 use noesis_runtime::ffi::{ClassBase, PropType};
 
-use crate::render::{NoesisRenderState, NoesisSet};
+use crate::render::{NoesisRenderState, NoesisSet, ReapOnRemove, add_bridge_reap};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public value type
@@ -96,12 +96,22 @@ impl VmValue {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where the bridge attaches a view model's instance as `DataContext`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum AttachTarget {
     /// The view's root element (`View::content`).
     Root,
     /// The element resolved by `x:Name` via `FrameworkElement::find_name`.
     Named(String),
+}
+
+impl AttachTarget {
+    /// Human-readable target for diagnostics: `"root"` or `x:Name "Foo"`.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Root => "root".to_owned(),
+            Self::Named(name) => format!("x:Name {name:?}"),
+        }
+    }
 }
 
 /// A declarative recipe for a view model: a Noesis class name, the ordered set
@@ -110,7 +120,7 @@ pub(crate) enum AttachTarget {
 /// Build with the chained setters, then hand to [`NoesisVm::new`]. Each
 /// property name must be unique within the def and match the `{Binding <name>}`
 /// paths authored in the XAML.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewModelDef {
     class_name: String,
     props: Vec<(String, PropType)>,
@@ -203,6 +213,12 @@ impl NoesisVm {
 
     pub(crate) fn def(&self) -> &ViewModelDef {
         &self.def
+    }
+
+    /// Whether any writes are queued. Read via `&self` so the reconcile system
+    /// can gate its mutable access and avoid tripping change detection.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Take the queued writes (called by the reconcile system).
@@ -300,9 +316,11 @@ impl PropertyChangeHandler for ViewModelChangeForwarder {
 pub(crate) struct VmEntry {
     instance: ClassInstance,
     _registration: ClassRegistration,
-    /// Property index → name (addition order), for name→index write lookups.
-    prop_names: Vec<String>,
-    target: AttachTarget,
+    /// The def this entry was built from. Retained as the rebuild fingerprint
+    /// (class + props + target) *and* as the name→index map for writes: a
+    /// re-inserted [`NoesisVm`] with a changed def rebuilds (see
+    /// [`Self::matches`]).
+    def: ViewModelDef,
     /// URI of the scene this VM is currently attached to, or `None` when not
     /// yet attached / detached by a scene rebuild.
     attached_for_uri: Option<String>,
@@ -318,8 +336,7 @@ impl VmEntry {
         changed: &SharedVmChangedQueue,
     ) -> Option<Self> {
         let prop_names: Vec<String> = def.props.iter().map(|(n, _)| n.clone()).collect();
-        let forwarder =
-            ViewModelChangeForwarder::new(view, Arc::new(prop_names.clone()), changed.clone());
+        let forwarder = ViewModelChangeForwarder::new(view, Arc::new(prop_names), changed.clone());
         let mut builder = ClassBuilder::new(&def.class_name, ClassBase::ContentControl, forwarder);
         for (name, kind) in &def.props {
             builder.add_property(name, *kind);
@@ -329,14 +346,20 @@ impl VmEntry {
         Some(Self {
             instance,
             _registration: registration,
-            prop_names,
-            target: def.target.clone(),
+            def: def.clone(),
             attached_for_uri: None,
         })
     }
 
+    /// Whether this entry was built from an equivalent def. `false` means a
+    /// re-inserted [`NoesisVm`] changed the class, props, or target and the
+    /// entry must be rebuilt.
+    pub(crate) fn matches(&self, def: &ViewModelDef) -> bool {
+        &self.def == def
+    }
+
     pub(crate) fn target(&self) -> &AttachTarget {
-        &self.target
+        &self.def.target
     }
 
     /// Borrow the instance for `set_data_context`. Lives as long as the entry.
@@ -346,7 +369,7 @@ impl VmEntry {
 
     /// Apply a write by property name. `false` when the VM has no such property.
     pub(crate) fn write(&self, prop: &str, value: &VmValue) -> bool {
-        let Some(index) = self.prop_names.iter().position(|n| n == prop) else {
+        let Some(index) = self.def.props.iter().position(|(n, _)| n == prop) else {
             return false;
         };
         value.apply_to(self.instance.handle(), index as u32);
@@ -386,8 +409,10 @@ pub(crate) fn sync_view_models(
     };
     for (entity, mut vm) in &mut views {
         state.ensure_view_model(entity, vm.def(), &changed);
-        let writes = vm.take_pending();
-        if !writes.is_empty() {
+        // Only touch the component mutably when there are queued writes, so an
+        // idle frame doesn't falsely mark `NoesisVm` changed downstream.
+        if vm.has_pending() {
+            let writes = vm.take_pending();
             state.apply_view_model_writes_for(entity, &writes);
         }
     }
@@ -405,6 +430,12 @@ pub fn drain_vm_changed_queue(
     }
 }
 
+impl ReapOnRemove for NoesisVm {
+    fn reap(state: &mut NoesisRenderState, entity: Entity) {
+        state.reap_view_model_for(entity);
+    }
+}
+
 /// Wires the per-view `ViewModel` / `DataContext` bridge. Added transitively by
 /// [`crate::NoesisPlugin`].
 pub struct NoesisViewModelPlugin;
@@ -415,5 +446,6 @@ impl Plugin for NoesisViewModelPlugin {
             .add_message::<NoesisViewModelChanged>()
             .add_systems(PreUpdate, drain_vm_changed_queue)
             .add_systems(PostUpdate, sync_view_models.in_set(NoesisSet::Apply));
+        add_bridge_reap::<NoesisVm>(app);
     }
 }

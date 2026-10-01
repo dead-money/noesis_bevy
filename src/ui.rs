@@ -65,7 +65,14 @@ impl<'w, 's, D: QueryData + 'static> NoesisUi<'w, 's, D> {
     /// Mutable access to `D` on the one view, or [`None`] if zero or more than
     /// one view exists. This is the runtime write path: `ui.get_mut()` then call
     /// the bridge's `&mut self` setters (`write`, `show`, `set_*`, ...).
-    pub fn get_mut(&mut self) -> Option<QueryItem<'_, 's, D>> {
+    ///
+    /// The extra `IterQueryData` bound tracks Bevy 0.19's `Query::single_mut`
+    /// signature; every real query data (`&mut T`, tuples, ...) satisfies it, so
+    /// the read-only accessors above stay unconstrained.
+    pub fn get_mut(&mut self) -> Option<QueryItem<'_, 's, D>>
+    where
+        D: bevy::ecs::query::IterQueryData,
+    {
         self.view.single_mut().ok().map(|(_, data)| data)
     }
 }

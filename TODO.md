@@ -25,6 +25,16 @@ runtime/FFI work first are in §4.
 - **More SDK conformance examples.** Port additional Noesis samples as faithful in-crate `examples/` —
   the real sample XAML/assets loaded from `$NOESIS_SDK_DIR` at runtime, data driven through the bridge
   components — to demonstrate our rendering/behavior matches the reference.
+- **Hot-reload: same-file font follow-up.** The `hot_reload` feature (`src/hot_reload.rs`) live-reloads a
+  view's root XAML, its transitive `Source="…"` dependencies (provider fetch-log → `SceneInstance::built_deps`),
+  mounted `UiPanel` fragments (the same fetch-log guard in `sync_panel` → `PanelEntry::built_deps`), images
+  (an image-epoch that forces a rebuild so Noesis re-`LoadTexture`s), and application-resources / theme chain
+  dictionaries (a byte-keyed reinstall in `reconcile_app_resources` + an `app_resources_epoch` rebuild).
+  Fonts are the remaining gap: a *new* font file works, but editing an already-used face's bytes doesn't
+  show, because Noesis's `CachedFontProvider` ignores a duplicate `RegisterFont` and exposes no runtime
+  cache-reset. The only fix is dropping + re-creating the whole font provider (process-global, done only at
+  shutdown today) and rebuilding every view — a focused follow-up with visual verification, likely paired
+  with a `noesis_runtime` font-cache-reset shim.
 
 ## 3. Platform
 

@@ -136,7 +136,7 @@ pub(crate) fn sync_animation_bridge(
         return;
     };
     for (entity, animation) in &views {
-        if animation.is_changed() {
+        if animation.is_changed() || state.scene_rebuilt_this_frame(entity) {
             state.begin_animations_for(entity, &animation.animations);
         }
     }

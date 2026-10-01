@@ -143,10 +143,12 @@ impl FocusPredict {
 /// [`NoesisView`](crate::NoesisView) entity. Additive to
 /// [`NoesisFocus`](crate::focus::NoesisFocus); both may live on one entity.
 ///
-/// `moves` and `engages` are **one-shot actions** applied once whenever the
-/// component changes (Bevy change detection). As with [`crate::NoesisFocus`], fill them
-/// in *after* the scene exists or the apply is lost. `bindings` is **reconciled
-/// every frame** (installs once the scene appears, persists thereafter).
+/// `moves` and `engages` are **one-shot actions**: applied once when the
+/// component changes (Bevy change detection), then drained, so they neither
+/// accumulate nor replay on a later change or a scene rebuild. As with
+/// [`crate::NoesisFocus`], fill them in *after* the scene exists or the apply is
+/// lost. `bindings` is **reconciled every frame** (installs once the scene
+/// appears, persists thereafter): retained config that survives a rebuild.
 /// `predicts` is **polled every frame** and surfaces changes as messages.
 #[derive(Component, Clone, Default, Debug)]
 pub struct NoesisFocusControl {
@@ -380,19 +382,41 @@ impl SharedFocusBindingQueue {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply the one-shot actions ([`FocusMove`] / [`FocusEngage`]) when the
-/// component changed. Write-only: fires once per change, like [`NoesisFocus`].
+/// component changed, then drain them. Write-only: each queued action fires
+/// exactly once. Unlike the retained bridges these are *not* reapplied on a
+/// scene rebuild — they are transient requests, not config to replay.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn sync_focus_control(
-    views: Query<(Entity, Ref<NoesisFocusControl>)>,
+    mut views: Query<(Entity, Mut<NoesisFocusControl>)>,
     state: Option<NonSendMut<NoesisRenderState>>,
 ) {
     let Some(mut state) = state else {
         return;
     };
-    for (entity, ctl) in &views {
-        if ctl.is_changed() || state.scene_rebuilt_this_frame(entity) {
-            state.apply_focus_moves_for(entity, &ctl.moves);
-            state.apply_focus_engages_for(entity, &ctl.engages);
+    for (entity, mut ctl) in &mut views {
+        // Fire on change, or on the frame the scene (re)builds or a panel
+        // fragment mounts (so actions queued before the named element existed
+        // still land, once), but never with an empty queue.
+        if (!ctl.is_changed()
+            && !state.scene_rebuilt_this_frame(entity)
+            && !state.panel_mounted_this_frame(entity))
+            || (ctl.moves.is_empty() && ctl.engages.is_empty())
+        {
+            continue;
+        }
+        // Only drain once the target root was actually ready to receive the
+        // actions; a component inserted before the scene builds / fragment mounts
+        // keeps its queue for the mount frame instead of being silently dropped.
+        // Both applies gate on the same root readiness, so they agree except for
+        // an empty half (which reports ready) — no double-fire on retry. Bypass
+        // change detection so the clear doesn't re-trigger this system next frame
+        // (only this system reads the change flag).
+        let moves_applied = state.apply_focus_moves_for(entity, &ctl.moves);
+        let engages_applied = state.apply_focus_engages_for(entity, &ctl.engages);
+        if moves_applied && engages_applied {
+            let ctl = ctl.bypass_change_detection();
+            ctl.moves.clear();
+            ctl.engages.clear();
         }
     }
 }
@@ -470,6 +494,10 @@ impl Plugin for NoesisFocusControlPlugin {
             // Drain last frame's fires before user systems read them (mirrors
             // the click/keydown drains).
             .add_systems(PreUpdate, drain_focus_binding_queue)
+            // After `sync_panels` so a panel's `NoesisFocusControl` acts the same
+            // frame its fragment mounts (the reconcile reads
+            // `panel_mounted_this_frame`, set by `sync_panels`); mirrors the focus
+            // bridge's ordering.
             .add_systems(
                 PostUpdate,
                 (
@@ -477,7 +505,8 @@ impl Plugin for NoesisFocusControlPlugin {
                     sync_focus_bindings,
                     poll_focus_predictions,
                 )
-                    .in_set(NoesisSet::Apply),
+                    .in_set(NoesisSet::Apply)
+                    .after(crate::panel::sync_panels),
             );
     }
 }

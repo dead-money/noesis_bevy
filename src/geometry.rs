@@ -74,7 +74,10 @@ pub(crate) fn sync_geometry_bridge(
         return;
     };
     for (entity, geometry) in &views {
-        if geometry.is_changed() || state.scene_rebuilt_this_frame(entity) {
+        if geometry.is_changed()
+            || state.scene_rebuilt_this_frame(entity)
+            || state.panel_mounted_this_frame(entity)
+        {
             state.apply_geometry_for(entity, &geometry.paths);
         }
     }
@@ -86,7 +89,15 @@ pub struct NoesisGeometryPlugin;
 
 impl Plugin for NoesisGeometryPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, sync_geometry_bridge.in_set(NoesisSet::Apply));
+        // After `sync_panels` so a panel's `NoesisGeometry` re-applies the same
+        // frame its fragment mounts (the bridge reads `panel_mounted_this_frame`,
+        // set by `sync_panels`); mirrors the focus bridge's ordering.
+        app.add_systems(
+            PostUpdate,
+            sync_geometry_bridge
+                .in_set(NoesisSet::Apply)
+                .after(crate::panel::sync_panels),
+        );
     }
 }
 

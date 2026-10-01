@@ -23,7 +23,8 @@
 //! host slots to show **multi-instance**: each binds independently.
 //!
 //! **Primitive 2: list = query.** The inventory rows *are* entities: each is an
-//! `Item` component plus a [`ListedIn`] membership. A [`UiList`] on the view binds
+//! `Item` component plus a [`ListedIn`] membership pointing at the list entity. A
+//! [`UiList`] entity binds
 //! the reconciled `ObservableCollection` to a `ListBox`. Spawning an entity
 //! adds a row; despawning removes it; mutating one `Item` updates *only* that row
 //! in place (no flicker, no Reset); flipping [`UiList::sorted_by`] reorders via
@@ -208,11 +209,12 @@ pub fn register_xaml(reg: &mut XamlRegistry) {
     reg.insert(HUD_URI.to_string(), Arc::new(HUD_XAML.as_bytes().to_vec()));
 }
 
-/// Spawn the host [`NoesisView`] (the camera entity that owns the scene), wired
-/// with the inventory [`UiList`] and a [`NoesisClickWatch`] that re-targets each
-/// host button's [`UiClicked`] at the entity that should handle it.
+/// Spawn the host [`NoesisView`] (the camera entity that owns the scene), plus the
+/// inventory [`UiList`] on its own entity, and a [`NoesisClickWatch`] that re-targets
+/// each host button's [`UiClicked`] at the entity that should handle it.
 ///
-/// Returns the view entity (rows reference it via [`ListedIn`]).
+/// Returns the view entity (a list entity is spawned inside; rows reference *it*
+/// via [`ListedIn`]).
 pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -> Entity {
     let view = commands
         .spawn((
@@ -233,10 +235,13 @@ pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -
                 font_fallbacks: vec!["Fonts/#PT Root UI".to_string()],
                 ..default()
             },
-            // Rows ordered by qty (property index 1), ascending; row-object class
-            // is auto-generated, no name to hand-pick.
-            UiList::new(INVENTORY_NAME).sorted_by(1, false),
         ))
+        .id();
+
+    // Primitive 2: the list is its own entity naming its control + owner view. Rows
+    // ordered by qty (property index 1), ascending; row-object class auto-generated.
+    let list = commands
+        .spawn(UiList::new(view, INVENTORY_NAME).sorted_by(1, false))
         .id();
 
     // Primitive 1: two independent HUD panels mounted into the two host slots.
@@ -256,14 +261,14 @@ pub fn spawn_view(commands: &mut Commands, application_resources: Vec<String>) -
             ClickWatchEntry::new(ADD_ITEM_BTN),
         ]));
 
-    // Primitive 2: seed a few inventory rows. Each is just an entity.
+    // Seed a few inventory rows. Each is just an entity in the list.
     for (name, qty) in [("Potion", 3), ("Sword", 1), ("Shield", 2), ("Gold", 50)] {
         commands.spawn((
             Item {
                 name: name.to_string(),
                 qty,
             },
-            ListedIn(view),
+            ListedIn(list),
         ));
     }
 
@@ -343,16 +348,17 @@ fn on_button_click(
     on: On<UiClicked>,
     mut huds: Query<&mut Health, With<UiPanel>>,
     mut commands: Commands,
-    view: Single<Entity, With<NoesisView>>,
+    list: Single<Entity, With<UiList>>,
 ) {
     if on.name == ADD_ITEM_BTN {
-        // The add-item button kept the default (view) target; spawn a new row.
+        // The add-item button kept the default (view) target; spawn a new row into
+        // the list entity.
         commands.spawn((
             Item {
                 name: "Elixir".to_string(),
                 qty: 9,
             },
-            ListedIn(*view),
+            ListedIn(*list),
         ));
         info!("add-item: spawned a new inventory row entity");
         return;

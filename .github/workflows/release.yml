@@ -26,8 +26,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: cargo test
-        run: cargo test --all-features
+      # The integration suites must run process-per-test (Noesis state is
+      # process-global and thread-affine); plain `cargo test` refuses by design.
+      # Mirrors ci.yml. See tests/README.md.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo nextest run
+        run: cargo nextest run --profile ci --all-targets --all-features
 
       # Publish the derive crate first; noesis_bevy depends on it. Skip if this
       # version is already on crates.io (the first release is published manually,

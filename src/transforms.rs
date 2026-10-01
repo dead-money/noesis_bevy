@@ -236,7 +236,10 @@ pub(crate) fn sync_transform_bridge(
         return;
     };
     for (entity, transform) in &views {
-        if transform.is_changed() || state.scene_rebuilt_this_frame(entity) {
+        if transform.is_changed()
+            || state.scene_rebuilt_this_frame(entity)
+            || state.panel_mounted_this_frame(entity)
+        {
             state.apply_transforms_for(entity, &transform.transforms);
         }
         let names: Vec<&str> = transform.transforms.keys().map(String::as_str).collect();
@@ -256,8 +259,16 @@ pub struct NoesisTransformPlugin;
 
 impl Plugin for NoesisTransformPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NoesisTransformChanged>()
-            .add_systems(PostUpdate, sync_transform_bridge.in_set(NoesisSet::Apply));
+        // `sync_transform_bridge` runs after `sync_panels` so a panel's
+        // `NoesisTransform` re-applies the same frame its fragment mounts (the
+        // bridge reads `panel_mounted_this_frame`, set by `sync_panels`); mirrors
+        // the focus bridge's ordering.
+        app.add_message::<NoesisTransformChanged>().add_systems(
+            PostUpdate,
+            sync_transform_bridge
+                .in_set(NoesisSet::Apply)
+                .after(crate::panel::sync_panels),
+        );
     }
 }
 

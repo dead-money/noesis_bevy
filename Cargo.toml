@@ -1,6 +1,6 @@
 [package]
 name = "noesis_bevy"
-version = "0.11.2"
+version = "0.15.1"
 edition = "2024"
 rust-version = "1.87"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
@@ -28,29 +28,40 @@ default = []
 # diagnostic; off by default so published consumers don't inherit Bevy's debug
 # overhead. Enable with `features = ["debug"]`.
 debug = ["bevy/debug"]
+# Live-edit UI: watch the files behind the registries and re-insert their bytes
+# on change, which the render pipeline turns into a view rebuild (including
+# transitive XAML `Source=` dependencies and image re-sizes). A development aid,
+# off by default. Pulls the `notify` crate (a watcher thread for XAML loaded off
+# the `assets/` root via `XamlRegistry::insert`) and Bevy's own `file_watcher`
+# (so `AssetServer`-loaded XAML/images/fonts refresh too). Enable with
+# `features = ["hot_reload"]`.
+hot_reload = ["dep:notify", "bevy/file_watcher"]
 
 [dependencies]
-bevy = "0.18"
-bevy_render = "0.18"
+bevy = "0.19"
+bevy_render = "0.19"
 bytemuck = { version = "1.25", features = ["derive"] }
 # The derive crate ships in this repo and releases in lockstep (path for local
 # dev, version for the published crate).
-noesis_bevy_derive = { path = "./derive", version = "0.11" }
-# The public crate from crates.io. This branch needs 0.11 (the ECS-UI FFI). Until
-# 0.11 is published, the `[patch.crates-io]` override below builds against the
-# sibling checkout; remove it once 0.11 is on crates.io (see RELEASING.md).
-noesis_runtime = "0.11"
+noesis_bevy_derive = { path = "./derive", version = "0.15" }
+# The public crate from crates.io. This branch needs 0.12 (set_source and
+# clear_binding). Until 0.12 is published, a local `[patch.crates-io]` override
+# can build against the sibling checkout (see RELEASING.md).
+noesis_runtime = "0.12"
 # Image decoding for the ImageBrush loader. Add formats here as scenes demand.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Insertion-ordered map: the entity-keyed list reconciler (Primitive 2) keeps its
 # row instances in collection order, so it needs index-positioned insert / remove /
 # move alongside O(1) Entity lookup.
 indexmap = "2"
+# Filesystem watcher backing the optional `hot_reload` feature. Only compiled
+# when that feature is on (dev builds); release consumers never pull it.
+notify = { version = "8", optional = true }
 thiserror = "2"
-# Pinned to match Bevy 0.18's transitive wgpu version. Cargo dedupes them into a
+# Pinned to match Bevy 0.19's transitive wgpu version. Cargo dedupes them into a
 # single crate, so RenderDevice traits remain interchangeable between this
 # crate's wgpu types and Bevy's.
-wgpu = "27.0.1"
+wgpu = "29.0.3"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -135,3 +146,19 @@ path = "examples/scoreboard.rs"
 [[example]]
 name = "ecs_ui"
 path = "examples/ecs_ui.rs"
+
+# Integration tests are consolidated into three suite binaries (audit R2): one
+# Bevy+Noesis link each instead of one per file. Run them under cargo-nextest so
+# every `#[test]` still gets its own process (Noesis state is process-global and
+# thread-affine). See tests/README.md.
+[[test]]
+name = "headless_suite"
+path = "tests/headless_suite/main.rs"
+
+[[test]]
+name = "wgpu_suite"
+path = "tests/wgpu_suite/main.rs"
+
+[[test]]
+name = "render_suite"
+path = "tests/render_suite/main.rs"

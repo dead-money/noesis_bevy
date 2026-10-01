@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
+use bevy::log::{warn, warn_once};
+
 use noesis_runtime::render_device::types::{
     Batch, DeviceCaps, SIZE_FOR_FORMAT, SamplerState, Shader, TextureFormat, Tile,
 };
@@ -100,12 +102,12 @@ pub struct WgpuRenderDevice {
     device: wgpu::Device,
     queue: wgpu::Queue,
 
-    vertex_buffer: wgpu::Buffer,
-    vertex_staging: Vec<u8>,
-    vertex_mapped_bytes: Option<u32>,
-    index_buffer: wgpu::Buffer,
-    index_staging: Vec<u8>,
-    index_mapped_bytes: Option<u32>,
+    // Dynamic geometry: one growable stream each for vertices and indices.
+    // Noesis fills a phase through repeated map/unmap cycles; each unmap
+    // appends at a running cursor so draws recorded earlier in the phase still
+    // read their own segment once the encoder submits (see `GeometryStream`).
+    vertex_stream: GeometryStream,
+    index_stream: GeometryStream,
 
     // Uniforms: ring-buffered with dynamic-offset bind groups so each batch
     // reads its own slice instead of racing on a single slot.
@@ -261,18 +263,18 @@ impl WgpuRenderDevice {
     #[must_use]
     #[allow(clippy::too_many_lines)] // wgpu setup is linear and hard to split usefully
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("noesis_runtime vertex stream"),
-            size: DYNAMIC_VB_SIZE,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("noesis_runtime index stream"),
-            size: DYNAMIC_IB_SIZE,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let vertex_stream = GeometryStream::new(
+            &device,
+            "noesis_runtime vertex stream",
+            DYNAMIC_VB_SIZE,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        );
+        let index_stream = GeometryStream::new(
+            &device,
+            "noesis_runtime index stream",
+            DYNAMIC_IB_SIZE,
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        );
 
         let uniform_alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment);
         let vs_ring = UniformRing::new(
@@ -516,12 +518,12 @@ impl WgpuRenderDevice {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("noesis_runtime pipeline layout"),
             bind_group_layouts: &[
-                &vs_uniform_bind_group_layout,
-                &ps_uniform_bind_group_layout,
-                &pattern_bind_group_layout,
-                &image_bind_group_layout,
+                Some(&vs_uniform_bind_group_layout),
+                Some(&ps_uniform_bind_group_layout),
+                Some(&pattern_bind_group_layout),
+                Some(&image_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipelines = PipelineCache::new(device.clone(), pipeline_layout, RT_COLOR_FORMAT);
@@ -529,12 +531,8 @@ impl WgpuRenderDevice {
         Self {
             device,
             queue,
-            vertex_buffer,
-            vertex_staging: vec![0; DYNAMIC_VB_SIZE as usize],
-            vertex_mapped_bytes: None,
-            index_buffer,
-            index_staging: vec![0; DYNAMIC_IB_SIZE as usize],
-            index_mapped_bytes: None,
+            vertex_stream,
+            index_stream,
             vs_ring,
             vs_uniform_bind_group,
             ps_ring,
@@ -906,6 +904,103 @@ impl UniformRing {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// GeometryStream: growable GPU buffer + CPU staging for one dynamic geometry
+// stream (vertices or indices). Noesis fills a phase's geometry through repeated
+// map/unmap cycles inside a single `begin_*_render` encoder; each `unmap`
+// appends its bytes at a running `cursor` instead of overwriting offset 0, so a
+// draw recorded earlier in the phase still reads its own segment once the
+// encoder is submitted. `draw_batch` adds `segment_base` — the base of the
+// segment the most recent `unmap` wrote — to the batch-relative offset. This is
+// the vertex/index analogue of `UniformRing`; reset alongside the rings at the
+// start of each phase.
+// ────────────────────────────────────────────────────────────────────────────
+
+struct GeometryStream {
+    buffer: wgpu::Buffer,
+    label: &'static str,
+    usage: wgpu::BufferUsages,
+    /// Scratch the current `map` hands to Noesis; uploaded to `buffer` at
+    /// `cursor` on `unmap`. Grown to fit the largest single map.
+    staging: Vec<u8>,
+    /// Bytes claimed by the in-flight `map`; `None` outside a map/unmap pair.
+    mapped_bytes: Option<u32>,
+    /// Byte offset for the next `unmap` within the phase. Reset to 0 by `reset`.
+    cursor: u64,
+    /// Base byte offset of the segment the most recent `unmap` wrote; added to
+    /// batch-relative offsets in `draw_batch`.
+    segment_base: u64,
+}
+
+impl GeometryStream {
+    fn new(
+        device: &wgpu::Device,
+        label: &'static str,
+        size: u64,
+        usage: wgpu::BufferUsages,
+    ) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage,
+            mapped_at_creation: false,
+        });
+        Self {
+            buffer,
+            label,
+            usage,
+            staging: vec![0u8; size as usize],
+            mapped_bytes: None,
+            cursor: 0,
+            segment_base: 0,
+        }
+    }
+
+    fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    fn segment_base(&self) -> u64 {
+        self.segment_base
+    }
+
+    fn reset(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn map(&mut self, bytes: u32) -> &mut [u8] {
+        assert!(self.mapped_bytes.is_none(), "map without unmap");
+        let len = bytes as usize;
+        if len > self.staging.len() {
+            self.staging.resize(len, 0);
+        }
+        self.mapped_bytes = Some(bytes);
+        &mut self.staging[..len]
+    }
+
+    fn unmap(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let bytes = self.mapped_bytes.take().expect("unmap without map");
+        let padded = round_up_to_4(bytes as usize) as u64;
+        // Grow when appending this segment would overflow. Draws recorded
+        // earlier this phase keep a reference to the old buffer through the
+        // encoder, and each draw only reads the segment its own `unmap` wrote,
+        // so the old bytes left uncopied in the previous buffer are never read
+        // again. Double for amortized O(1) growth.
+        if self.cursor + padded > self.buffer.size() {
+            let new_size = (self.cursor + padded).max(self.buffer.size() * 2);
+            self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(self.label),
+                size: new_size,
+                usage: self.usage,
+                mapped_at_creation: false,
+            });
+        }
+        self.segment_base = self.cursor;
+        queue.write_buffer(&self.buffer, self.cursor, &self.staging[..padded as usize]);
+        self.cursor += padded;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Noesis → wgpu format helpers
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -917,8 +1012,10 @@ const fn wgpu_format_for(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Rgba8 | TextureFormat::Rgbx8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
         // `TextureFormat` is `#[non_exhaustive]`; a format the SDK adds later
-        // defaults to RGBA8. Never panic here: this runs inside a Noesis FFI
-        // trampoline, where unwinding into C++ is UB.
+        // defaults to RGBA8. This runs inside a Noesis FFI trampoline (which
+        // would catch any unwind), but a benign default is preferable to a
+        // panic that leaves the frame half-mutated. Every raw-enum conversion
+        // on this path follows the same warn-and-default policy.
         _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
@@ -1057,7 +1154,14 @@ fn wgpu_wrap_mode(wrap_raw: u8) -> wgpu::AddressMode {
         0 | 1 => wgpu::AddressMode::ClampToEdge,
         2 => wgpu::AddressMode::Repeat,
         3..=5 => wgpu::AddressMode::MirrorRepeat,
-        other => panic!("unknown Noesis WrapMode raw value: {other}"),
+        // `WrapMode::Enum` is SDK-controlled and this runs inside a Noesis FFI
+        // trampoline; a value the SDK adds later warns and clamps rather than
+        // panics (the trampoline would contain the unwind, but leave the frame
+        // half-mutated — a benign default keeps the device alive).
+        other => {
+            warn_once!("unknown Noesis WrapMode raw value {other}; using ClampToEdge");
+            wgpu::AddressMode::ClampToEdge
+        }
     }
 }
 
@@ -1068,8 +1172,8 @@ fn build_sampler(device: &wgpu::Device, state: SamplerState) -> wgpu::Sampler {
         _ => wgpu::FilterMode::Linear,
     };
     let mipmap_filter = match state.mip_filter_raw() {
-        0 | 1 => wgpu::FilterMode::Nearest,
-        _ => wgpu::FilterMode::Linear,
+        0 | 1 => wgpu::MipmapFilterMode::Nearest,
+        _ => wgpu::MipmapFilterMode::Linear,
     };
     let lod_max = match state.mip_filter_raw() {
         0 => 0.25, // disabled: restrict to mip 0
@@ -1366,14 +1470,25 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn begin_offscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Idle,
-            "begin_offscreen_render while a frame phase is already active",
-        );
+        // begin_* is the frame's reset point. A contained panic in a prior
+        // frame's callback (the runtime trampolines catch_unwind, so control
+        // returns to Noesis with our phase half-mutated and an encoder possibly
+        // still open) would leave `phase` non-Idle; asserting here would re-trip
+        // every frame and wedge the device. Warn and re-sync instead — the
+        // resets below (including replacing `encoder`, which drops the stale
+        // one and its orphaned commands) restore a clean phase.
+        if self.phase != FramePhase::Idle {
+            warn!(
+                "begin_offscreen_render found phase {:?} (previous frame aborted \
+                 mid-callback); resetting",
+                self.phase,
+            );
+        }
         self.vs_ring.reset();
         self.ps_ring.reset();
         self.ps1_ring.reset();
+        self.vertex_stream.reset();
+        self.index_stream.reset();
         self.encoder = Some(
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1386,27 +1501,39 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn end_offscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Offscreen,
-            "end_offscreen_render without a matching begin_offscreen_render",
-        );
-        let encoder = self.encoder.take().expect("offscreen encoder missing");
-        self.queue.submit(Some(encoder.finish()));
+        // Submit whatever encoder is open and force Idle regardless of the
+        // incoming phase: a contained panic upstream could have skipped the
+        // matching begin, so warn rather than assert and leave the device in a
+        // clean state either way.
+        if self.phase != FramePhase::Offscreen {
+            warn!(
+                "end_offscreen_render found phase {:?}, expected Offscreen",
+                self.phase,
+            );
+        }
+        if let Some(encoder) = self.encoder.take() {
+            self.queue.submit(Some(encoder.finish()));
+        }
         self.phase = FramePhase::Idle;
         self.current_rt = None;
         self.current_tile = None;
     }
 
     fn begin_onscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Idle,
-            "begin_onscreen_render while a frame phase is already active",
-        );
+        // See `begin_offscreen_render`: re-sync a stuck phase rather than assert
+        // so one contained panic doesn't wedge the device.
+        if self.phase != FramePhase::Idle {
+            warn!(
+                "begin_onscreen_render found phase {:?} (previous frame aborted \
+                 mid-callback); resetting",
+                self.phase,
+            );
+        }
         self.vs_ring.reset();
         self.ps_ring.reset();
         self.ps1_ring.reset();
+        self.vertex_stream.reset();
+        self.index_stream.reset();
         self.encoder = Some(
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1418,13 +1545,17 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn end_onscreen_render(&mut self) {
-        assert_eq!(
-            self.phase,
-            FramePhase::Onscreen,
-            "end_onscreen_render without a matching begin_onscreen_render",
-        );
-        let encoder = self.encoder.take().expect("onscreen encoder missing");
-        self.queue.submit(Some(encoder.finish()));
+        // See `end_offscreen_render`: force a clean Idle state rather than
+        // assert on a phase a contained panic may have left inconsistent.
+        if self.phase != FramePhase::Onscreen {
+            warn!(
+                "end_onscreen_render found phase {:?}, expected Onscreen",
+                self.phase,
+            );
+        }
+        if let Some(encoder) = self.encoder.take() {
+            self.queue.submit(Some(encoder.finish()));
+        }
         self.phase = FramePhase::Idle;
     }
 
@@ -1470,38 +1601,16 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn map_vertices(&mut self, bytes: u32) -> &mut [u8] {
-        assert!(
-            self.vertex_mapped_bytes.is_none(),
-            "map_vertices without unmap_vertices"
-        );
-        self.vertex_mapped_bytes = Some(bytes);
-        &mut self.vertex_staging[..bytes as usize]
+        self.vertex_stream.map(bytes)
     }
     fn unmap_vertices(&mut self) {
-        let bytes = self
-            .vertex_mapped_bytes
-            .take()
-            .expect("unmap_vertices without map_vertices");
-        let padded = round_up_to_4(bytes as usize);
-        self.queue
-            .write_buffer(&self.vertex_buffer, 0, &self.vertex_staging[..padded]);
+        self.vertex_stream.unmap(&self.device, &self.queue);
     }
     fn map_indices(&mut self, bytes: u32) -> &mut [u8] {
-        assert!(
-            self.index_mapped_bytes.is_none(),
-            "map_indices without unmap_indices"
-        );
-        self.index_mapped_bytes = Some(bytes);
-        &mut self.index_staging[..bytes as usize]
+        self.index_stream.map(bytes)
     }
     fn unmap_indices(&mut self) {
-        let bytes = self
-            .index_mapped_bytes
-            .take()
-            .expect("unmap_indices without map_indices");
-        let padded = round_up_to_4(bytes as usize);
-        self.queue
-            .write_buffer(&self.index_buffer, 0, &self.index_staging[..padded]);
+        self.index_stream.unmap(&self.device, &self.queue);
     }
 
     fn draw_batch(&mut self, batch: &Batch) {
@@ -1579,10 +1688,13 @@ impl RenderDevice for WgpuRenderDevice {
             None
         };
 
+        // `batch.vertex_offset` / `start_index` are relative to the segment the
+        // most recent unmap wrote; add the segment base so this draw reads its
+        // own geometry rather than whichever segment landed last in the buffer.
         let stride = u64::from(SIZE_FOR_FORMAT[key.vertex_format as usize]);
-        let vertex_offset = u64::from(batch.vertex_offset);
+        let vertex_offset = self.vertex_stream.segment_base() + u64::from(batch.vertex_offset);
         let vertex_byte_count = u64::from(batch.num_vertices) * stride;
-        let index_byte_offset = u64::from(batch.start_index) * 2;
+        let index_byte_offset = self.index_stream.segment_base() + u64::from(batch.start_index) * 2;
         let index_byte_count = u64::from(batch.num_indices) * 2;
 
         // Resolve the color attachment view + optional scissor based on the
@@ -1624,8 +1736,8 @@ impl RenderDevice for WgpuRenderDevice {
         );
 
         let pipeline = self.pipelines.get(key);
-        let vertex_buffer = &self.vertex_buffer;
-        let index_buffer = &self.index_buffer;
+        let vertex_buffer = self.vertex_stream.buffer();
+        let index_buffer = self.index_stream.buffer();
         let vs_bg = &self.vs_uniform_bind_group;
         let ps_bg = &self.ps_uniform_bind_group;
         let pattern_bg = if let Some(slot) = pattern_slot {
@@ -1678,6 +1790,7 @@ impl RenderDevice for WgpuRenderDevice {
             depth_stencil_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         rpass.set_pipeline(pipeline);
         if has_stencil {

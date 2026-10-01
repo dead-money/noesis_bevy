@@ -54,6 +54,11 @@ pub struct NoesisDiagnostics {
     /// despawns, mirroring [`live_panels`](Self::live_panels) for the list
     /// primitive.
     pub live_lists: usize,
+    /// Number of live [`crate::NoesisBinding`] target entries (one per
+    /// `(view, x:Name, property)` a binding reconciles). Returns to 0 after every
+    /// binding component (or its owning view) is removed, mirroring
+    /// [`live_lists`](Self::live_lists) for the binding bridge.
+    pub live_bindings: usize,
     /// Wall-time of the previous frame's `NoesisSet::Apply` phase (every bridge's
     /// FFI push). `ZERO` until the first frame with a live view has run.
     pub apply_time: std::time::Duration,
@@ -105,14 +110,19 @@ impl Plugin for NoesisDiagnosticsPlugin {
 /// wants process lifetime anyway (the same reason `log::set_logger` never
 /// uninstalls), so leaking is the correct trade, not a workaround.
 fn install_error_routing() {
-    let guard = diagnostics::set_error_handler(|file, line, message, fatal| {
-        if fatal {
-            error!(target: "noesis", "{file}:{line}: {message}");
-        } else {
-            warn!(target: "noesis", "{file}:{line}: {message}");
-        }
+    // Guard against re-install: building several `App`s in one process (tests,
+    // editors) would otherwise leak — and stack — a handler each time.
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let guard = diagnostics::set_error_handler(|file, line, message, fatal| {
+            if fatal {
+                error!(target: "noesis", "{file}:{line}: {message}");
+            } else {
+                warn!(target: "noesis", "{file}:{line}: {message}");
+            }
+        });
+        std::mem::forget(guard);
     });
-    std::mem::forget(guard);
 }
 
 /// Pull the current allocator counters, FFI-hop tally, live-scene count and last
@@ -134,6 +144,7 @@ fn refresh_diagnostics(
         live_scenes: state.as_ref().map_or(0, |s| s.live_scene_count()),
         live_panels: state.as_ref().map_or(0, |s| s.live_panel_count()),
         live_lists: state.as_ref().map_or(0, |s| s.live_list_count()),
+        live_bindings: state.as_ref().map_or(0, |s| s.live_binding_count()),
         apply_time: timer.as_ref().map_or(std::time::Duration::ZERO, |t| t.last),
     };
     diag.set_if_neq(next);

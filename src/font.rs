@@ -9,11 +9,13 @@
 //!   folder URI (`"Fonts/"`) and a family name (`"Bitter"`). The folder
 //!   URI is what our scan-folder callback sees, and we need to report
 //!   every filename we've loaded for that folder.
-//! - `ExtractResource` mirrors the registry into the render world each
-//!   frame.
 //! - [`BevyFontProvider`] implements
 //!   [`noesis_runtime::font_provider::FontProvider`] against a
-//!   [`SharedFontMap`] that the plugin syncs from the registry.
+//!   [`SharedFontMap`] that the driving pipeline syncs from the registry each
+//!   frame.
+//!
+//! Registry, sync, and provider callbacks all run in the main world, on the
+//! one thread Noesis is pinned to.
 //!
 //! # How Noesis resolves `FontFamily="Fonts/#Bitter"`
 //!
@@ -35,7 +37,6 @@ use std::sync::{Arc, Mutex};
 
 use bevy::asset::{AssetApp, AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
-use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use noesis_runtime::font_provider::FontProvider;
 
@@ -47,7 +48,7 @@ use noesis_runtime::font_provider::FontProvider;
 /// `FreeType`; we never inspect the bytes on the Rust side.
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct FontAsset {
-    /// The whole font file, shared so cloning into the render world stays cheap.
+    /// The whole font file, shared so mirroring it into the provider map stays cheap.
     pub bytes: Arc<Vec<u8>>,
 }
 
@@ -84,14 +85,15 @@ impl AssetLoader for FontAssetLoader {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Flat (`folder_uri`, `filename`) → bytes map, populated by
-/// [`update_font_registry`] on `AssetEvent<FontAsset>`. Cloned into the
-/// render world via [`ExtractResource`]; the `Arc<Vec<u8>>` values make
-/// the clone cheap.
-#[derive(Resource, ExtractResource, Default, Clone)]
+/// [`update_font_registry`] on `AssetEvent<FontAsset>`. Synced into the
+/// provider's [`SharedFontMap`] each frame; the `Arc<Vec<u8>>` values make
+/// the sync a cheap handle copy.
+#[derive(Resource, Default, Clone)]
 pub struct FontRegistry {
-    /// `(folder_uri, filename)` → bytes. Folder URIs are stored *with* a
-    /// trailing slash (`"Fonts/"`), matching how Noesis hands them to us
-    /// in `ScanFolder`.
+    /// `(folder_uri, filename)` → bytes. Folder URIs are stored *without* a
+    /// trailing slash (`"Fonts"`, not `"Fonts/"`): [`split_folder_filename`]
+    /// strips it, and [`FontRegistry::insert`] normalizes it, so a bare
+    /// `get("Fonts", …)` always hits.
     pub(crate) entries: HashMap<(String, String), Arc<Vec<u8>>>,
 }
 
@@ -132,8 +134,13 @@ impl FontRegistry {
         filename: impl Into<String>,
         bytes: Arc<Vec<u8>>,
     ) {
-        self.entries
-            .insert((folder_uri.into(), filename.into()), bytes);
+        // Normalize away any trailing slash so `insert("Fonts/", …)` and
+        // `insert("Fonts", …)` share the key `get("Fonts", …)` looks up.
+        let mut folder = folder_uri.into();
+        while folder.ends_with('/') {
+            folder.pop();
+        }
+        self.entries.insert((folder, filename.into()), bytes);
     }
 }
 
@@ -172,6 +179,11 @@ pub fn update_font_registry(
     assets: Res<Assets<FontAsset>>,
     asset_server: Res<AssetServer>,
     mut registry: ResMut<FontRegistry>,
+    // `AssetId` → registry key, so removal arms can find the entry after the
+    // asset (and its path) are already gone: `get_path` returns `None` for a
+    // dropped asset, so keying off the live path here would leave stale
+    // entries and leaked byte buffers behind.
+    mut keys: Local<HashMap<AssetId<FontAsset>, (String, String)>>,
 ) {
     for event in events.read() {
         match *event {
@@ -182,17 +194,15 @@ pub fn update_font_registry(
                 let Some(asset) = assets.get(id) else {
                     continue;
                 };
-                let (folder, filename) = split_folder_filename(&path.to_string());
-                registry
-                    .entries
-                    .insert((folder, filename), Arc::clone(&asset.bytes));
+                let key = split_folder_filename(&path.to_string());
+                keys.insert(id, key.clone());
+                registry.entries.insert(key, Arc::clone(&asset.bytes));
             }
             AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
-                let Some(path) = asset_server.get_path(id) else {
+                let Some(key) = keys.remove(&id) else {
                     continue;
                 };
-                let (folder, filename) = split_folder_filename(&path.to_string());
-                registry.entries.remove(&(folder, filename));
+                registry.entries.remove(&key);
             }
             AssetEvent::LoadedWithDependencies { .. } => {}
         }
@@ -200,28 +210,25 @@ pub fn update_font_registry(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BevyFontProvider: the render-world FontProvider impl
+// BevyFontProvider: the FontProvider impl
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Shared `(folder, filename)` → bytes map. Render-world-only; the
-/// provider's boxed impl holds one Arc handle, a [`NoesisRenderState`]
-/// sibling holds another so a sync system can refresh the map from
-/// [`FontRegistry`] each frame.
-///
-/// [`NoesisRenderState`]: crate::render::NoesisRenderState
+/// Shared `(folder, filename)` → bytes map. The provider's boxed impl holds
+/// one Arc handle, `NoesisRenderState` holds another so the sync system can
+/// refresh the map from [`FontRegistry`] each frame.
 type FontMapEntries = HashMap<(String, String), Arc<Vec<u8>>>;
 
 /// Shared, mutable `(folder, filename)` → bytes map behind an `Arc<Mutex<…>>`.
 ///
-/// Lives in the render world. The [`BevyFontProvider`] reads it to answer
-/// Noesis's font scans, and a sync system refreshes it from the extracted
-/// [`FontRegistry`] each frame via [`SharedFontMap::sync_from`]. Cloning the
+/// The [`BevyFontProvider`] reads it to answer Noesis's font scans, and the
+/// sync system refreshes it from the [`FontRegistry`] each frame via
+/// [`SharedFontMap::sync_from`]. Both run on the main thread; cloning the
 /// handle shares the same underlying map.
 #[derive(Clone, Default)]
 pub struct SharedFontMap(pub(crate) Arc<Mutex<FontMapEntries>>);
 
 impl SharedFontMap {
-    /// Replace the map contents from an extracted [`FontRegistry`].
+    /// Replace the map contents from the [`FontRegistry`].
     ///
     /// # Panics
     ///
@@ -259,13 +266,34 @@ impl FontProvider for BevyFontProvider {
     }
 
     fn scan_folder(&mut self, folder_uri: &str, register: &mut dyn FnMut(&str)) {
-        let want = folder_basename(folder_uri);
         let guard = self.shared.0.lock().expect("SharedFontMap mutex poisoned");
-        let matches: Vec<String> = guard
+        // Prefer an exact folder match; only when none exists fall back to the
+        // final-segment ("basename") match that lets a rooted
+        // `FontFamily="Fonts/#Fam"` from `ui/x.xaml` (handed to us as
+        // `"ui/Fonts"`) resolve against a registry keyed by the bare `"Fonts"`.
+        let mut matches: Vec<String> = guard
             .keys()
-            .filter(|(folder, _)| folder_basename(folder) == want)
+            .filter(|(folder, _)| folder == folder_uri)
             .map(|(_, filename)| filename.clone())
             .collect();
+        if matches.is_empty() {
+            let want = folder_basename(folder_uri);
+            let mut folders = std::collections::BTreeSet::new();
+            matches = guard
+                .keys()
+                .filter(|(folder, _)| folder_basename(folder) == want)
+                .map(|(folder, filename)| {
+                    folders.insert(folder.as_str());
+                    filename.clone()
+                })
+                .collect();
+            if folders.len() > 1 {
+                warn!(
+                    "FontRegistry: folder \"{folder_uri}\" matches distinct registered folders \
+                     {folders:?} by final path segment; scan results may be unstable",
+                );
+            }
+        }
         drop(guard);
         for filename in &matches {
             register(filename);
@@ -273,13 +301,30 @@ impl FontProvider for BevyFontProvider {
     }
 
     fn open_font(&mut self, folder_uri: &str, filename: &str) -> Option<&[u8]> {
-        let want = folder_basename(folder_uri);
         let arc = {
-            let guard = self.shared.0.lock().ok()?;
-            guard
-                .iter()
-                .find(|((folder, name), _)| folder_basename(folder) == want && name == filename)
-                .map(|(_, bytes)| Arc::clone(bytes))?
+            let guard = self.shared.0.lock().expect("SharedFontMap mutex poisoned");
+            // Exact folder+filename match first; see `scan_folder` for why we
+            // fall back to final-segment matching.
+            if let Some(bytes) = guard.get(&(folder_uri.to_string(), filename.to_string())) {
+                Arc::clone(bytes)
+            } else {
+                let want = folder_basename(folder_uri);
+                let hits: Vec<&Arc<Vec<u8>>> = guard
+                    .iter()
+                    .filter(|((folder, name), _)| {
+                        folder_basename(folder) == want && name == filename
+                    })
+                    .map(|(_, bytes)| bytes)
+                    .collect();
+                if hits.len() > 1 {
+                    warn!(
+                        "FontRegistry: font \"{filename}\" in folder \"{folder_uri}\" matches {} \
+                         registered folders by final path segment; resolving arbitrarily",
+                        hits.len(),
+                    );
+                }
+                Arc::clone(hits.into_iter().next()?)
+            }
         };
         self.current = Some(arc);
         self.current.as_deref().map(Vec::as_slice)
@@ -291,8 +336,8 @@ impl FontProvider for BevyFontProvider {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Registers [`FontAsset`] + [`FontAssetLoader`], initializes
-/// [`FontRegistry`], and mirrors the registry into the render world.
-/// Noesis-side font provider registration happens in `NoesisRenderPlugin`.
+/// [`FontRegistry`], and keeps it current from asset events. Noesis-side font
+/// provider registration happens in `NoesisRenderPlugin`.
 pub struct FontAssetPlugin;
 
 impl Plugin for FontAssetPlugin {
@@ -300,8 +345,7 @@ impl Plugin for FontAssetPlugin {
         app.init_asset::<FontAsset>()
             .init_asset_loader::<FontAssetLoader>()
             .init_resource::<FontRegistry>()
-            .add_systems(Update, update_font_registry)
-            .add_plugins(ExtractResourcePlugin::<FontRegistry>::default());
+            .add_systems(Update, update_font_registry);
     }
 }
 
@@ -387,6 +431,42 @@ mod tests {
         assert_eq!(
             provider.open_font("ui/Fonts", "DSEG7Classic-Bold.ttf"),
             Some(&b"DSEG"[..])
+        );
+    }
+
+    #[test]
+    fn insert_normalizes_trailing_slash() {
+        let mut registry = FontRegistry::default();
+        registry.insert("Fonts/", "Bitter-Regular.ttf", Arc::new(b"bitter".to_vec()));
+        assert!(registry.get("Fonts", "Bitter-Regular.ttf").is_some());
+        assert!(registry.get("Fonts/", "Bitter-Regular.ttf").is_none());
+    }
+
+    #[test]
+    fn provider_prefers_exact_folder_over_basename_collision() {
+        // "ui/Fonts" and "hud/Fonts" share the basename "Fonts"; an exact
+        // request must resolve to its own folder, not whichever the HashMap
+        // happens to iterate first.
+        let shared = SharedFontMap::default();
+        {
+            let mut guard = shared.0.lock().unwrap();
+            guard.insert(
+                ("ui/Fonts".into(), "Panel.ttf".into()),
+                Arc::new(b"ui".to_vec()),
+            );
+            guard.insert(
+                ("hud/Fonts".into(), "Panel.ttf".into()),
+                Arc::new(b"hud".to_vec()),
+            );
+        }
+        let mut provider = BevyFontProvider::from_shared(shared);
+        assert_eq!(
+            provider.open_font("ui/Fonts", "Panel.ttf"),
+            Some(&b"ui"[..])
+        );
+        assert_eq!(
+            provider.open_font("hud/Fonts", "Panel.ttf"),
+            Some(&b"hud"[..])
         );
     }
 
