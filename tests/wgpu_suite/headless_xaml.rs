@@ -83,8 +83,7 @@ async fn run_test() {
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut render_device =
-        noesis_bevy::render_device::WgpuRenderDevice::new(device.clone(), queue.clone());
+    let mut render_device = noesis_wgpu::WgpuRenderDevice::new(device.clone(), queue.clone());
     render_device.set_onscreen_target(target_view, RT_SIZE, RT_SIZE);
 
     let registered_device = noesis_runtime::render_device::register(render_device);

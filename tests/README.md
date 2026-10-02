@@ -32,8 +32,9 @@ in a suite directory is one test module, declared in that suite's `main.rs`.
   (no renderer, no pipeline compilation), plus direct-Noesis unit tests.
   Driven by `common::run_until`, which steps `app.update()` until a predicate
   holds.
-- `wgpu_suite/`: direct-wgpu render tests and Noesis-on-wgpu render-device
-  tests. No Bevy app; each test requests its own wgpu device.
+- `wgpu_suite/`: Noesis views rendered on `noesis_wgpu`'s device, and the
+  compositing blit. No Bevy app; each test requests its own wgpu device. The
+  device's own GPU tests live in `noesis_wgpu`.
 - `render_suite/`: the few tests that need Bevy's real renderer from
   `DefaultPlugins`. Driven by `run_until`, then `common::settle`, which drains
   in-flight pipeline compiles before the app drops (dropping mid-compile

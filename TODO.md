@@ -1,7 +1,8 @@
 # TODO
 
 Open work on the wgpu render device, the compositing path, and the Bevy integration surface, roughly
-in order of likely need. `noesis_runtime` wraps almost the whole SDK, so most bridge work is Bevy glue
+in order of likely need. Render-device items (§1) land in `noesis_wgpu`, then reach this crate through
+its `release/0.1` line or a `noesis_wgpu` bump. `noesis_runtime` wraps almost the whole SDK, so most bridge work is Bevy glue
 over an existing primitive; items that need runtime work first are in §4.
 
 ## 1. Render

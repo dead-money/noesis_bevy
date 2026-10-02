@@ -6,7 +6,7 @@
 
 A Bevy 0.19 plugin that renders [Noesis GUI](https://www.noesisengine.com/) XAML-driven UI into your frame. Noesis draws the scene on Bevy's own GPU; the plugin composites the result onto a camera.
 
-It builds on the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which wraps the C++ SDK. All `unsafe` lives there. This crate has none of its own and sets `#![forbid(unsafe_code)]`.
+It builds on the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which wraps the C++ SDK, and draws through the render device in [`noesis_wgpu`](https://github.com/dead-money/noesis_wgpu). All `unsafe` lives in `noesis_runtime`. This crate has none of its own and sets `#![forbid(unsafe_code)]`.
 
 Built for Dead Money's own games and mostly written by AI agents under human direction.
 
@@ -216,7 +216,8 @@ For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view 
 | 0.18 | 0.10 – 0.12 |
 
 Each Bevy minor gets a new `noesis_bevy` minor. The crate pins `wgpu` to the
-version Bevy's renderer uses, so the render-device types are interchangeable.
+version Bevy's renderer uses, and uses the `noesis_wgpu` line built on that
+`wgpu` (0.1 for wgpu 29), so the render-device types are interchangeable.
 
 ## Setup
 

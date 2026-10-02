@@ -100,7 +100,6 @@ pub mod panel;
 pub mod plain_vm;
 pub mod reconcile;
 pub mod render;
-pub mod render_device;
 pub mod resources;
 pub mod routed_events;
 pub mod shapes;

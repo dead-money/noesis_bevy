@@ -34,9 +34,9 @@ bevy_render = "0.19"
 bytemuck = { version = "1.25", features = ["derive"] }
 # Released in lockstep from derive/.
 noesis_bevy_derive = { path = "./derive", version = "0.15" }
-# Needs 0.12.1 for `set_clip_points`. RELEASING.md covers building against an
-# unreleased runtime.
-noesis_runtime = "0.12"
+noesis_runtime = "0.13"
+# The render device. 0.1 is the wgpu 29 line Bevy 0.19 uses.
+noesis_wgpu = "0.1"
 # Image decoding for the image asset loader.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The list reconciler keeps rows in collection order with O(1) lookup by Entity.

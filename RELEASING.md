@@ -15,12 +15,15 @@ Only a self-hosted runner with the SDK (label `noesis-sdk`) can build the crate.
   same-repo PRs. Fork PRs are skipped. Tests run under `cargo nextest` (see
   `tests/README.md`).
 
-## `noesis_runtime` versions
+## `noesis_runtime` and `noesis_wgpu` versions
 
-`noesis_bevy` depends on the published `noesis_runtime`. To develop against an
-unreleased runtime, add a local `[patch.crates-io]` pointing at the sibling
-checkout and don't commit it. Publish the runtime before releasing anything
-that needs it.
+`noesis_bevy` depends on the published `noesis_runtime` and `noesis_wgpu`. To
+develop against an unreleased version, add a local `[patch.crates-io]` pointing
+at the sibling checkout and don't commit it. Publish those crates before
+releasing anything that needs them.
+
+`noesis_wgpu` keeps a release line per `wgpu` major. Use the line on the `wgpu`
+Bevy uses; its `release/0.N` branch takes the fixes this crate needs.
 
 ## Cutting a release
 

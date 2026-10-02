@@ -3567,6 +3567,7 @@ dependencies = [
  "indexmap",
  "noesis_bevy_derive",
  "noesis_runtime",
+ "noesis_wgpu",
  "notify",
  "pollster",
  "thiserror 2.0.18",
@@ -3586,11 +3587,22 @@ dependencies = [
 
 [[package]]
 name = "noesis_runtime"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38ae4c2d9eb792262a5bc29bcd74f2040b1ddff8d1e0b391e27345614476e6bf"
+checksum = "ae9ff99066e1516242e5bc348324c840108962a04b92259ccf6ae9cd9b9e8edd"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "noesis_wgpu"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54c4cb624c0dc2ad31a25be3afffa845032cf83376b8c131d8cdb0d391a52121"
+dependencies = [
+ "log",
+ "noesis_runtime",
+ "wgpu",
 ]
 
 [[package]]
