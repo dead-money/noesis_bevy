@@ -25,12 +25,6 @@ releasing anything that needs them.
 `noesis_wgpu` keeps a release line per `wgpu` major. Use the line on the `wgpu`
 Bevy uses; its `release/0.N` branch takes the fixes this crate needs.
 
-Right now `Cargo.toml` names both by path as well as version, because
-`noesis_runtime` 0.13 and `noesis_wgpu` 0.1 aren't published yet:
-`../noesis_runtime` and `../noesis_wgpu-0.1`, a worktree of `noesis_wgpu`'s
-`release/0.1` branch. CI can't build that; drop the paths once both are on
-crates.io.
-
 ## Cutting a release
 
 Requires [cargo-release](https://github.com/crate-ci/cargo-release), which

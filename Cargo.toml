@@ -34,12 +34,9 @@ bevy_render = "0.19"
 bytemuck = { version = "1.25", features = ["derive"] }
 # Released in lockstep from derive/.
 noesis_bevy_derive = { path = "./derive", version = "0.15" }
-# Same line as noesis_wgpu's. Path dependencies until noesis_runtime 0.13 and
-# noesis_wgpu 0.1 are on crates.io; see RELEASING.md.
-noesis_runtime = { path = "../noesis_runtime", version = "0.13" }
-# The render device. 0.1 is the wgpu 29 line Bevy 0.19 uses; ../noesis_wgpu-0.1
-# is a worktree of noesis_wgpu's release/0.1 branch.
-noesis_wgpu = { path = "../noesis_wgpu-0.1", version = "0.1" }
+noesis_runtime = "0.13"
+# The render device. 0.1 is the wgpu 29 line Bevy 0.19 uses.
+noesis_wgpu = "0.1"
 # Image decoding for the image asset loader.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The list reconciler keeps rows in collection order with O(1) lookup by Entity.
