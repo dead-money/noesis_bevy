@@ -21,6 +21,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       # The suites need process-per-test isolation; see tests/README.md.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
