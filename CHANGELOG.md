@@ -6,6 +6,8 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-09
+
 ### Changed
 
 - **Breaking:** targets Bevy 0.20 / wgpu 30, using `noesis_wgpu` 0.2.

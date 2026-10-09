@@ -1,6 +1,6 @@
 [package]
 name = "noesis_bevy"
-version = "0.15.1"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]

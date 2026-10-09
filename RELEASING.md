@@ -27,21 +27,22 @@ Bevy uses; its `release/0.N` branch takes the fixes this crate needs.
 
 ## Cutting a release
 
-Requires [cargo-release](https://github.com/crate-ci/cargo-release), which
-bumps only `noesis_bevy`. First, in a commit on `main`, bump `derive/Cargo.toml`
-to the new version, and the `noesis_bevy_derive` requirement in `Cargo.toml` if
-the minor changes. Then, with `main` clean and CI green (use `patch` for a
-patch release):
+`main` requires a pull request and passing checks, so prepare the release on
+a branch. Bump both package versions (`Cargo.toml` and `derive/Cargo.toml`)
+and the `noesis_bevy_derive` requirement if the minor changes. Refresh
+`Cargo.lock`, stamp the changelog with the version and date, update its compare
+links, and update the README's quick start and compatibility table.
+
+Open a pull request, wait for CI to pass, and merge it. From a clean, current
+`main`, tag the merged release commit (replace the version below as needed):
 
 ```sh
-cargo release minor --dry-run
-cargo release minor --execute
+git pull --ff-only
+git tag v0.16.0
+git push origin v0.16.0
 ```
 
-It bumps the version, stamps `CHANGELOG.md`, commits, tags `vX.Y.Z`, and
-pushes. It doesn't update the link references at the bottom of
-`CHANGELOG.md`: move the `[Unreleased]` link to the new tag and add the new
-version's compare link by hand. The tag triggers `release.yml` on the SDK
+The tag triggers `release.yml` on the SDK
 runner, which tests, then publishes `noesis_bevy_derive` and `noesis_bevy` in
 that order through crates.io Trusted Publishing. Afterward, check both crate
 pages and the docs.rs builds.
