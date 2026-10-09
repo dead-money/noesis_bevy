@@ -53,6 +53,7 @@ async fn run_test() {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         })
         .await
         .expect("no wgpu adapter");
@@ -170,7 +171,7 @@ async fn run_test() {
         .expect("readback recv")
         .expect("readback map");
 
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("readback buffer is mapped");
     let pixel = |x: u32, y: u32| -> [u8; 4] {
         let offset = (y * BYTES_PER_ROW + x * 4) as usize;
         [

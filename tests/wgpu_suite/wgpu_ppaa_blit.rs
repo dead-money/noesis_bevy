@@ -33,6 +33,7 @@ async fn gpu() -> Gpu {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         })
         .await
         .expect("no wgpu adapter available");
@@ -179,7 +180,7 @@ fn composite(gpu: &Gpu, src_pixels: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().expect("recv").expect("map");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("readback buffer is mapped");
 
     let mut out = [[0u8; 4]; 4];
     for (x, px) in out.iter_mut().enumerate() {

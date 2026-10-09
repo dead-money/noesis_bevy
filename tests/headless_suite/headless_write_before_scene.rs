@@ -68,10 +68,11 @@ fn write_set_before_scene_builds_still_lands() {
                 reg.insert("late.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
             }
             for ev in changed.read() {
-                if ev.name == TARGET && ev.property == "Text" {
-                    if let DpValue::Str(text) = &ev.value {
-                        observed_sys.lock().unwrap().push((*frame, text.clone()));
-                    }
+                if ev.name == TARGET
+                    && ev.property == "Text"
+                    && let DpValue::Str(text) = &ev.value
+                {
+                    observed_sys.lock().unwrap().push((*frame, text.clone()));
                 }
             }
         },

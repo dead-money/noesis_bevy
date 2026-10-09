@@ -156,7 +156,7 @@ impl NoesisLabelBaker {
     }
 }
 
-impl ExtractResource for NoesisLabelBaker {
+impl ExtractResource<RenderApp> for NoesisLabelBaker {
     type Source = NoesisLabelBaker;
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()

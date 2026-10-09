@@ -311,7 +311,9 @@ impl<D: RenderDevice> RenderDevice for RecordingDevice<D> {
 
 fn as_floats(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -643,6 +645,7 @@ async fn run_scenario(xaml: &[u8], opts: ScenarioOptions) -> (Vec<Op>, [u8; 4], 
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         })
         .await
         .expect("no wgpu adapter");
@@ -776,7 +779,7 @@ async fn run_scenario(xaml: &[u8], opts: ScenarioOptions) -> (Vec<Op>, [u8; 4], 
         .expect("readback recv")
         .expect("readback map");
 
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("readback buffer is mapped");
     let pixel = |x: u32, y: u32| -> [u8; 4] {
         let offset = (y * BYTES_PER_ROW + x * 4) as usize;
         [

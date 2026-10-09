@@ -83,6 +83,7 @@ async fn request_device() -> (wgpu::Device, wgpu::Queue) {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         })
         .await
         .expect("no wgpu adapter available for the headless Noesis test harness");

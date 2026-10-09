@@ -133,10 +133,10 @@ fn panel_entity_aggregates_isolates_and_reaps() {
 
             let (panel_a, panel_b) = entities_sys.lock().unwrap().expect("panels spawned");
 
-            if *frame == HEAL_AT {
-                if let Ok(mut hp) = healths.get_mut(panel_a) {
-                    hp.0 = 25.0;
-                }
+            if *frame == HEAL_AT
+                && let Ok(mut hp) = healths.get_mut(panel_a)
+            {
+                hp.0 = 25.0;
             }
 
             if *frame == DESPAWN_AT {

@@ -123,16 +123,16 @@ fn control_selection_marks_selected_and_emits_message() {
 
             // Select row 2 (C). The DP bridge targets the list's view (where the
             // scene lives), not the list entity.
-            if *frame == SELECT_AT {
-                if let Ok(list) = lists.single() {
-                    commands.entity(list.view).insert(
-                        NoesisDp::new().set_i32("Inv", "SelectedIndex", 2).watch(
-                            "Inv",
-                            "SelectedIndex",
-                            DpKind::I32,
-                        ),
-                    );
-                }
+            if *frame == SELECT_AT
+                && let Ok(list) = lists.single()
+            {
+                commands.entity(list.view).insert(
+                    NoesisDp::new().set_i32("Inv", "SelectedIndex", 2).watch(
+                        "Inv",
+                        "SelectedIndex",
+                        DpKind::I32,
+                    ),
+                );
             }
         },
     );

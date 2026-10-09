@@ -11,8 +11,8 @@ wgpu-backed `Noesis::RenderDevice`.
   expose the Noesis primitive in the runtime's C shim + Rust FFI, then add the Bevy glue
   here. `noesis_runtime` is ours and freely editable.
 - **The render device is `noesis_wgpu`.** Device and shader work happens in the sibling
-  `../noesis_wgpu`, also ours. This crate uses its wgpu 29 line, `release/0.1`; `main`
-  there is on a newer wgpu. Patch to a local checkout of that branch to develop against it.
+  `../noesis_wgpu`, also ours. This crate uses its 0.2 / wgpu 30 line.
+  Patch to a local checkout on that line to develop against it.
 - **SDK never in the repo.** It lives at `$NOESIS_SDK_DIR` (per-developer licensed); never
   commit any SDK content. `build.rs` panics when the env var is unset.
 

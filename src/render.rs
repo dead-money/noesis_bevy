@@ -5721,6 +5721,7 @@ fn prepare_noesis_blit(
 /// A `Camera2d` doesn't need this tag: its blit runs on every 2D view that
 /// has painted, between the main pass and post-processing.
 #[derive(Component, ExtractComponent, Clone, Copy, Default, Debug)]
+#[extract_app(RenderApp)]
 #[extract_component_sync_target(Self)]
 pub struct NoesisCamera;
 
@@ -5730,6 +5731,7 @@ pub struct NoesisCamera;
 /// render world, and the blit systems composite it. Cloning is cheap (both
 /// fields are Arc-backed `wgpu::TextureView`s).
 #[derive(Component, ExtractComponent, Clone)]
+#[extract_app(RenderApp)]
 #[extract_component_sync_target(Self)]
 pub struct NoesisIntermediate {
     /// `Rgba8Unorm` raw view, sampled when the target is plain `Rgba8Unorm`.
@@ -5971,7 +5973,7 @@ impl Plugin for NoesisRenderPlugin {
             .resource::<RenderDevice>()
             .wgpu_device()
             .clone();
-        let queue = (**render_app.world().resource::<RenderQueue>().0).clone();
+        let queue = (**render_app.world().resource::<RenderQueue>()).clone();
         app.insert_non_send(NoesisRenderState::new(device, queue));
     }
 }

@@ -209,10 +209,9 @@ pub(crate) fn sync_resources_bridge(
         &chain_uris,
         &wait_fonts,
         &wait_font_files,
-    ) {
-        if !resources.entries.is_empty() {
-            installed.write(NoesisResourcesInstalled { present });
-        }
+    ) && !resources.entries.is_empty()
+    {
+        installed.write(NoesisResourcesInstalled { present });
     }
 }
 

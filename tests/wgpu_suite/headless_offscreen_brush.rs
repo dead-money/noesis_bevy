@@ -435,6 +435,7 @@ async fn run_scenario(xaml: &[u8], ticks: u32) -> (Vec<Op>, [u8; 4], [u8; 4]) {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         })
         .await
         .expect("no wgpu adapter");
@@ -545,7 +546,7 @@ async fn run_scenario(xaml: &[u8], ticks: u32) -> (Vec<Op>, [u8; 4], [u8; 4]) {
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     receiver.recv().expect("readback recv").expect("map");
 
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("readback buffer is mapped");
     let pixel = |x: u32, y: u32| -> [u8; 4] {
         let offset = (y * BYTES_PER_ROW + x * 4) as usize;
         [

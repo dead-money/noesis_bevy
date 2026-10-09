@@ -6,14 +6,19 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-09
+
 ### Changed
 
+- **Breaking:** targets Bevy 0.20 / wgpu 30, using `noesis_wgpu` 0.2.
+  Bevy 0.19 users should stay on `noesis_bevy` 0.15. Requires Rust 1.97.1
+  or newer, matching Bevy 0.20.
 - **Breaking:** the wgpu render device moved to its own crate,
   [`noesis_wgpu`](https://github.com/dead-money/noesis_wgpu), and the
   `render_device` module is gone. Use `noesis_wgpu::WgpuRenderDevice` in its
   place; it renders the same, and its `test_set_forced_*` hooks gave way to
   `draw_batch_with`, which takes the batch's textures as handles. This crate
-  uses `noesis_wgpu` 0.1, the wgpu 29 line.
+  uses `noesis_wgpu` 0.2, the wgpu 30 line.
 - Requires `noesis_runtime` 0.13.
 
 ### Fixed
@@ -245,7 +250,8 @@ in a one-UI app, and a `NoesisView` auto-attaches the bridges so a value set bef
 the scene exists lands once it builds. The version starts at 0.10.0 to move in step
 with `noesis_runtime`.
 
-[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/dead-money/noesis_bevy/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/dead-money/noesis_bevy/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/dead-money/noesis_bevy/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/dead-money/noesis_bevy/compare/v0.14.0...v0.14.1
