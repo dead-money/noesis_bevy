@@ -62,21 +62,22 @@ fn write_without_spawning_the_bridge_survives() {
             *frame += 1;
 
             // Write before the scene exists, through the auto-attached bridges.
-            if *frame == WRITE_AT_FRAME {
-                if let Some((mut text, mut dp)) = writer.get_mut() {
-                    present_sys.store(true, Ordering::SeqCst);
-                    text.write(TARGET, WRITTEN);
-                    dp.observe(TARGET, "Text", DpKind::Str);
-                }
+            if *frame == WRITE_AT_FRAME
+                && let Some((mut text, mut dp)) = writer.get_mut()
+            {
+                present_sys.store(true, Ordering::SeqCst);
+                text.write(TARGET, WRITTEN);
+                dp.observe(TARGET, "Text", DpKind::Str);
             }
             if *frame == REGISTER_AT_FRAME {
                 reg.insert("late.xaml".to_string(), Arc::new(XAML.as_bytes().to_vec()));
             }
             for ev in changed.read() {
-                if ev.name == TARGET && ev.property == "Text" {
-                    if let DpValue::Str(text) = &ev.value {
-                        observed_sys.lock().unwrap().push((*frame, text.clone()));
-                    }
+                if ev.name == TARGET
+                    && ev.property == "Text"
+                    && let DpValue::Str(text) = &ev.value
+                {
+                    observed_sys.lock().unwrap().push((*frame, text.clone()));
                 }
             }
         },

@@ -137,10 +137,10 @@ fn named_button_event_retargets_to_panel() {
                 });
             }
             // Latest health per panel, refreshed every frame for the exit predicate.
-            if let Some((p1, p2)) = *panels_sys.lock().unwrap() {
-                if let (Ok(h1), Ok(h2)) = (healths.get(p1), healths.get(p2)) {
-                    *final_sys.lock().unwrap() = Some((h1.0, h2.0));
-                }
+            if let Some((p1, p2)) = *panels_sys.lock().unwrap()
+                && let (Ok(h1), Ok(h2)) = (healths.get(p1), healths.get(p2))
+            {
+                *final_sys.lock().unwrap() = Some((h1.0, h2.0));
             }
         },
     );

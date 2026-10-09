@@ -2,7 +2,7 @@
 name = "noesis_bevy"
 version = "0.15.1"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.97.1"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
 description = "Bevy plugin that drives the Noesis GUI Native SDK and renders its UIs into a Bevy frame via wgpu compositing."
 repository = "https://github.com/dead-money/noesis_bevy"
@@ -29,22 +29,22 @@ debug = ["bevy/debug"]
 hot_reload = ["dep:notify", "bevy/file_watcher"]
 
 [dependencies]
-bevy = "0.19"
-bevy_render = "0.19"
+bevy = "0.20"
+bevy_render = "0.20"
 bytemuck = { version = "1.25", features = ["derive"] }
 # Released in lockstep from derive/.
-noesis_bevy_derive = { path = "./derive", version = "0.15" }
+noesis_bevy_derive = { path = "./derive", version = "0.16" }
 noesis_runtime = "0.13"
-# The render device. 0.1 is the wgpu 29 line Bevy 0.19 uses.
-noesis_wgpu = "0.1"
+# The render device. 0.2 is the wgpu 30 line Bevy 0.20 uses.
+noesis_wgpu = "0.2"
 # Image decoding for the image asset loader.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The list reconciler keeps rows in collection order with O(1) lookup by Entity.
 indexmap = "2"
 notify = { version = "8", optional = true }
 thiserror = "2"
-# Must match Bevy 0.19's wgpu so Cargo unifies them and the types interoperate.
-wgpu = "29.0.3"
+# Must match Bevy 0.20's wgpu so Cargo unifies them and the types interoperate.
+wgpu = "30.0.1"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -73,10 +73,10 @@ fn removing_the_view_component_removes_the_published_intermediate() {
                 *had_before_sys.lock().unwrap() = intermediates.iter().next().is_some();
             }
             // Drop only the component; the entity (Camera2d + NoesisCamera) lives on.
-            if *frame == REMOVE_AT_FRAME {
-                if let Some(view) = *view_sys.lock().unwrap() {
-                    commands.entity(view).remove::<NoesisView>();
-                }
+            if *frame == REMOVE_AT_FRAME
+                && let Some(view) = *view_sys.lock().unwrap()
+            {
+                commands.entity(view).remove::<NoesisView>();
             }
             if *frame == CAPTURE_AFTER_AT {
                 *has_after_sys.lock().unwrap() = Some(intermediates.iter().next().is_some());

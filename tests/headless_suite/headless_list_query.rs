@@ -197,10 +197,10 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
             }
 
             // Mutate ONE row's non-order field: expect an updates-only op.
-            if *frame == UPDATE_AT {
-                if let Ok(mut row) = rows.get_mut(a) {
-                    row.label = "AA".into();
-                }
+            if *frame == UPDATE_AT
+                && let Ok(mut row) = rows.get_mut(a)
+            {
+                row.label = "AA".into();
             }
 
             // App-driven selection: select C.
@@ -217,23 +217,23 @@ fn list_reconciles_minimal_ops_and_keeps_selection() {
             }
 
             // Flip the sort: A,B,C -> C,B,A. Selection must survive the Move.
-            if *frame == REORDER_AT {
-                if let Ok(mut list) = lists.single_mut() {
-                    list.sort = Some(noesis_bevy::ListSort {
-                        field: 1,
-                        descending: true,
-                    });
-                }
+            if *frame == REORDER_AT
+                && let Ok(mut list) = lists.single_mut()
+            {
+                list.sort = Some(noesis_bevy::ListSort {
+                    field: 1,
+                    descending: true,
+                });
             }
             if *frame == REORDER_AT + 6 {
                 *sel_after_reorder_sys.lock().unwrap() = selected_q.iter().next();
             }
 
             // Remove a row (despawn): expect a removes op.
-            if *frame == REMOVE_AT {
-                if let Some((_a, b, _c)) = *entities_sys.lock().unwrap() {
-                    commands.entity(b).despawn();
-                }
+            if *frame == REMOVE_AT
+                && let Some((_a, b, _c)) = *entities_sys.lock().unwrap()
+            {
+                commands.entity(b).despawn();
             }
         },
     );

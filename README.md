@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/noesis_bevy.svg)](https://crates.io/crates/noesis_bevy)
 [![docs.rs](https://img.shields.io/docsrs/noesis_bevy)](https://docs.rs/noesis_bevy)
 
-A Bevy 0.19 plugin that renders [Noesis GUI](https://www.noesisengine.com/) XAML-driven UI into your frame. Noesis draws the scene on Bevy's own GPU; the plugin composites the result onto a camera.
+A Bevy plugin that renders [Noesis GUI](https://www.noesisengine.com/) XAML-driven UI into your frame. Noesis draws the scene on Bevy's own GPU; the plugin composites the result onto a camera. See [version compatibility](#version-compatibility) to choose a crate release for your Bevy version.
 
 It builds on the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which wraps the C++ SDK, and draws through the render device in [`noesis_wgpu`](https://github.com/dead-money/noesis_wgpu). All `unsafe` lives in `noesis_runtime`. This crate has none of its own and sets `#![forbid(unsafe_code)]`.
 
@@ -29,8 +29,8 @@ Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Withou
 
 ```toml
 [dependencies]
-bevy = "0.19"
-noesis_bevy = "0.15"
+bevy = "0.20"
+noesis_bevy = "0.16"
 ```
 
 It links the Noesis SDK at build time, so you need `NOESIS_SDK_DIR` set (see above) to compile.
@@ -210,14 +210,18 @@ For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view 
 
 ## Version compatibility
 
-| Bevy | noesis_bevy |
-|------|-------------|
-| 0.19 | 0.13 – 0.15 |
-| 0.18 | 0.10 – 0.12 |
+| Bevy | noesis_bevy | wgpu |
+|------|-------------|------|
+| 0.20 | 0.16 | 30 |
+| 0.19 | 0.13 – 0.15 | 29 |
+| 0.18 | 0.10 – 0.12 | 27 |
 
-Each Bevy minor gets a new `noesis_bevy` minor. The crate pins `wgpu` to the
-version Bevy's renderer uses, and uses the `noesis_wgpu` line built on that
-`wgpu` (0.1 for wgpu 29), so the render-device types are interchangeable.
+Bevy 0.20 support requires Rust 1.97.1 or newer.
+
+Each Bevy minor upgrade requires a new `noesis_bevy` minor. The crate uses the
+same `wgpu` major as Bevy's renderer and the corresponding `noesis_wgpu` line,
+so the render-device types are interchangeable. Bevy 0.20 uses `noesis_wgpu`
+0.2, the wgpu 30 line.
 
 ## Setup
 

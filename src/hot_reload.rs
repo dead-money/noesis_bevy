@@ -101,15 +101,15 @@ impl NoesisHotReload {
         };
 
         let mut inner = self.inner.lock().expect("NoesisHotReload mutex poisoned");
-        if inner.dirs.insert(parent.clone()) {
-            if let Err(err) = inner.watcher.watch(&parent, RecursiveMode::NonRecursive) {
-                warn!(
-                    "NoesisHotReload: failed to watch {}: {err}",
-                    parent.display()
-                );
-                inner.dirs.remove(&parent);
-                return;
-            }
+        if inner.dirs.insert(parent.clone())
+            && let Err(err) = inner.watcher.watch(&parent, RecursiveMode::NonRecursive)
+        {
+            warn!(
+                "NoesisHotReload: failed to watch {}: {err}",
+                parent.display()
+            );
+            inner.dirs.remove(&parent);
+            return;
         }
         inner.files.insert(canonical, uri);
     }

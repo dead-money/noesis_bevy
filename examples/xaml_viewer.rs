@@ -476,10 +476,10 @@ fn viewer_controls(
 #[allow(clippy::needless_pass_by_value)]
 fn apply_scene_changes(viewer: Res<Viewer>, mut view: NoesisUi<&mut NoesisView>) {
     let desired = &viewer.scenes[viewer.current].uri;
-    if let Some(mut scene) = view.get_mut() {
-        if scene.xaml_uri != *desired {
-            scene.xaml_uri = desired.clone();
-        }
+    if let Some(mut scene) = view.get_mut()
+        && scene.xaml_uri != *desired
+    {
+        scene.xaml_uri = desired.clone();
     }
 }
 

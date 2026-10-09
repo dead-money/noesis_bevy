@@ -112,7 +112,7 @@ fn premultiply_alpha(bytes: &mut [u8]) {
         "premultiply_alpha expects RGBA8: len = {}",
         bytes.len()
     );
-    for chunk in bytes.chunks_exact_mut(4) {
+    for chunk in bytes.as_chunks_mut::<4>().0 {
         let a = u32::from(chunk[3]);
         if a == 255 {
             continue;
