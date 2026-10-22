@@ -12,6 +12,10 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # The SDK jobs (all-features clippy and tests, and crates.io releases) run in
+  # the private dead-money/noesis-ci repo, because the self-hosted SDK runner
+  # takes no jobs from public repos. See RELEASING.md.
+
   # Runs everywhere, including fork PRs. No SDK needed.
   fmt:
     name: fmt
@@ -54,41 +58,3 @@ jobs:
 
       - name: cargo doc
         run: cargo doc --no-deps
-
-  # Needs the Noesis SDK, which only the self-hosted runner has. Never run
-  # fork-PR code there.
-  build-test:
-    name: build • clippy • test
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, noesis-sdk]
-    env:
-      # The runner service has no login session, and winit's Wayland probe
-      # errors without XDG_RUNTIME_DIR. Any writable path works.
-      XDG_RUNTIME_DIR: /tmp
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          # Keep target/ between runs for fast incremental builds.
-          clean: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      # Keeps the examples compiling; nextest builds and runs the suites.
-      - name: cargo build
-        run: cargo build --all-targets --all-features
-
-      # The suites need process-per-test isolation; see tests/README.md.
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - name: cargo nextest run
-        run: cargo nextest run --profile ci --all-targets --all-features
