@@ -1,6 +1,6 @@
 # cargo-release: bumps noesis_bevy, stamps CHANGELOG.md, commits, tags vX.Y.Z,
-# and pushes. Bump derive/ first (see RELEASING.md). The tag triggers
-# release.yml, which publishes; nothing publishes from here.
+# and pushes. Bump derive/ first (see RELEASING.md). The tag triggers the
+# release in dead-money/noesis-ci; nothing publishes from here.
 
 publish = false
 tag = true

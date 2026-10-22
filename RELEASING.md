@@ -6,14 +6,19 @@ through `noesis_runtime`.
 
 ## CI
 
-Only a self-hosted runner with the SDK (label `noesis-sdk`) can build the crate.
+Only a self-hosted runner with the SDK can build the crate.
 
 - `fmt` and `doc` run on hosted runners for every push and PR, including
   forks. `doc` sets `DOCS_RS=1`, which makes the build scripts skip the native
   build.
-- `build • clippy • test` runs on the SDK runner for pushes to `main` and
-  same-repo PRs. Fork PRs are skipped. Tests run under `cargo nextest` (see
-  `tests/README.md`).
+
+The SDK jobs run in the private
+[`dead-money/noesis-ci`](https://github.com/dead-money/noesis-ci) repo on the
+self-hosted runner (label `noesis-sdk`), which takes no jobs from public repos.
+Every 15 minutes it polls this repo and runs clippy and the
+tests (under `cargo nextest`, see `tests/README.md`) on each new `main` commit,
+and the release for each new `v*` tag. Results show in that repo's Actions tab,
+not as checks here, so PRs merge on the hosted checks alone.
 
 ## `noesis_runtime` and `noesis_wgpu` versions
 
@@ -42,8 +47,8 @@ git tag v0.16.0
 git push origin v0.16.0
 ```
 
-The tag triggers `release.yml` on the SDK
-runner, which tests, then publishes `noesis_bevy_derive` and `noesis_bevy` in
+Within 15 minutes `dead-money/noesis-ci` notices
+the tag and runs its `release.yml` on the SDK runner, which tests, then publishes `noesis_bevy_derive` and `noesis_bevy` in
 that order through crates.io Trusted Publishing. Afterward, check both crate
 pages and the docs.rs builds.
 
