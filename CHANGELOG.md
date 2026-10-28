@@ -6,6 +6,15 @@ pre-1.0, any `0.x` release may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-28
+
+### Changed
+
+- **Breaking:** targets Noesis Native SDK 4.0.1 (r18228), `noesis_runtime` 0.14
+  and `noesis_wgpu` 0.3. Bevy remains 0.20 and wgpu remains 30.
+- The Scoreboard example loads the 4.0.1 MainPage asset and binds its team selection.
+- The README compatibility table identifies the Noesis SDK for each crate line.
+
 ## [0.16.0] - 2026-10-09
 
 ### Changed
@@ -250,7 +259,8 @@ in a one-UI app, and a `NoesisView` auto-attaches the bridges so a value set bef
 the scene exists lands once it builds. The version starts at 0.10.0 to move in step
 with `noesis_runtime`.
 
-[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/dead-money/noesis_bevy/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/dead-money/noesis_bevy/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/dead-money/noesis_bevy/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/dead-money/noesis_bevy/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/dead-money/noesis_bevy/compare/v0.14.1...v0.15.0

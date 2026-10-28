@@ -37,8 +37,6 @@ fn scoreboard_example_binds_players_and_selected_team() {
     let view_entity: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
 
     let mut app = headless_app();
-    // `<Window>` root needs the content-host stand-in to parse.
-    app.add_plugins(noesis_bevy::NoesisWindowCompatPlugin);
 
     let view_startup = Arc::clone(&view_entity);
     app.add_systems(
