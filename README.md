@@ -8,8 +8,6 @@ A Bevy plugin that renders [Noesis GUI](https://www.noesisengine.com/) XAML-driv
 
 It builds on the FFI crate [`noesis_runtime`](https://github.com/dead-money/noesis_runtime), which wraps the C++ SDK, and draws through the render device in [`noesis_wgpu`](https://github.com/dead-money/noesis_wgpu). All `unsafe` lives in `noesis_runtime`. This crate has none of its own and sets `#![forbid(unsafe_code)]`.
 
-Built for Dead Money's own games and mostly written by AI agents under human direction.
-
 <p align="center">
   <img src="docs/scoreboard.png" alt="Noesis Scoreboard sample rendered in Bevy" width="820">
 </p>
@@ -19,7 +17,7 @@ Built for Dead Money's own games and mostly written by AI agents under human dir
 
 This crate links against the [Noesis Native SDK](https://www.noesisengine.com/), closed-source commercial software we don't redistribute. Buy it separately (Indie tier or higher) and point `NOESIS_SDK_DIR` at your install; the build links against it from there.
 
-This release targets **Noesis Native SDK 3.2.13** and is compiled against that version's headers, so a different SDK version may not link. Match it unless you've verified a newer one.
+This release targets **Noesis Native SDK 4.0.1 (r18228)** through `noesis_runtime` 0.14 and `noesis_wgpu` 0.3.
 
 Supported targets are Linux (`x86_64`, `aarch64`) and Windows (`x86_64-pc-windows-msvc`). Linux is the primary target; Windows builds but isn't covered by CI.
 
@@ -30,7 +28,7 @@ Set `NOESIS_LICENSE_NAME` and `NOESIS_LICENSE_KEY` to apply your license. Withou
 ```toml
 [dependencies]
 bevy = "0.20"
-noesis_bevy = "0.16"
+noesis_bevy = "0.17"
 ```
 
 It links the Noesis SDK at build time, so you need `NOESIS_SDK_DIR` set (see above) to compile.
@@ -210,24 +208,27 @@ For finer control, three lower-level bridges sit underneath: `NoesisVm` (a view 
 
 ## Version compatibility
 
-| Bevy | noesis_bevy | wgpu |
-|------|-------------|------|
-| 0.20 | 0.16 | 30 |
-| 0.19 | 0.13 – 0.15 | 29 |
-| 0.18 | 0.10 – 0.12 | 27 |
+| Bevy | noesis_bevy | Noesis Native SDK | wgpu |
+|------|-------------|-------------------|------|
+| 0.20 | 0.17 | 4.0.1 (r18228) | 30 |
+| 0.20 | 0.16 | 3.2.13 (r17073) | 30 |
+| 0.19 | 0.13 – 0.15 | 3.2.13 (r17073) | 29 |
+| 0.18 | 0.10 – 0.12 | 3.2.13 (r17073) | 27 |
 
 Bevy 0.20 support requires Rust 1.97.1 or newer.
 
-Each Bevy minor upgrade requires a new `noesis_bevy` minor. The crate uses the
+Each Bevy minor upgrade or Noesis ABI change requires a new `noesis_bevy` minor. The crate uses the
 same `wgpu` major as Bevy's renderer and the corresponding `noesis_wgpu` line,
 so the render-device types are interchangeable. Bevy 0.20 uses `noesis_wgpu`
-0.2, the wgpu 30 line.
+0.3 with Noesis 4.0.1, or 0.2 with Noesis 3.2.13; both use wgpu 30.
 
 ## Setup
 
+The 4.0.1 download retains `4.0.0` in its archive filename.
+
 ```sh
-unzip NoesisGUI-NativeSDK-linux-3.2.13-Indie.zip -d ~/sdks/noesis-3.2.13
-export NOESIS_SDK_DIR=~/sdks/noesis-3.2.13
+unzip NoesisGUI-NativeSDK-linux-4.0.0-Indie.zip -d ~/sdks/noesis-4.0.1
+export NOESIS_SDK_DIR=~/sdks/noesis-4.0.1
 export LD_LIBRARY_PATH=$NOESIS_SDK_DIR/Bin/linux_x86_64:$LD_LIBRARY_PATH
 ```
 

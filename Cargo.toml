@@ -1,6 +1,6 @@
 [package]
 name = "noesis_bevy"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.97.1"
 authors = ["Brandon Reinhart <brandon@deadmoney.gg>"]
@@ -33,10 +33,10 @@ bevy = "0.20"
 bevy_render = "0.20"
 bytemuck = { version = "1.25", features = ["derive"] }
 # Released in lockstep from derive/.
-noesis_bevy_derive = { path = "./derive", version = "0.16" }
-noesis_runtime = "0.13"
-# The render device. 0.2 is the wgpu 30 line Bevy 0.20 uses.
-noesis_wgpu = "0.2"
+noesis_bevy_derive = { path = "./derive", version = "0.17" }
+noesis_runtime = "0.14"
+# The render device. 0.3 uses Noesis 4.0.1 and wgpu 30 for Bevy 0.20.
+noesis_wgpu = "0.3"
 # Image decoding for the image asset loader.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The list reconciler keeps rows in collection order with O(1) lookup by Entity.

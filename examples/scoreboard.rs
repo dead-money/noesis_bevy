@@ -1,8 +1,8 @@
 //! Port of the Noesis SDK Scoreboard sample
 //! (`$NOESIS_SDK_DIR/Src/Packages/Samples/Scoreboard`).
 //!
-//! This example renders the sample's own UI unmodified. Its `MainWindow.xaml` and
-//! two fonts are read at runtime from `$NOESIS_SDK_DIR`, not vendored: the emblem
+//! This example loads the sample UI and binds team selection to the game model.
+//! Its `MainPage.xaml` and two fonts are read from `$NOESIS_SDK_DIR`: the emblem
 //! geometries, brushes, `ComboBox`/`ScrollViewer` templates, the per-player
 //! `DataTemplate` with its `DataTrigger`s, and the `b:Interaction` behaviors are
 //! all the SDK's XAML.
@@ -47,7 +47,7 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use noesis_bevy::classes::PropType;
 use noesis_bevy::{
     DpKind, FontRegistry, NoesisCamera, NoesisDp, NoesisItems, NoesisPlugin, NoesisView, NoesisVm,
-    NoesisWindowCompatPlugin, ObjectRow, ViewModelDef, XamlRegistry,
+    ObjectRow, ViewModelDef, XamlRegistry,
 };
 
 /// View and window width in pixels. The sample sets no window size; its
@@ -58,7 +58,7 @@ pub const VIEW_W: u32 = 1920;
 pub const VIEW_H: u32 = 1080;
 
 /// URI the sample XAML is registered under in [`XamlRegistry`].
-pub const SCOREBOARD_URI: &str = "scoreboard/MainWindow.xaml";
+pub const SCOREBOARD_URI: &str = "scoreboard/MainPage.xaml";
 
 /// `x:Name` of the per-player `ItemsControl`, filled with bindable object rows.
 pub const PLAYERS_NAME: &str = "Players";
@@ -249,7 +249,7 @@ pub fn sample_data_dir() -> Option<PathBuf> {
     Some(PathBuf::from(sdk).join("Src/Packages/Samples/Scoreboard/Data"))
 }
 
-/// Reads the sample's `MainWindow.xaml` and its two fonts from the SDK and
+/// Reads the sample's `MainPage.xaml` and its two fonts from the SDK and
 /// registers them. Returns `false` (with a warning) when `$NOESIS_SDK_DIR` is
 /// unset or the XAML can't be read; callers should then skip spawning. A missing
 /// font only warns.
@@ -260,7 +260,7 @@ pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
         return false;
     };
 
-    let xaml_path = data.join("MainWindow.xaml");
+    let xaml_path = data.join("MainPage.xaml");
     let bytes = match std::fs::read(&xaml_path) {
         Ok(b) => b,
         Err(err) => {
@@ -271,7 +271,16 @@ pub fn stage_assets(xaml: &mut XamlRegistry, fonts: &mut FontRegistry) -> bool {
             return false;
         }
     };
-    xaml.insert(SCOREBOARD_URI.to_string(), Arc::new(bytes));
+    let Ok(source) = String::from_utf8(bytes) else {
+        warn!("scoreboard: sample XAML is not UTF-8");
+        return false;
+    };
+    // The SDK sample starts at index zero; this port drives it from the view model.
+    let source = source.replace(
+        "SelectedIndex=\"0\"",
+        "SelectedIndex=\"{Binding SelectedTeam}\"",
+    );
+    xaml.insert(SCOREBOARD_URI.to_string(), Arc::new(source.into_bytes()));
 
     // Family names inside the files: "Cheboygan" (Cheboyga.ttf) and "PerryGothic"
     // (PERRYGOT.TTF), which the XAML's FontFamily references name.
@@ -339,24 +348,18 @@ pub fn spawn_scoreboard(commands: &mut Commands) -> Entity {
         .id()
 }
 
-/// Adds [`NoesisPlugin`] and [`NoesisWindowCompatPlugin`], and a startup system
-/// that stages the SDK assets and spawns the view. Shared by `main` and the
-/// headless test.
+/// Adds [`NoesisPlugin`] and stages the SDK assets before spawning the view.
 pub fn configure_scoreboard(app: &mut App) {
-    app.add_plugins(NoesisPlugin::default())
-        // The sample's root is a `<Window>`, an App-framework type the core runtime
-        // lacks; this registers a stand-in so the XAML parses unmodified.
-        .add_plugins(NoesisWindowCompatPlugin)
-        .add_systems(
-            Startup,
-            |mut commands: Commands,
-             mut xaml: ResMut<XamlRegistry>,
-             mut fonts: ResMut<FontRegistry>| {
-                if stage_assets(&mut xaml, &mut fonts) {
-                    spawn_scoreboard(&mut commands);
-                }
-            },
-        );
+    app.add_plugins(NoesisPlugin::default()).add_systems(
+        Startup,
+        |mut commands: Commands,
+         mut xaml: ResMut<XamlRegistry>,
+         mut fonts: ResMut<FontRegistry>| {
+            if stage_assets(&mut xaml, &mut fonts) {
+                spawn_scoreboard(&mut commands);
+            }
+        },
+    );
 }
 
 /// Headless screenshot driver: when `NOESIS_VIEWER_EXIT_AFTER` is set, waits
